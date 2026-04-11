@@ -177,10 +177,153 @@ fn run_list(cli: &Cli, _args: &ListArgs) -> Result<()> {
     Ok(())
 }
 
-fn run_info(_cli: &Cli, _args: &InfoArgs) -> Result<()> {
-    Err(Error::NotImplemented {
-        command: "info".to_string(),
-    })
+fn run_info(cli: &Cli, args: &InfoArgs) -> Result<()> {
+    let git = GitCli::new();
+
+    let ctx = context::resolve_context(
+        &git,
+        cli.source.as_deref(),
+        cli.dest.as_deref(),
+        cli.directory.as_deref(),
+        CommandKind::Info,
+    )?;
+
+    // Normalize all input paths to repo-relative
+    let mut rel_paths = Vec::new();
+    for path in &args.paths {
+        let rp = crate::path::RepoRelPath::normalize(path, &ctx.source_root)?;
+        rel_paths.push(rp);
+    }
+
+    // Check tracked status for all paths
+    let tracked_set = git.tracked_paths(&ctx.source_root, &rel_paths)?;
+
+    // Check ignore status for untracked paths
+    let untracked: Vec<_> = rel_paths
+        .iter()
+        .filter(|p| !tracked_set.contains(*p))
+        .cloned()
+        .collect();
+    let ignore_results = git.check_ignore(&ctx.source_root, &untracked)?;
+
+    // Build a map from path to ignore info
+    let mut ignore_map = std::collections::HashMap::new();
+    for record in &ignore_results {
+        ignore_map.insert(record.path.as_str().to_string(), record);
+    }
+
+    // Print info for each path
+    for rp in &rel_paths {
+        let abs_path = rp.to_path(&ctx.source_root);
+        let source_exists = abs_path.exists();
+        let source_kind = if !source_exists {
+            "missing"
+        } else if abs_path.is_file() {
+            "file"
+        } else if abs_path.is_dir() {
+            "directory"
+        } else if abs_path.is_symlink() {
+            "symlink"
+        } else {
+            "other"
+        };
+
+        let is_tracked = tracked_set.contains(rp);
+
+        // Git ignore status
+        let gitignore_str = if is_tracked {
+            "tracked".to_string()
+        } else if let Some(record) = ignore_map.get(rp.as_str()) {
+            if let Some(ref info) = record.match_info {
+                format!(
+                    "ignored ({}:{}: {})",
+                    info.source_file.display(),
+                    info.line,
+                    info.pattern
+                )
+            } else {
+                "not ignored".to_string()
+            }
+        } else {
+            "not ignored".to_string()
+        };
+
+        // Worktreeinclude status
+        let wti = worktreeinclude::explain(
+            &ctx.source_root,
+            rp.as_str(),
+            abs_path.is_dir(),
+            ctx.core_ignore_case,
+        );
+        let wti_str = match &wti {
+            crate::model::WorktreeincludeStatus::Included {
+                file,
+                line,
+                pattern,
+            } => format!("included ({}:{}: {})", file.display(), line, pattern),
+            crate::model::WorktreeincludeStatus::ExcludedByNegation {
+                file,
+                line,
+                pattern,
+            } => format!("excluded ({}:{}: {})", file.display(), line, pattern),
+            crate::model::WorktreeincludeStatus::NoMatch => "no match".to_string(),
+        };
+
+        // Eligibility
+        let is_ignored = !is_tracked
+            && ignore_map
+                .get(rp.as_str())
+                .map(|r| r.match_info.is_some())
+                .unwrap_or(false);
+        let is_included = matches!(wti, crate::model::WorktreeincludeStatus::Included { .. });
+        let eligible =
+            source_exists && abs_path.is_file() && !is_tracked && is_ignored && is_included;
+
+        println!("path: {rp}");
+        println!(
+            "source_exists: {}",
+            if source_exists { "yes" } else { "no" }
+        );
+        println!("source_kind: {source_kind}");
+        println!("tracked: {}", if is_tracked { "yes" } else { "no" });
+        println!("gitignore: {gitignore_str}");
+        println!("worktreeinclude: {wti_str}");
+        println!("eligible_to_copy: {}", if eligible { "yes" } else { "no" });
+
+        // Destination info if available
+        if let Some(ref dest_root) = ctx.dest_root {
+            let dest_path = rp.to_path(dest_root);
+            if dest_path.exists() {
+                if dest_path.is_file() {
+                    // Check if identical
+                    if source_exists && abs_path.is_file() {
+                        let src_bytes = std::fs::read(&abs_path).ok();
+                        let dst_bytes = std::fs::read(&dest_path).ok();
+                        if src_bytes == dst_bytes {
+                            println!("destination: up-to-date");
+                            println!("planned_action: no-op");
+                        } else {
+                            println!("destination: exists (differs)");
+                            println!("planned_action: skip (conflict)");
+                        }
+                    } else {
+                        println!("destination: exists");
+                    }
+                } else {
+                    println!("destination: exists (not a file)");
+                    println!("planned_action: skip (type conflict)");
+                }
+            } else {
+                println!("destination: missing");
+                if eligible {
+                    println!("planned_action: copy");
+                }
+            }
+        }
+        println!();
+    }
+
+    Ok(())
 }
 
 fn run_validate(cli: &Cli, _args: &ValidateArgs) -> Result<()> {
