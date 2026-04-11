@@ -55,9 +55,15 @@ pub fn explain(
             Err(_) => continue,
         };
 
-        if let Some(result) =
-            evaluate_file(&wti_path, dir, &content, rel_path, is_dir, case_insensitive)
-        {
+        if let Some(result) = evaluate_file(
+            &wti_path,
+            dir,
+            &content,
+            rel_path,
+            is_dir,
+            case_insensitive,
+            repo_root,
+        ) {
             last_result = result;
         }
     }
@@ -67,8 +73,12 @@ pub fn explain(
 
 /// Evaluate a single `.worktreeinclude` file against a path.
 ///
-/// Returns `Some(status)` if any pattern in the file matches, `None` otherwise.
-/// Within the file, last-match-wins.
+/// Builds a combined matcher from all patterns in the file, evaluates with
+/// Git-style last-match-wins semantics, and enforces the Git negation caveat:
+/// a negation pattern cannot de-select a file whose parent directory is
+/// already selected by an earlier pattern.
+///
+/// Returns `Some(status)` if any pattern matches, `None` otherwise.
 fn evaluate_file(
     file_path: &Path,
     file_dir: &Path,
@@ -76,61 +86,110 @@ fn evaluate_file(
     rel_path: &str,
     is_dir: bool,
     case_insensitive: bool,
+    repo_root: &Path,
 ) -> Option<WorktreeincludeStatus> {
-    let mut last_match: Option<WorktreeincludeStatus> = None;
+    // Build a single combined matcher for the whole file, tracking line info
+    // for each added pattern so we can report provenance.
+    let mut builder = GitignoreBuilder::new(file_dir);
+    if case_insensitive {
+        let _ = builder.case_insensitive(true);
+    }
+
+    // line_info[i] corresponds to the i-th glob added to the builder.
+    let mut line_info: Vec<(usize, String)> = Vec::new();
 
     for (line_num_0, line_text) in content.lines().enumerate() {
         let line_1based = line_num_0 + 1;
         let trimmed = line_text.trim();
 
-        // Skip empty lines and comments
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
 
-        // Build a single-pattern matcher for this line
-        let mut builder = GitignoreBuilder::new(file_dir);
-        if case_insensitive {
-            let _ = builder.case_insensitive(true);
-        }
         if builder
             .add_line(Some(file_path.to_path_buf()), line_text)
-            .is_err()
+            .is_ok()
         {
-            continue;
-        }
-
-        let matcher = match builder.build() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-
-        // Construct full path for matching
-        let full_path = file_dir
-            .join(rel_path)
-            .components()
-            .collect::<std::path::PathBuf>();
-
-        let matched = matcher.matched_path_or_any_parents(&full_path, is_dir);
-
-        if matched.is_ignore() {
-            // Normal pattern — this is a selection
-            last_match = Some(WorktreeincludeStatus::Included {
-                file: file_path.to_path_buf(),
-                line: line_1based,
-                pattern: trimmed.to_string(),
-            });
-        } else if matched.is_whitelist() {
-            // Negation pattern — this de-selects
-            last_match = Some(WorktreeincludeStatus::ExcludedByNegation {
-                file: file_path.to_path_buf(),
-                line: line_1based,
-                pattern: trimmed.to_string(),
-            });
+            line_info.push((line_1based, trimmed.to_string()));
         }
     }
 
-    last_match
+    let matcher = match builder.build() {
+        Ok(m) => m,
+        Err(_) => return None,
+    };
+
+    // Construct full absolute path for matching — always relative to repo root,
+    // not file_dir, to avoid duplicating directory segments for nested files.
+    let full_path: PathBuf = repo_root.join(rel_path).components().collect();
+
+    let matched = matcher.matched_path_or_any_parents(&full_path, is_dir);
+
+    if matched.is_ignore() {
+        let glob = matched.inner().unwrap();
+        let (line, pattern) = glob_line_info(glob, &line_info);
+        Some(WorktreeincludeStatus::Included {
+            file: file_path.to_path_buf(),
+            line,
+            pattern,
+        })
+    } else if matched.is_whitelist() {
+        // Git caveat: "It is not possible to re-include a file if a parent
+        // directory of that file is excluded." In .worktreeinclude terms,
+        // if a parent directory is selected (Ignore match), a negation
+        // pattern cannot deselect a file inside it.
+        let path_within = Path::new(rel_path);
+        let mut ancestor = path_within.parent();
+        while let Some(p) = ancestor {
+            if p.as_os_str().is_empty() {
+                break;
+            }
+            let ancestor_full: PathBuf = repo_root.join(p).components().collect();
+            let ancestor_match = matcher.matched(&ancestor_full, true);
+            if ancestor_match.is_ignore() {
+                // Parent directory is selected — caveat applies, negation loses
+                let parent_glob = ancestor_match.inner().unwrap();
+                let (line, pattern) = glob_line_info(parent_glob, &line_info);
+                return Some(WorktreeincludeStatus::Included {
+                    file: file_path.to_path_buf(),
+                    line,
+                    pattern,
+                });
+            }
+            ancestor = p.parent();
+        }
+
+        let glob = matched.inner().unwrap();
+        let (line, pattern) = glob_line_info(glob, &line_info);
+        Some(WorktreeincludeStatus::ExcludedByNegation {
+            file: file_path.to_path_buf(),
+            line,
+            pattern,
+        })
+    } else {
+        None
+    }
+}
+
+/// Map a matched `Glob` back to its line number and pattern text.
+///
+/// Searches `line_info` (populated in add-order parallel to the builder's
+/// glob list) for the entry whose trimmed text matches `glob.original()`.
+fn glob_line_info(
+    glob: &ignore::gitignore::Glob,
+    line_info: &[(usize, String)],
+) -> (usize, String) {
+    let original = glob.original();
+    // The original in the Glob has trailing whitespace stripped but may
+    // retain leading whitespace. Our line_info stores trimmed text.
+    let original_trimmed = original.trim();
+    for (line, pattern) in line_info.iter().rev() {
+        if pattern == original_trimmed {
+            return (*line, pattern.clone());
+        }
+    }
+    // Fallback — should not happen with well-formed input
+    (0, original.to_string())
 }
 
 #[cfg(test)]
@@ -307,6 +366,64 @@ mod tests {
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "case-insensitive matching should work, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn nested_anchored_pattern_matches_relative_to_file_dir() {
+        // Bug: config/.worktreeinclude with `/foo` should match `config/foo`
+        // because `/foo` is anchored to the directory containing the file.
+        let dir = setup_repo();
+        let subdir = dir.path().join("config");
+        fs::create_dir(&subdir).unwrap();
+
+        fs::write(subdir.join(".worktreeinclude"), "/foo\n").unwrap();
+
+        let result = explain(dir.path(), "config/foo", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::Included { .. }),
+            "anchored pattern in nested .worktreeinclude should match relative to its dir, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn git_negation_caveat_dir_pattern_wins_over_file_negation() {
+        // Git caveat: "It is not possible to re-include a file if a parent
+        // directory of that file is excluded." In .worktreeinclude semantics:
+        // if `dir/` selects the directory, `!dir/keep` cannot deselect a file
+        // inside it.
+        let dir = setup_repo();
+        fs::write(dir.path().join(".worktreeinclude"), "dir/\n!dir/keep\n").unwrap();
+
+        let result = explain(dir.path(), "dir/keep", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::Included { .. }),
+            "dir/ selection should win over !dir/keep negation (Git caveat), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn deeper_file_anchored_and_negated_combination() {
+        // Combined test: nested .worktreeinclude with anchored pattern and
+        // negation, verifying both path computation and caveat semantics.
+        let dir = setup_repo();
+        let subdir = dir.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+
+        fs::write(subdir.join(".worktreeinclude"), "/secrets/\n!/secrets/public\n").unwrap();
+
+        // secrets/ directory pattern should select files inside it
+        let result = explain(dir.path(), "sub/secrets/private.key", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::Included { .. }),
+            "anchored dir pattern in nested file should select files inside, got {result:?}"
+        );
+
+        // Git caveat: negation cannot override directory selection
+        let result = explain(dir.path(), "sub/secrets/public", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::Included { .. }),
+            "negation cannot deselect file inside selected directory (Git caveat), got {result:?}"
         );
     }
 }
