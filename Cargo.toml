@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
+tempfile = "3"
 thiserror = "2"
 walkdir = "2"
 
