@@ -69,6 +69,9 @@ pub trait GitBackend {
 
     /// Read a boolean Git config value.
     fn read_bool_config(&self, source_root: &Path, key: &str) -> Result<bool>;
+
+    /// Read a Git config value as a string. Returns `None` if the key is unset.
+    fn read_config(&self, source_root: &Path, key: &str) -> Result<Option<String>>;
 }
 
 /// Git backend that shells out to the `git` CLI.
@@ -239,6 +242,25 @@ impl GitBackend for GitCli {
             Err(_) => {
                 // Config key not set defaults to false
                 Ok(false)
+            }
+        }
+    }
+
+    fn read_config(&self, source_root: &Path, key: &str) -> Result<Option<String>> {
+        let output = self.run_git(source_root, &["config", key]);
+        match output {
+            Ok(bytes) => {
+                let s = String::from_utf8_lossy(&bytes);
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed.to_string()))
+                }
+            }
+            Err(_) => {
+                // Config key not set
+                Ok(None)
             }
         }
     }

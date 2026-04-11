@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 
 use ignore::gitignore::GitignoreBuilder;
 
+use crate::git::GitBackend;
 use crate::model::{RepoContext, ValidationIssue, ValidationReport, ValidationSeverity};
 
 /// Validate all ignore and worktreeinclude files in the repository.
-pub fn validate(ctx: &RepoContext) -> ValidationReport {
+pub fn validate(ctx: &RepoContext, git: &dyn GitBackend) -> ValidationReport {
     let mut report = ValidationReport::default();
 
     // Discover and validate .gitignore files
@@ -46,7 +47,7 @@ pub fn validate(ctx: &RepoContext) -> ValidationReport {
     }
 
     // Optionally validate global excludes (warning-only)
-    if let Some(global_path) = find_global_excludes(&ctx.source_root) {
+    if let Some(global_path) = find_global_excludes(&ctx.source_root, git) {
         if global_path.exists() {
             validate_ignore_file(
                 &global_path,
@@ -165,20 +166,11 @@ fn validate_ignore_file(
 }
 
 /// Try to find the global Git excludes file.
-fn find_global_excludes(source_root: &Path) -> Option<PathBuf> {
-    // Try git config core.excludesFile first
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(source_root)
-        .args(["config", "core.excludesFile"])
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let path_str = String::from_utf8_lossy(&output.stdout);
-        let path_str = path_str.trim();
+fn find_global_excludes(source_root: &Path, git: &dyn GitBackend) -> Option<PathBuf> {
+    // Try git config core.excludesFile via the backend
+    if let Ok(Some(path_str)) = git.read_config(source_root, "core.excludesFile") {
         if !path_str.is_empty() {
-            let path = expand_tilde(path_str);
+            let path = expand_tilde(&path_str);
             return Some(path);
         }
     }
@@ -224,6 +216,10 @@ fn walkdir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+    use crate::error::Result;
+    use crate::git::{GitBackend, IgnoreCheckRecord, WorktreeRecord};
+    use crate::path::RepoRelPath;
     use tempfile::TempDir;
 
     fn make_repo() -> TempDir {
@@ -237,20 +233,71 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn valid_gitignore_no_errors() {
-        let dir = make_repo();
-        fs::write(dir.path().join(".gitignore"), "*.log\n!important.log\n").unwrap();
+    /// Mock GitBackend that returns a configurable value for `core.excludesFile`.
+    struct MockGit {
+        excludes_file: Option<String>,
+    }
 
-        let ctx = RepoContext {
+    impl MockGit {
+        fn new(excludes_file: Option<String>) -> Self {
+            Self { excludes_file }
+        }
+    }
+
+    impl GitBackend for MockGit {
+        fn show_toplevel(&self, _path: &Path) -> Result<PathBuf> {
+            unimplemented!()
+        }
+        fn list_worktrees(&self, _source_root: &Path) -> Result<Vec<WorktreeRecord>> {
+            unimplemented!()
+        }
+        fn tracked_paths(
+            &self,
+            _source_root: &Path,
+            _paths: &[RepoRelPath],
+        ) -> Result<HashSet<RepoRelPath>> {
+            unimplemented!()
+        }
+        fn check_ignore(
+            &self,
+            _source_root: &Path,
+            _paths: &[RepoRelPath],
+        ) -> Result<Vec<IgnoreCheckRecord>> {
+            unimplemented!()
+        }
+        fn list_worktreeinclude_candidates(&self, _source_root: &Path) -> Result<Vec<RepoRelPath>> {
+            unimplemented!()
+        }
+        fn read_bool_config(&self, _source_root: &Path, _key: &str) -> Result<bool> {
+            unimplemented!()
+        }
+        fn read_config(&self, _source_root: &Path, key: &str) -> Result<Option<String>> {
+            if key == "core.excludesFile" {
+                Ok(self.excludes_file.clone())
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    fn make_ctx(dir: &TempDir) -> RepoContext {
+        RepoContext {
             source_root: dir.path().to_path_buf(),
             dest_root: None,
             main_worktree: dir.path().to_path_buf(),
             known_worktrees: vec![dir.path().to_path_buf()],
             core_ignore_case: false,
-        };
+        }
+    }
 
-        let report = validate(&ctx);
+    #[test]
+    fn valid_gitignore_no_errors() {
+        let dir = make_repo();
+        fs::write(dir.path().join(".gitignore"), "*.log\n!important.log\n").unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+
+        let report = validate(&ctx, &git);
         let errors: Vec<_> = report
             .issues
             .iter()
@@ -263,16 +310,10 @@ mod tests {
     fn valid_worktreeinclude_no_errors() {
         let dir = make_repo();
         fs::write(dir.path().join(".worktreeinclude"), ".env\n*.local\n").unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
 
-        let ctx = RepoContext {
-            source_root: dir.path().to_path_buf(),
-            dest_root: None,
-            main_worktree: dir.path().to_path_buf(),
-            known_worktrees: vec![dir.path().to_path_buf()],
-            core_ignore_case: false,
-        };
-
-        let report = validate(&ctx);
+        let report = validate(&ctx, &git);
         let errors: Vec<_> = report
             .issues
             .iter()
@@ -285,21 +326,11 @@ mod tests {
     fn unreadable_worktreeinclude_is_error() {
         let dir = make_repo();
         let wti_path = dir.path().join(".worktreeinclude");
-
-        // Create a directory where a file is expected
         fs::create_dir(&wti_path).unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
 
-        let ctx = RepoContext {
-            source_root: dir.path().to_path_buf(),
-            dest_root: None,
-            main_worktree: dir.path().to_path_buf(),
-            known_worktrees: vec![dir.path().to_path_buf()],
-            core_ignore_case: false,
-        };
-
-        let report = validate(&ctx);
-        // A directory named .worktreeinclude won't be detected as a file to validate,
-        // so no errors are expected. The main point is that we don't panic.
+        let report = validate(&ctx, &git);
         assert!(!report.has_errors());
     }
 
@@ -310,16 +341,10 @@ mod tests {
         fs::create_dir(&subdir).unwrap();
         fs::write(dir.path().join(".worktreeinclude"), "*.env\n").unwrap();
         fs::write(subdir.join(".worktreeinclude"), "*.local\n").unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
 
-        let ctx = RepoContext {
-            source_root: dir.path().to_path_buf(),
-            dest_root: None,
-            main_worktree: dir.path().to_path_buf(),
-            known_worktrees: vec![dir.path().to_path_buf()],
-            core_ignore_case: false,
-        };
-
-        let report = validate(&ctx);
+        let report = validate(&ctx, &git);
         let errors: Vec<_> = report
             .issues
             .iter()
@@ -334,16 +359,63 @@ mod tests {
         let info_dir = dir.path().join(".git/info");
         fs::create_dir_all(&info_dir).unwrap();
         fs::write(info_dir.join("exclude"), "*.tmp\n").unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
 
-        let ctx = RepoContext {
-            source_root: dir.path().to_path_buf(),
-            dest_root: None,
-            main_worktree: dir.path().to_path_buf(),
-            known_worktrees: vec![dir.path().to_path_buf()],
-            core_ignore_case: false,
-        };
-
-        let report = validate(&ctx);
+        let report = validate(&ctx, &git);
         assert!(!report.has_errors());
+    }
+
+    #[test]
+    fn global_excludes_from_backend_config() {
+        let dir = make_repo();
+        // Create a global excludes file via the mock backend
+        let global_file = dir.path().join("my-global-ignore");
+        fs::write(&global_file, "*.log\n").unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(Some(global_file.to_string_lossy().into_owned()));
+
+        let report = validate(&ctx, &git);
+        // Valid patterns should produce no warnings
+        let warnings: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| matches!(i.severity, ValidationSeverity::Warning))
+            .collect();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn global_excludes_invalid_pattern_is_warning() {
+        let dir = make_repo();
+        let global_file = dir.path().join("my-global-ignore");
+        // Write a file with an invalid glob pattern (dangling backslash)
+        fs::write(&global_file, "\\\n").unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(Some(global_file.to_string_lossy().into_owned()));
+
+        let report = validate(&ctx, &git);
+        let warnings: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| matches!(i.severity, ValidationSeverity::Warning))
+            .collect();
+        assert!(!warnings.is_empty(), "expected a warning for invalid global excludes pattern");
+    }
+
+    #[test]
+    fn global_excludes_none_when_config_unset() {
+        let dir = make_repo();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+
+        // No global excludes configured, no warnings expected
+        let report = validate(&ctx, &git);
+        let warnings: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| matches!(i.severity, ValidationSeverity::Warning))
+            .collect();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
     }
 }

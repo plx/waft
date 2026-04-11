@@ -351,6 +351,10 @@ mod tests {
         fn read_bool_config(&self, _source_root: &Path, _key: &str) -> Result<bool> {
             Ok(false)
         }
+
+        fn read_config(&self, _source_root: &Path, _key: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
     }
 
     fn test_ctx() -> RepoContext {

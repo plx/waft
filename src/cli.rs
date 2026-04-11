@@ -117,7 +117,7 @@ fn run_copy(cli: &Cli, args: &CopyArgs) -> Result<()> {
     )?;
 
     // Validate
-    let report = validate::validate(&ctx);
+    let report = validate::validate(&ctx, &git);
     if report.has_errors() {
         for issue in &report.issues {
             if matches!(issue.severity, ValidationSeverity::Error) {
@@ -201,7 +201,7 @@ fn run_list(cli: &Cli, _args: &ListArgs) -> Result<()> {
     )?;
 
     // Validate
-    let report = validate::validate(&ctx);
+    let report = validate::validate(&ctx, &git);
     if report.has_errors() {
         for issue in &report.issues {
             if matches!(issue.severity, ValidationSeverity::Error) {
@@ -530,7 +530,7 @@ fn run_validate(cli: &Cli, _args: &ValidateArgs) -> Result<()> {
         CommandKind::Validate,
     )?;
 
-    let report = validate::validate(&ctx);
+    let report = validate::validate(&ctx, &git);
 
     for issue in &report.issues {
         let severity = match issue.severity {

@@ -231,6 +231,10 @@ mod tests {
         fn read_bool_config(&self, _source_root: &Path, _key: &str) -> Result<bool> {
             Ok(self.ignore_case)
         }
+
+        fn read_config(&self, _source_root: &Path, _key: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
     }
 
     fn main_and_linked() -> Vec<WorktreeRecord> {
