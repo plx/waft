@@ -21,7 +21,7 @@ impl RepoRelPath {
     /// Create a `RepoRelPath` from a pre-normalized string.
     ///
     /// This does **not** validate — use [`RepoRelPath::normalize`] for untrusted input.
-    pub fn from_normalized(s: String) -> Self {
+    pub(crate) fn from_normalized(s: String) -> Self {
         Self { inner: s }
     }
 

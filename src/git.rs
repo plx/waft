@@ -147,7 +147,7 @@ impl GitBackend for GitCli {
     fn show_toplevel(&self, path: &Path) -> Result<PathBuf> {
         let output = self.run_git(path, &["rev-parse", "--show-toplevel"])?;
         let s = String::from_utf8_lossy(&output);
-        Ok(PathBuf::from(s.trim()))
+        Ok(PathBuf::from(s.trim_end_matches(['\n', '\r'])))
     }
 
     fn list_worktrees(&self, source_root: &Path) -> Result<Vec<WorktreeRecord>> {
@@ -171,11 +171,11 @@ impl GitBackend for GitCli {
         let output = self.run_git(source_root, &args)?;
         let mut result = HashSet::new();
         for entry in output.split(|&b| b == 0) {
-            let s = String::from_utf8_lossy(entry);
-            let s = s.trim();
-            if !s.is_empty() {
-                result.insert(RepoRelPath::from_normalized(s.to_string()));
+            if entry.is_empty() {
+                continue;
             }
+            let s = String::from_utf8_lossy(entry);
+            result.insert(RepoRelPath::from_normalized(s.into_owned()));
         }
         Ok(result)
     }

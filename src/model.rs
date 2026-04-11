@@ -24,9 +24,9 @@ pub struct RepoContext {
 /// Severity of a validation issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationSeverity {
-    /// A problem that prevents proceeding.
-    Warning,
     /// A problem that should be noted but does not block.
+    Warning,
+    /// A problem that prevents proceeding.
     Error,
 }
 

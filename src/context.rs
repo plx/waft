@@ -114,11 +114,30 @@ pub fn resolve_context(
         });
     }
 
+    // For copy, enforce source must be the main worktree
+    if command == CommandKind::Copy && source_root != main_wt {
+        return Err(Error::Context {
+            message: format!(
+                "copy source must be the main worktree ({}), got {}",
+                main_wt.display(),
+                source_root.display()
+            ),
+        });
+    }
+
     // Validate: source must not equal dest
     if let Some(ref dest) = dest_root {
         if source_root == *dest {
             return Err(Error::SameSourceAndDest {
                 path: source_root.clone(),
+            });
+        }
+
+        // For copy, dest must be a linked worktree (not the main one)
+        if command == CommandKind::Copy && *dest == main_wt {
+            return Err(Error::Context {
+                message: "copy destination must be a linked worktree, not the main worktree"
+                    .to_string(),
             });
         }
 
