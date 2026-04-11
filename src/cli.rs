@@ -3,7 +3,12 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
+use crate::git::{GitBackend, GitCli};
+use crate::model::ValidationSeverity;
+use crate::validate;
+use crate::worktreeinclude;
 
 /// wiff — copy .worktreeinclude-selected ignored files between Git worktrees.
 #[derive(Debug, Parser)]
@@ -104,10 +109,72 @@ fn run_copy(_cli: &Cli, _args: &CopyArgs) -> Result<()> {
     })
 }
 
-fn run_list(_cli: &Cli, _args: &ListArgs) -> Result<()> {
-    Err(Error::NotImplemented {
-        command: "list".to_string(),
-    })
+fn run_list(cli: &Cli, _args: &ListArgs) -> Result<()> {
+    let git = GitCli::new();
+
+    // Resolve context
+    let ctx = context::resolve_context(
+        &git,
+        cli.source.as_deref(),
+        cli.dest.as_deref(),
+        cli.directory.as_deref(),
+        CommandKind::List,
+    )?;
+
+    // Validate
+    let report = validate::validate(&ctx);
+    if report.has_errors() {
+        for issue in &report.issues {
+            if matches!(issue.severity, ValidationSeverity::Error) {
+                eprintln!("error: {}: {}", issue.file.display(), issue.message);
+            }
+        }
+        return Err(Error::Validation {
+            error_count: report.error_count(),
+        });
+    }
+
+    // Print warnings
+    if !cli.quiet {
+        for issue in &report.issues {
+            if matches!(issue.severity, ValidationSeverity::Warning) {
+                eprintln!("warning: {}: {}", issue.file.display(), issue.message);
+            }
+        }
+    }
+
+    // Enumerate worktreeinclude candidates
+    let candidates = git.list_worktreeinclude_candidates(&ctx.source_root)?;
+
+    if candidates.is_empty() {
+        return Ok(());
+    }
+
+    // Batch check-ignore to find which candidates are actually git-ignored
+    let ignore_results = git.check_ignore(&ctx.source_root, &candidates)?;
+
+    // Keep only paths with real ignore hits
+    let mut eligible: Vec<String> = ignore_results
+        .into_iter()
+        .filter(|r| r.match_info.is_some())
+        .map(|r| r.path.as_str().to_string())
+        .collect();
+
+    // Sort lexically
+    eligible.sort();
+
+    // Output
+    for path in &eligible {
+        if cli.verbose > 0 {
+            // Verbose mode: include worktreeinclude explanation
+            let wti = worktreeinclude::explain(&ctx.source_root, path, false, ctx.core_ignore_case);
+            println!("{path}\t{wti:?}");
+        } else {
+            println!("{path}");
+        }
+    }
+
+    Ok(())
 }
 
 fn run_info(_cli: &Cli, _args: &InfoArgs) -> Result<()> {
@@ -116,8 +183,40 @@ fn run_info(_cli: &Cli, _args: &InfoArgs) -> Result<()> {
     })
 }
 
-fn run_validate(_cli: &Cli, _args: &ValidateArgs) -> Result<()> {
-    Err(Error::NotImplemented {
-        command: "validate".to_string(),
-    })
+fn run_validate(cli: &Cli, _args: &ValidateArgs) -> Result<()> {
+    let git = GitCli::new();
+
+    let ctx = context::resolve_context(
+        &git,
+        cli.source.as_deref(),
+        cli.dest.as_deref(),
+        cli.directory.as_deref(),
+        CommandKind::Validate,
+    )?;
+
+    let report = validate::validate(&ctx);
+
+    for issue in &report.issues {
+        let severity = match issue.severity {
+            ValidationSeverity::Warning => "warning",
+            ValidationSeverity::Error => "error",
+        };
+        let location = if let Some(line) = issue.line {
+            format!("{}:{}", issue.file.display(), line)
+        } else {
+            issue.file.display().to_string()
+        };
+        eprintln!("{severity}: {location}: {}", issue.message);
+    }
+
+    if report.has_errors() {
+        Err(Error::Validation {
+            error_count: report.error_count(),
+        })
+    } else {
+        if !cli.quiet {
+            eprintln!("validation passed");
+        }
+        Ok(())
+    }
 }
