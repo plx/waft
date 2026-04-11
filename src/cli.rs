@@ -232,22 +232,104 @@ fn run_list(cli: &Cli, _args: &ListArgs) -> Result<()> {
     // Batch check-ignore to find which candidates are actually git-ignored
     let ignore_results = git.check_ignore(&ctx.source_root, &candidates)?;
 
-    // Keep only paths with real ignore hits
-    let mut eligible: Vec<String> = ignore_results
+    // Keep only records with real ignore hits
+    let mut eligible: Vec<_> = ignore_results
         .into_iter()
         .filter(|r| r.match_info.is_some())
-        .map(|r| r.path.as_str().to_string())
         .collect();
 
-    // Sort lexically
-    eligible.sort();
+    // Sort lexically by path
+    eligible.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
+
+    // Pre-compute destination classification data if verbose + dest available
+    let verbose = cli.verbose > 0;
+    let dest_tracked_set = if verbose {
+        if let Some(ref dest_root) = ctx.dest_root {
+            let rel_paths: Vec<_> = eligible
+                .iter()
+                .map(|r| r.path.clone())
+                .collect();
+            git.tracked_paths(dest_root, &rel_paths)?
+        } else {
+            std::collections::HashSet::new()
+        }
+    } else {
+        std::collections::HashSet::new()
+    };
+    let fs = crate::fs::RealFs;
 
     // Output
-    for path in &eligible {
-        if cli.verbose > 0 {
-            // Verbose mode: include worktreeinclude explanation
-            let wti = worktreeinclude::explain(&ctx.source_root, path, false, ctx.core_ignore_case);
-            println!("{path}\t{wti:?}");
+    for record in &eligible {
+        let path = record.path.as_str();
+        if verbose {
+            let abs_path = record.path.to_path(&ctx.source_root);
+
+            // Source size
+            let size = std::fs::metadata(&abs_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
+
+            // Git ignore info
+            let gitignore_str = if let Some(ref info) = record.match_info {
+                format!(
+                    "ignored ({}:{}: {})",
+                    info.source_file.display(),
+                    info.line,
+                    info.pattern
+                )
+            } else {
+                "not ignored".to_string()
+            };
+
+            // Worktreeinclude info
+            let wti = worktreeinclude::explain(
+                &ctx.source_root,
+                path,
+                false,
+                ctx.core_ignore_case,
+            );
+            let wti_str = match &wti {
+                crate::model::WorktreeincludeStatus::Included {
+                    file,
+                    line,
+                    pattern,
+                } => format!("included ({}:{}: {})", file.display(), line, pattern),
+                crate::model::WorktreeincludeStatus::ExcludedByNegation {
+                    file,
+                    line,
+                    pattern,
+                } => format!("excluded ({}:{}: {})", file.display(), line, pattern),
+                crate::model::WorktreeincludeStatus::NoMatch => "no match".to_string(),
+            };
+
+            println!("{path}\tsize: {size}\tgitignore: {gitignore_str}\tworktreeinclude: {wti_str}");
+
+            // Predicted action (only when --dest is available)
+            if let Some(ref dest_root) = ctx.dest_root {
+                if abs_path.is_file() {
+                    let dest_path = record.path.to_path(dest_root);
+                    let state = crate::planner::classify_destination(
+                        &record.path,
+                        &abs_path,
+                        &dest_path,
+                        &dest_tracked_set,
+                        &fs,
+                    );
+                    let action_str = match state {
+                        crate::model::DestinationState::Missing => "copy",
+                        crate::model::DestinationState::UpToDate => "no-op",
+                        crate::model::DestinationState::UntrackedConflict => {
+                            "skip (untracked conflict)"
+                        }
+                        crate::model::DestinationState::TrackedConflict => {
+                            "skip (tracked conflict)"
+                        }
+                        crate::model::DestinationState::TypeConflict => "skip (type conflict)",
+                        crate::model::DestinationState::UnsafePath => "skip (unsafe path)",
+                    };
+                    println!("\taction: {action_str}");
+                }
+            }
         } else {
             println!("{path}");
         }

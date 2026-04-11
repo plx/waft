@@ -189,6 +189,187 @@ fn list_output_sorted() {
     assert_eq!(lines, vec!["a.env", "b.env", "c.env"]);
 }
 
+// --- list verbose tests ---
+
+#[test]
+fn list_verbose_shows_source_size() {
+    let repo = make_repo();
+
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), ".worktreeinclude", ".env\n");
+    write_file(repo.path(), ".env", "SECRET=foo\n");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    wiff()
+        .args(["list", "--source", repo.path().to_str().unwrap(), "-v"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("size:"));
+}
+
+#[test]
+fn list_verbose_shows_gitignore_info() {
+    let repo = make_repo();
+
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), ".worktreeinclude", ".env\n");
+    write_file(repo.path(), ".env", "SECRET=foo\n");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    wiff()
+        .args(["list", "--source", repo.path().to_str().unwrap(), "-v"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gitignore:"))
+        .stdout(predicate::str::contains(".gitignore"))
+        .stdout(predicate::str::contains(".env"));
+}
+
+#[test]
+fn list_verbose_shows_worktreeinclude_info() {
+    let repo = make_repo();
+
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), ".worktreeinclude", ".env\n");
+    write_file(repo.path(), ".env", "SECRET=foo\n");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    wiff()
+        .args(["list", "--source", repo.path().to_str().unwrap(), "-v"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("worktreeinclude:"))
+        .stdout(predicate::str::contains(".worktreeinclude"));
+}
+
+#[test]
+fn list_verbose_no_predicted_action_without_dest() {
+    let repo = make_repo();
+
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), ".worktreeinclude", ".env\n");
+    write_file(repo.path(), ".env", "SECRET=foo\n");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    let output = wiff()
+        .args(["list", "--source", repo.path().to_str().unwrap(), "-v"])
+        .assert()
+        .success();
+
+    let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
+    assert!(!stdout.contains("action:"), "should not show predicted action without --dest");
+}
+
+fn setup_list_worktrees() -> (TempDir, TempDir) {
+    let main_dir = make_repo();
+
+    write_file(main_dir.path(), ".gitignore", ".env\n");
+    write_file(main_dir.path(), ".worktreeinclude", ".env\n");
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "init"]);
+
+    let wt_dir = TempDir::new().unwrap();
+    let wt_path = wt_dir.path().join("linked");
+    git(
+        main_dir.path(),
+        &[
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "-b",
+            "linked-branch",
+        ],
+    );
+
+    (main_dir, wt_dir)
+}
+
+#[test]
+fn list_verbose_dest_missing_shows_copy() {
+    let (main_dir, wt_dir) = setup_list_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=foo");
+
+    wiff()
+        .args([
+            "list",
+            "--source", main_dir.path().to_str().unwrap(),
+            "--dest", wt_path.to_str().unwrap(),
+            "-v",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("action: copy"));
+}
+
+#[test]
+fn list_verbose_dest_up_to_date_shows_noop() {
+    let (main_dir, wt_dir) = setup_list_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SAME_SECRET=foo");
+    write_file(&wt_path, ".env", "SAME_SECRET=foo");
+
+    wiff()
+        .args([
+            "list",
+            "--source", main_dir.path().to_str().unwrap(),
+            "--dest", wt_path.to_str().unwrap(),
+            "-v",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("action: no-op"));
+}
+
+#[test]
+fn list_verbose_dest_untracked_conflict_shows_skip() {
+    let (main_dir, wt_dir) = setup_list_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET=foo");
+    write_file(&wt_path, ".env", "DIFFERENT_SECRET=bar");
+
+    wiff()
+        .args([
+            "list",
+            "--source", main_dir.path().to_str().unwrap(),
+            "--dest", wt_path.to_str().unwrap(),
+            "-v",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("action: skip (untracked conflict)"));
+}
+
+#[test]
+fn list_verbose_dest_tracked_conflict_shows_skip() {
+    let (main_dir, wt_dir) = setup_list_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET=foo");
+    // Track .env in the linked worktree
+    write_file(&wt_path, ".env", "DEST_SECRET=bar");
+    git(&wt_path, &["add", "-f", ".env"]);
+    git(&wt_path, &["commit", "-m", "track env in dest"]);
+
+    wiff()
+        .args([
+            "list",
+            "--source", main_dir.path().to_str().unwrap(),
+            "--dest", wt_path.to_str().unwrap(),
+            "-v",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("action: skip (tracked conflict)"));
+}
+
 // --- validate tests ---
 
 #[test]
