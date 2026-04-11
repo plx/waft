@@ -123,6 +123,195 @@ fn info_missing_file() {
         .stdout(predicate::str::contains("eligible_to_copy: no"));
 }
 
+// --- Destination classification tests ---
+
+/// Create a main repo with a linked worktree for info --dest tests.
+/// Returns (main_dir, worktree_tempdir). The linked worktree is at wt_dir.path().join("linked").
+fn setup_worktrees() -> (TempDir, TempDir) {
+    let main_dir = make_repo();
+
+    write_file(main_dir.path(), ".gitignore", ".env\n*.secret\nconfig\nnested/secret.env\n");
+    write_file(main_dir.path(), ".worktreeinclude", ".env\n*.secret\nconfig\nnested/secret.env\n");
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "init"]);
+
+    let wt_dir = TempDir::new().unwrap();
+    let wt_path = wt_dir.path().join("linked");
+    git(
+        main_dir.path(),
+        &[
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "-b",
+            "linked-branch",
+        ],
+    );
+
+    (main_dir, wt_dir)
+}
+
+/// When a destination file is tracked in the dest worktree, info should report
+/// "tracked-conflict" and "skip (tracked conflict)" — not the generic
+/// "exists (differs)" / "skip (conflict)".
+#[test]
+fn info_dest_tracked_conflict() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    // Create .env in source (main worktree)
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET=foo");
+
+    // Track .env in the linked worktree (force-add since it's gitignored, then commit)
+    write_file(&wt_path, ".env", "DEST_SECRET=bar");
+    git(&wt_path, &["add", "-f", ".env"]);
+    git(&wt_path, &["commit", "-m", "track env in dest"]);
+
+    wiff()
+        .args([
+            "info",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+            ".env",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("destination: tracked-conflict"))
+        .stdout(predicate::str::contains("planned_action: skip (tracked conflict)"));
+}
+
+/// When a destination file exists, differs, and is NOT tracked, info should
+/// report "untracked-conflict".
+#[test]
+fn info_dest_untracked_conflict() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET=foo");
+    // .env exists in dest but is NOT tracked (just written, not git-added)
+    write_file(&wt_path, ".env", "DIFFERENT_SECRET=bar");
+
+    wiff()
+        .args([
+            "info",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+            ".env",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("destination: untracked-conflict"))
+        .stdout(predicate::str::contains("planned_action: skip (untracked conflict)"));
+}
+
+/// When a destination file is byte-identical to source, info should report
+/// "up-to-date" / "no-op".
+#[test]
+fn info_dest_up_to_date() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SAME_SECRET=foo");
+    write_file(&wt_path, ".env", "SAME_SECRET=foo");
+
+    wiff()
+        .args([
+            "info",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+            ".env",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("destination: up-to-date"))
+        .stdout(predicate::str::contains("planned_action: no-op"));
+}
+
+/// When destination exists but is a directory (not a file), info should report
+/// "type-conflict".
+#[test]
+fn info_dest_type_conflict() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), "config", "my config");
+    // In dest, "config" is a directory, not a file
+    fs::create_dir_all(wt_path.join("config")).unwrap();
+
+    wiff()
+        .args([
+            "info",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+            "config",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("destination: type-conflict"))
+        .stdout(predicate::str::contains("planned_action: skip (type conflict)"));
+}
+
+/// When the destination's parent path contains a symlink, info should report
+/// "unsafe-path".
+#[cfg(unix)]
+#[test]
+fn info_dest_unsafe_path() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), "nested/secret.env", "SECRET=x");
+
+    // In dest, "nested" is a symlink — making the path unsafe
+    let symlink_target = tempfile::TempDir::new().unwrap();
+    std::os::unix::fs::symlink(symlink_target.path(), wt_path.join("nested")).unwrap();
+
+    wiff()
+        .args([
+            "info",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+            "nested/secret.env",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("destination: unsafe-path"))
+        .stdout(predicate::str::contains("planned_action: skip (unsafe path)"));
+}
+
+/// When destination does not exist and file is eligible, info should report
+/// "missing" / "copy".
+#[test]
+fn info_dest_missing() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=foo");
+
+    wiff()
+        .args([
+            "info",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+            ".env",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("destination: missing"))
+        .stdout(predicate::str::contains("planned_action: copy"));
+}
+
 #[test]
 fn info_multiple_paths() {
     let repo = make_repo();

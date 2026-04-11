@@ -291,6 +291,14 @@ fn run_info(cli: &Cli, args: &InfoArgs) -> Result<()> {
         ignore_map.insert(record.path.as_str().to_string(), record);
     }
 
+    // Query destination trackedness if destination is known
+    let fs = crate::fs::RealFs;
+    let dest_tracked_set = if let Some(ref dest_root) = ctx.dest_root {
+        git.tracked_paths(dest_root, &rel_paths)?
+    } else {
+        std::collections::HashSet::new()
+    };
+
     // Print info for each path
     for rp in &rel_paths {
         let abs_path = rp.to_path(&ctx.source_root);
@@ -372,30 +380,39 @@ fn run_info(cli: &Cli, args: &InfoArgs) -> Result<()> {
         // Destination info if available
         if let Some(ref dest_root) = ctx.dest_root {
             let dest_path = rp.to_path(dest_root);
-            if dest_path.exists() {
-                if dest_path.is_file() {
-                    // Check if identical
-                    if source_exists && abs_path.is_file() {
-                        let src_bytes = std::fs::read(&abs_path).ok();
-                        let dst_bytes = std::fs::read(&dest_path).ok();
-                        if src_bytes == dst_bytes {
-                            println!("destination: up-to-date");
-                            println!("planned_action: no-op");
-                        } else {
-                            println!("destination: exists (differs)");
-                            println!("planned_action: skip (conflict)");
-                        }
-                    } else {
-                        println!("destination: exists");
+            let state = crate::planner::classify_destination(
+                rp,
+                &abs_path,
+                &dest_path,
+                &dest_tracked_set,
+                &fs,
+            );
+            match state {
+                crate::model::DestinationState::Missing => {
+                    println!("destination: missing");
+                    if eligible {
+                        println!("planned_action: copy");
                     }
-                } else {
-                    println!("destination: exists (not a file)");
+                }
+                crate::model::DestinationState::UpToDate => {
+                    println!("destination: up-to-date");
+                    println!("planned_action: no-op");
+                }
+                crate::model::DestinationState::UntrackedConflict => {
+                    println!("destination: untracked-conflict");
+                    println!("planned_action: skip (untracked conflict)");
+                }
+                crate::model::DestinationState::TrackedConflict => {
+                    println!("destination: tracked-conflict");
+                    println!("planned_action: skip (tracked conflict)");
+                }
+                crate::model::DestinationState::TypeConflict => {
+                    println!("destination: type-conflict");
                     println!("planned_action: skip (type conflict)");
                 }
-            } else {
-                println!("destination: missing");
-                if eligible {
-                    println!("planned_action: copy");
+                crate::model::DestinationState::UnsafePath => {
+                    println!("destination: unsafe-path");
+                    println!("planned_action: skip (unsafe path)");
                 }
             }
         }

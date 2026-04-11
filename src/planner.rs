@@ -139,7 +139,7 @@ pub fn plan(
 }
 
 /// Classify the state of a destination path.
-fn classify_destination(
+pub(crate) fn classify_destination(
     rel_path: &RepoRelPath,
     src_abs: &std::path::Path,
     dst_abs: &std::path::Path,
