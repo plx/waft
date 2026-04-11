@@ -380,40 +380,50 @@ fn run_info(cli: &Cli, args: &InfoArgs) -> Result<()> {
         // Destination info if available
         if let Some(ref dest_root) = ctx.dest_root {
             let dest_path = rp.to_path(dest_root);
-            let state = crate::planner::classify_destination(
-                rp,
-                &abs_path,
-                &dest_path,
-                &dest_tracked_set,
-                &fs,
-            );
-            match state {
-                crate::model::DestinationState::Missing => {
-                    println!("destination: missing");
-                    if eligible {
-                        println!("planned_action: copy");
+
+            // Only run full classification when source is a regular file
+            // (matching planner preconditions). For missing/non-regular sources
+            // classify_destination's read-based comparison would be misleading.
+            if source_exists && abs_path.is_file() {
+                let state = crate::planner::classify_destination(
+                    rp,
+                    &abs_path,
+                    &dest_path,
+                    &dest_tracked_set,
+                    &fs,
+                );
+                match state {
+                    crate::model::DestinationState::Missing => {
+                        println!("destination: missing");
+                        if eligible {
+                            println!("planned_action: copy");
+                        }
+                    }
+                    crate::model::DestinationState::UpToDate => {
+                        println!("destination: up-to-date");
+                        println!("planned_action: no-op");
+                    }
+                    crate::model::DestinationState::UntrackedConflict => {
+                        println!("destination: untracked-conflict");
+                        println!("planned_action: skip (untracked conflict)");
+                    }
+                    crate::model::DestinationState::TrackedConflict => {
+                        println!("destination: tracked-conflict");
+                        println!("planned_action: skip (tracked conflict)");
+                    }
+                    crate::model::DestinationState::TypeConflict => {
+                        println!("destination: type-conflict");
+                        println!("planned_action: skip (type conflict)");
+                    }
+                    crate::model::DestinationState::UnsafePath => {
+                        println!("destination: unsafe-path");
+                        println!("planned_action: skip (unsafe path)");
                     }
                 }
-                crate::model::DestinationState::UpToDate => {
-                    println!("destination: up-to-date");
-                    println!("planned_action: no-op");
-                }
-                crate::model::DestinationState::UntrackedConflict => {
-                    println!("destination: untracked-conflict");
-                    println!("planned_action: skip (untracked conflict)");
-                }
-                crate::model::DestinationState::TrackedConflict => {
-                    println!("destination: tracked-conflict");
-                    println!("planned_action: skip (tracked conflict)");
-                }
-                crate::model::DestinationState::TypeConflict => {
-                    println!("destination: type-conflict");
-                    println!("planned_action: skip (type conflict)");
-                }
-                crate::model::DestinationState::UnsafePath => {
-                    println!("destination: unsafe-path");
-                    println!("planned_action: skip (unsafe path)");
-                }
+            } else if dest_path.exists() {
+                println!("destination: exists");
+            } else {
+                println!("destination: missing");
             }
         }
         println!();

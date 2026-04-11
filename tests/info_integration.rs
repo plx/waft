@@ -312,6 +312,34 @@ fn info_dest_missing() {
         .stdout(predicate::str::contains("planned_action: copy"));
 }
 
+/// When source is missing but destination exists, info should not misclassify
+/// the destination as an untracked conflict (edge case: classify_destination
+/// assumes source is a regular file).
+#[test]
+fn info_dest_with_missing_source() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    // .env exists in dest but NOT in source
+    write_file(&wt_path, ".env", "DEST_ONLY=bar");
+
+    wiff()
+        .args([
+            "info",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+            ".env",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("source_exists: no"))
+        .stdout(predicate::str::contains("destination: exists"))
+        // Should NOT report "untracked-conflict" for missing source
+        .stdout(predicate::str::contains("untracked-conflict").not());
+}
+
 #[test]
 fn info_multiple_paths() {
     let repo = make_repo();
