@@ -856,6 +856,7 @@ dependencies = [
  "proptest",
  "tempfile",
  "thiserror",
+ "walkdir",
 ]
 
 [[package]]
