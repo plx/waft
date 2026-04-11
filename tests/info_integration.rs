@@ -72,12 +72,7 @@ fn info_ignored_and_included() {
     git(repo.path(), &["commit", "-m", "setup"]);
 
     wiff()
-        .args([
-            "info",
-            "--source",
-            repo.path().to_str().unwrap(),
-            ".env",
-        ])
+        .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
         .assert()
         .success()
         .stdout(predicate::str::contains("tracked: no"))
