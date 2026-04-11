@@ -1,0 +1,358 @@
+Yes. Use the plan below as the coding-agent handoff. It is intentionally linear.
+
+The safest sequence is: first ship a correct wiff v1 with Git as the source of truth for actual ignored/tracked status; then, after v1 is green, extract the reusable matcher pieces from ignore into an internal module. That order matters because Git’s ignore mechanism does not apply to tracked files, git check-ignore suppresses tracked files by default, ignore::gitignore is a from-scratch matcher that does not shell out to Git, dir.rs is the hierarchy implementation worth mining, and WalkBuilder is the wrong center of gravity because it merges rule families into one skip policy and gives custom ignore filenames higher precedence than all other ignore files.  ￼
+
+At the end of every step, run the same gate:
+
+cargo fmt --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+cargo test --doc
+
+Milestone A — ship wiff v1
+
+1. Freeze the architecture before writing code
+
+Create docs/architecture.md and write down four decisions that the agent must not revisit during v1:
+	•	Git CLI is authoritative for actual Git-ignored membership and trackedness.
+	•	.worktreeinclude is an independent matcher with Git-style per-directory semantics.
+	•	The CLI uses plan/execute internally; discovery never mutates the filesystem.
+	•	ignore is used first as parser/compiler reference, not as the only source of truth.
+
+Also document the exact repo layout to create:
+
+src/
+  main.rs
+  lib.rs
+  cli.rs
+  context.rs
+  git.rs
+  validate.rs
+  worktreeinclude.rs
+  planner.rs
+  executor.rs
+  model.rs
+  path.rs
+  fs.rs
+  error.rs
+tests/
+  cli.rs
+  git_integration.rs
+  copy_integration.rs
+  info_integration.rs
+  property.rs
+docs/
+  architecture.md
+
+Write one short section explaining why nested .worktreeinclude must mirror Git’s per-directory exclude behavior: patterns in per-directory files are relative to the directory containing that file, and deeper files take precedence over shallower ones.  ￼
+
+Done when: the architecture note exists and the repo layout is committed before implementation starts.
+
+2. Bootstrap the crate and CI skeleton
+
+Create a binary crate plus library crate layout so most logic lives in lib.rs and main.rs only parses args and exits. Add the initial dependencies: clap with derive, ignore, thiserror, tempfile, assert_cmd, assert_fs, predicates, and proptest. Add #![warn(missing_docs)] and #![warn(rustdoc::broken_intra_doc_links)] to the library.
+
+Create .github/workflows/ci.yml now, even if it is minimal at first. Make it run fmt, clippy, unit tests, integration tests, and doc tests on Linux, macOS, and Windows.
+
+Done when: CI runs and the crate builds with no real functionality yet.
+
+3. Build the CLI shell first
+
+Implement the top-level CLI structs in cli.rs with clap derive. Use a top-level optional subcommand field and dispatch None to copy, rather than trying to force clap into a magical default-subcommand feature. clap’s derive docs support subcommand enums, and the cookbook shows the same general pattern for default-subcommand behavior by making a subcommand optional and selecting the fallback in dispatch.  ￼
+
+Implement these commands and args now, but make them return placeholder “not implemented” errors:
+	•	global: --source, --dest, -C, -q/--quiet, -v/--verbose
+	•	copy: --dry-run, --overwrite
+	•	list
+	•	info <PATH>...
+	•	validate
+
+Add snapshot-like CLI tests for --help, copy --help, info --help, and the default invocation behavior.
+
+Done when: help output is stable and wiff with no subcommand dispatches into the copy code path.
+
+4. Implement the core model and path-safety layer
+
+Before any Git or filesystem logic, create the domain types in model.rs and path.rs:
+	•	RepoRelPath
+	•	RepoContext
+	•	ValidationReport, ValidationIssue
+	•	CopyPlan, PlannedEntry, CopyOp, SkipReason, NoOpReason
+	•	InfoReport
+	•	destination-state enums
+
+Implement path normalization rules now:
+	•	accept absolute or relative input paths
+	•	normalize to repo-relative paths
+	•	reject paths that escape the repo with ..
+	•	reject paths that resolve to the repo root when a file path is required
+
+Unit-test this module heavily. This is one of the easiest places to get deterministic correctness early.
+
+Done when: the planning types compile and path normalization tests pass.
+
+5. Build the Git backend next
+
+Create a GitBackend trait and a concrete GitCli implementation in git.rs. This module should be the only place that shells out to git.
+
+Implement these methods first:
+	•	show_toplevel(path) -> PathBuf
+	•	list_worktrees(source_root) -> Vec<WorktreeRecord>
+	•	tracked_paths(source_root, paths) -> HashSet<RepoRelPath>
+	•	check_ignore(source_root, paths) -> Vec<IgnoreCheckRecord>
+	•	list_worktreeinclude_candidates(source_root) -> Vec<RepoRelPath>
+	•	read_bool_config(source_root, "core.ignoreCase") -> bool
+
+Use these exact Git primitives:
+	•	git rev-parse --show-toplevel for root resolution
+	•	git worktree list --porcelain -z because the porcelain format is machine-readable, the first attribute is always worktree, and the main worktree is listed first
+	•	git ls-files --cached --full-name -z -- <paths...> for tracked files
+	•	git ls-files --others --ignored --exclude-per-directory=.worktreeinclude --full-name -z for worktreeinclude-selected candidates
+	•	git check-ignore --stdin -z -v -n for ignore explanations and batch non-matches
+
+Git documents all of those behaviors, including that --exclude-per-directory makes patterns relative to the directory containing the file and lets deeper files take precedence, and that check-ignore --verbose outputs source, line, pattern, and path while --non-matching emits empty records for non-matches.  ￼
+
+Done when: the Git backend is fully parser-tested with NUL-delimited outputs and passes temp-repo integration tests.
+
+6. Implement repo/worktree context resolution
+
+In context.rs, build the logic that turns CLI inputs into a validated RepoContext.
+
+Rules to implement:
+	•	If running inside a linked worktree with no explicit --source or --dest, set source = main worktree and dest = current worktree.
+	•	If running inside the main worktree, list and info may default source = current, but copy must require a destination.
+	•	copy must reject source == dest.
+	•	copy must reject destinations that are not part of the same worktree family.
+
+Base this entirely on the output of git worktree list --porcelain -z, not on ad hoc path guessing. Git documents that the main worktree is listed first and that porcelain is intended for scripts.  ￼
+
+Done when: context-resolution integration tests cover current-main-worktree, current-linked-worktree, explicit source/dest, and invalid-family cases.
+
+7. Implement validation using ignore::gitignore first
+
+Create validate.rs. Do not extract ignore-source code yet.
+
+Discover and validate:
+	•	every in-tree .gitignore
+	•	every in-tree .worktreeinclude
+	•	.git/info/exclude
+	•	optionally the global excludes file as a warning-only validation
+
+Use ignore::gitignore::GitignoreBuilder to parse files. Use add or add_line so partial errors can be collected. Read core.ignoreCase from Git and apply it to the builder before adding globs; the builder docs note that case-insensitivity only affects globs added after the option is changed. Leave allow_unclosed_class at its default because that default exists to match established gitignore semantics.  ￼
+
+Validation policy for v1:
+	•	unreadable .worktreeinclude or invalid .worktreeinclude glob: error
+	•	unreadable .gitignore or invalid .gitignore glob: error
+	•	invalid global exclude file: warning
+	•	suspicious but legal patterns: warning
+
+Done when: wiff validate fails on bad in-repo files, warns on external/global issues, and reports file + line where possible.
+
+8. Implement the minimal .worktreeinclude explanation engine
+
+Create worktreeinclude.rs as a thin adapter over the current ignore crate. This engine is for explanation and validation only in v1; it is not the authoritative selector yet.
+
+For a queried path:
+	1.	collect applicable .worktreeinclude files from repo root to the path’s parent
+	2.	build a matcher for each file rooted at the file’s directory
+	3.	store line metadata while parsing
+	4.	evaluate shallow to deep, with last-match-wins inside each file and across files
+
+Return a structured result like:
+	•	Included { file, line, pattern }
+	•	ExcludedByNegation { file, line, pattern }
+	•	NoMatch
+
+This mirrors the per-directory precedence Git documents for exclude files, but keeps explanation logic separate from the authoritative selection path.  ￼
+
+Done when: unit tests cover nested files, negation, directory-only patterns, anchored patterns, and **.
+
+9. Implement list
+
+Now wire the first real command.
+
+Flow for list:
+	1.	resolve context
+	2.	run validation
+	3.	enumerate candidates with
+git ls-files --others --ignored --exclude-per-directory=.worktreeinclude --full-name -z
+	4.	batch those candidates through
+git check-ignore --stdin -z -v -n
+	5.	keep only paths with real ignore hits
+	6.	sort lexically by normalized repo-relative path
+	7.	print one path per line
+
+This candidate-first flow works because ls-files --exclude-per-directory gives the right nested-file semantics for .worktreeinclude, while check-ignore gives the real Git-ignore answer and explanation, including line and source info. Git also documents that tracked files are not subject to exclude rules and are suppressed by check-ignore by default.  ￼
+
+Add a verbose mode that includes ignore-source details and the .worktreeinclude explanation from step 8.
+
+Done when: list passes integration tests for root-only patterns, nested overrides, negation, **, directory-only rules, and tracked-file exclusions.
+
+10. Implement info
+
+info should use both engines.
+
+For each queried path:
+	•	normalize to repo-relative
+	•	determine whether the source path exists and whether it is a regular file
+	•	ask Git whether it is tracked
+	•	if untracked, ask Git for ignore status and explanation
+	•	ask the .worktreeinclude explanation engine for inclusion status
+	•	compute eligible_to_copy
+	•	if a destination is known, classify destination state and predicted action
+
+Use git ls-files --cached for trackedness and git check-ignore --stdin -z -v -n for ignore explanation. Git documents that --cached shows tracked files and that check-ignore --verbose returns source, line, pattern, and path.  ￼
+
+Done when: info can explain “tracked”, “ignored”, “not ignored”, “worktreeincluded”, “not worktreeincluded”, and “planned action” in temp-repo tests.
+
+11. Implement the planner and copy --dry-run
+
+Create planner.rs and make it the single place that turns discovered eligible files into planned work.
+
+For each eligible source path, classify destination as:
+	•	missing
+	•	up-to-date
+	•	untracked conflict
+	•	tracked conflict
+	•	type conflict
+	•	unsafe path
+	•	unsupported source type
+
+Planner rules:
+	•	never mutate
+	•	always sort entries deterministically
+	•	emit Copy, NoOp, or Skip
+	•	make copy --dry-run render the plan without filesystem changes
+
+Also make list --dest optionally reuse the planner so verbose list output can show predicted action.
+
+Done when: dry-run output is deterministic and the selected path set matches list.
+
+12. Implement the real copy executor
+
+Create executor.rs. It should only consume CopyPlan.
+
+Rules:
+	•	never follow source symlinks
+	•	never write through a symlinked destination parent
+	•	create destination directories as needed
+	•	copy to a temp file in the destination directory, then atomically rename
+	•	preserve permissions best-effort
+	•	continue after per-file failures and aggregate the final report
+
+Keep the filesystem behind a small FileSystem trait so unit tests can mock conflict cases and error injection.
+
+Done when: real copy passes integration tests for missing files, overwrite rules, tracked destination conflicts, identical-file no-ops, and symlink safety.
+
+13. Harden the tests
+
+Now build the full test matrix.
+
+Add three layers:
+	1.	unit tests for pure logic
+	2.	integration tests with real Git repos in temp directories
+	3.	property/differential tests
+
+The differential tests are the most important. Generate small random repos and compare:
+	•	.worktreeinclude candidate selection against
+git ls-files --others --ignored --exclude-per-directory=.worktreeinclude
+	•	per-path Git ignore explanation against
+git check-ignore -v -n
+
+This is where you catch precedence, negation, anchoring, and recursive-pattern edge cases.
+
+Done when: every scenario from the original spec has an automated test, and at least one differential test suite is in place.
+
+14. Finish docs, CI, and release scaffolding
+
+Add real crate docs now:
+	•	crate-level docs in lib.rs
+	•	module docs for git, planner, executor, worktreeinclude
+	•	doc comments on all public planning/report types
+	•	README.md with usage examples
+	•	docs/architecture.md updated to match the final code
+
+Expand CI to include:
+	•	fmt
+	•	clippy with warnings as errors
+	•	unit + integration tests
+	•	doc tests
+	•	OS matrix
+
+Add a separate release workflow stub for future cargo publish and GitHub Releases.
+
+Done when: the repo is clean enough that another engineer can read the docs and understand the architecture without opening the whole codebase.
+
+Milestone B — extract the reusable matcher core from ignore
+
+Do not start this until Milestone A is green.
+
+15. Create an internal matcher_core module, not a public crate
+
+Add src/matcher_core/ and start by moving in a minimized internal fork of the reusable pieces from ignore:
+	•	parser/compiler logic modeled on gitignore.rs
+	•	path utilities modeled on pathutil.rs
+	•	a neutral match-result type based on Match<T>
+
+Keep license notices intact. Keep this internal to wiff first. ignore’s own dir.rs comment explicitly says the hierarchy API was intentionally not exposed because the public API would be too complicated and poorly documented, so do not start by designing a polished public crate API.  ￼
+
+Done when: the new internal module builds and existing tests still pass with the old code path active.
+
+16. Extract the hierarchy layer from dir.rs, but redesign the API
+
+Build a new hierarchy.rs inspired by dir.rs, not a line-for-line transplant.
+
+Expose something like:
+	•	MatcherForestBuilder
+	•	MatcherForest
+	•	MatcherCursor
+	•	FamilyConfig
+	•	Decision
+	•	RuleHit
+	•	Classification
+
+Key design rules:
+	•	explicit rule families, not one giant precedence chain
+	•	one family for Git-ignore semantics
+	•	one family for .worktreeinclude
+	•	neutral public decisions like Matched, Negated, NoMatch
+	•	line/file explanation as first-class output
+
+Do not build this on WalkBuilder, and do not model .worktreeinclude as add_custom_ignore_filename, because the existing walker gives custom ignore files higher precedence than all other ignore files and mixes all rule families into one skip policy.  ￼
+
+Done when: the internal matcher can classify a path against one family without any filesystem mutation or tree walk.
+
+17. Cut over explanation first, not selection
+
+Switch validate and info to use matcher_core first. Leave list and copy backed by Git CLI for v1 behavior.
+
+That gives you a safe migration path:
+	•	explanation parity is easier to verify
+	•	Git remains the oracle for actual ignore/tracked behavior
+	•	regressions are contained to non-copying code paths first
+
+Run the differential tests from step 13 against the new engine before changing any user-facing behavior.
+
+Done when: info and validate produce the same results as before, but now through matcher_core.
+
+18. Only then consider internal intersection for experimentation
+
+After parity is proven, optionally add an internal-only comparison path that walks the repo once, queries the internal Git-ignore family and internal .worktreeinclude family for each path, and compares the resulting intersection against the current Git-backed selector.
+
+Do not make this the default path yet. Use it as a parity harness. If it ever becomes default later, keep tracked-status checks outside the matcher layer, because Git-ignore semantics alone still do not answer the tracked/untracked question.  ￼
+
+Done when: internal-intersection results match the Git-backed implementation across the differential suite.
+
+Final release gate
+
+Only call the project “v1 ready” when all of these are true:
+	•	wiff with no subcommand defaults to copy
+	•	copy, list, info, and validate all work
+	•	nested .gitignore and .worktreeinclude behave correctly
+	•	copy --dry-run is mutation-free
+	•	tracked destination files are never overwritten
+	•	symlink traversal is blocked
+	•	integration and differential tests are green on Linux, macOS, and Windows
+	•	internal docs and architecture docs are complete
+
+The single most important instruction to the coding agent is this: do not start by extracting all of ignore; ship the Git-backed v1 first, then extract only the parser/compiler and hierarchy pieces you actually need.

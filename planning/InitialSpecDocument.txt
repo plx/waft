@@ -1,0 +1,515 @@
+Below is a v1 handoff spec for wiff.
+
+Anthropic’s documented rule is the right starting point: .worktreeinclude uses .gitignore syntax, and only files that both match .worktreeinclude and are Git-ignored should be copied. This spec keeps that rule, but explicitly extends it to nested .worktreeinclude files by using the same per-directory matching model Git uses for per-directory ignore files, where deeper files override shallower ones and patterns are relative to the directory containing the file.  ￼
+
+1. Product contract
+
+wiff is a Rust CLI for copying local ignored files from a repository’s main worktree into a linked worktree.
+
+The logical rule for whether a path is eligible is:
+
+eligible(path) =
+  exists_in_source(path)
+  AND is_regular_file(path)
+  AND worktreeinclude_matches(path)
+  AND git_ignores(path)
+
+“Git ignores” means Git’s standard exclude mechanism, not just root .gitignore: per-directory .gitignore files, .git/info/exclude, and the user’s global excludes file participate, and tracked files are not affected by ignore rules.  ￼
+
+Required v1 commands
+
+The requested core commands are:
+	•	copy — copy eligible files from source to destination.
+	•	list — list eligible files only.
+	•	info — explain status for one or more paths.
+
+Recommended additional v1 command:
+	•	validate — validate .worktreeinclude and Git ignore files without copying. This is the cleanest way to satisfy the validation requirement and gives CI a stable command to run.
+
+Non-goals for v1
+	•	No bidirectional sync.
+	•	No delete/prune of files in the destination.
+	•	No recursion into submodules or nested Git repositories.
+	•	No copying of symlinks, devices, FIFOs, or sockets.
+	•	No configurable alternative filename to .worktreeinclude.
+
+2. CLI contract
+
+Implement the CLI with clap derive APIs. clap documents derive-based subcommands and optional Option<Commands> subcommand parsing, which is the simplest way to make copy the default when no explicit subcommand is supplied. Use the derive feature.  ￼
+
+Suggested surface:
+
+wiff [GLOBAL_OPTS]                    # same as: wiff copy
+wiff copy [GLOBAL_OPTS] [COPY_OPTS]
+wiff list [GLOBAL_OPTS] [LIST_OPTS]
+wiff info [GLOBAL_OPTS] <PATH>...
+wiff validate [GLOBAL_OPTS]
+
+Suggested global options:
+	•	--source <PATH>: source/main worktree. Optional.
+	•	--dest <PATH>: destination/linked worktree. Optional for copy, optional for info, unused by list.
+	•	-C <PATH>: operate as if started in PATH.
+	•	-q, --quiet
+	•	-v, --verbose (repeatable if useful)
+
+Suggested copy options:
+	•	-n, --dry-run
+	•	--overwrite — allow overwriting existing untracked destination files only
+	•	--no-validate is not needed in v1; fail fast on validation errors
+
+Suggested defaults:
+	•	If run inside a linked worktree with no args, wiff should auto-detect the main worktree as source and treat the current worktree as destination.
+	•	If run inside the main worktree, wiff list and wiff info should default source to the current repo. wiff copy should require --dest in that case.
+
+Use git worktree list --porcelain -z for worktree discovery. Git documents that the main worktree is listed first and that the porcelain format is stable for scripts. Use git rev-parse --show-toplevel to normalize any repo path to the worktree root.  ￼
+
+3. Matching semantics
+
+3.1 Git ignore semantics
+
+For Git ignore status, wiff must defer to Git, not approximate it.
+
+Important rules to preserve:
+	•	Tracked files are not affected by ignore rules.  ￼
+	•	Per-directory .gitignore files apply from the directory they live in downward, and deeper files override shallower ones.  ￼
+	•	! negates a previous match.
+	•	A trailing / makes a pattern directory-only.
+	•	A slash at the beginning or middle makes the pattern relative to the ignore file’s directory.
+	•	** has Git’s special recursive meaning.
+	•	Git’s caveat about negation applies: a file cannot be re-included if a parent directory was excluded.  ￼
+
+3.2 .worktreeinclude semantics
+
+wiff should treat .worktreeinclude as a Git-compatible per-directory exclude file whose matches mean “selected for copy”.
+
+That sounds inverted, but it is the cleanest way to preserve Git behavior exactly.
+
+Concretely:
+	•	A normal pattern in .worktreeinclude selects a path for copy.
+	•	A negated pattern (!foo) de-selects a previously selected path.
+	•	Relative paths, anchored paths, directory-only matches, **, and precedence all behave exactly like Git ignore patterns.
+	•	Nested .worktreeinclude files should behave like --exclude-per-directory=.worktreeinclude: the file applies to its own directory and descendants, and deeper files override shallower ones.  ￼
+
+Document one important consequence clearly: because .worktreeinclude is intentionally evaluated with Git-style exclude semantics, Git’s negation caveat also applies here. Users should prefer patterns like dir/* plus !dir/keep over dir/ plus !dir/keep.  ￼
+
+3.3 Authoritative selection algorithm
+
+The conceptual rule is set intersection.
+
+The recommended implementation is candidate-first filtering:
+	1.	Enumerate paths selected by .worktreeinclude using Git:
+
+git -C <source_root> ls-files \
+  --others --ignored --exclude-per-directory=.worktreeinclude \
+  --full-name -z
+
+--others means untracked files, --ignored means only exclude matches, --exclude-per-directory loads a per-directory exclude filename, and --full-name makes paths repo-root relative. Git documents all of those behaviors.  ￼
+
+	2.	Batch those candidates through Git ignore explanation:
+
+git -C <source_root> check-ignore --stdin -z -v -n
+
+--verbose yields source, line, pattern, and path; --non-matching yields empty records for paths that do not match any ignore rule, which makes this safe for batch/script use.  ￼
+
+	3.	Keep only candidates that Git reports as ignored.
+
+This preserves the intended intersection rule while usually avoiding a full walk of every ignored path in the repo.
+
+4. Planning and execution architecture
+
+Use a strict two-phase plan/execute design.
+
+4.1 Core internal types
+
+At minimum:
+
+pub struct RepoContext {
+    pub source_root: PathBuf,
+    pub dest_root: Option<PathBuf>,
+    pub main_worktree: PathBuf,
+    pub known_worktrees: Vec<PathBuf>,
+    pub core_ignore_case: bool,
+}
+
+pub struct ValidationReport {
+    pub issues: Vec<ValidationIssue>,
+}
+
+pub enum ValidationSeverity {
+    Warning,
+    Error,
+}
+
+pub struct ValidationIssue {
+    pub severity: ValidationSeverity,
+    pub file: PathBuf,
+    pub line: Option<usize>,
+    pub message: String,
+}
+
+pub struct CopyPlan {
+    pub context: RepoContext,
+    pub validation: ValidationReport,
+    pub entries: Vec<PlannedEntry>,
+    pub dry_run: bool,
+}
+
+pub enum PlannedEntry {
+    Copy(CopyOp),
+    NoOp(NoOpReason),
+    Skip(SkipReason),
+}
+
+pub struct CopyOp {
+    pub rel_path: RepoRelPath,
+    pub src_abs: PathBuf,
+    pub dst_abs: PathBuf,
+    pub gitignore: GitIgnoreDecision,
+    pub worktreeinclude: WorktreeincludeDecision,
+}
+
+pub struct InfoReport {
+    pub rel_path: RepoRelPath,
+    pub source_exists: bool,
+    pub source_kind: SourceKind,
+    pub tracked: bool,
+    pub gitignore: GitIgnoreDecision,
+    pub worktreeinclude: WorktreeincludeDecision,
+    pub eligible_to_copy: bool,
+    pub destination: Option<DestinationStatus>,
+}
+
+Keep RepoRelPath as a normalized repo-relative path type with no leading root and no escaping ...
+
+4.2 Module layout
+
+Suggested modules:
+
+src/
+  main.rs
+  lib.rs
+  cli.rs
+  context.rs
+  git.rs
+  validate.rs
+  worktreeinclude.rs
+  planner.rs
+  executor.rs
+  model.rs
+  path.rs
+  fs.rs
+  error.rs
+
+Guiding split:
+	•	git.rs: all Git CLI invocation and parsing
+	•	worktreeinclude.rs: .worktreeinclude parsing and explanation
+	•	planner.rs: no filesystem mutation
+	•	executor.rs: apply CopyPlan
+	•	validate.rs: syntax and config-file validation
+
+4.3 Traits for testability
+
+Use traits around external effects:
+
+trait GitBackend { ... }
+trait FileSystem { ... }
+trait Clock { ... } // only if needed
+
+That keeps pure planning logic unit-testable without shelling out.
+
+5. Repository resolution rules
+	•	Resolve any given path to its worktree root with git rev-parse --show-toplevel.  ￼
+	•	Parse git worktree list --porcelain -z from the source repo to determine the main worktree and the set of linked worktrees. The first worktree record is the main worktree.  ￼
+	•	copy must require:
+	•	source and destination are different
+	•	source is the main worktree
+	•	destination is a linked worktree belonging to the same worktree family
+	•	list and info may run with only a source.
+	•	If a path is inside a submodule, report “outside v1 scope” and stop; do not recurse into submodules.
+
+6. Validation contract
+
+Validation should run before planning for all commands.
+
+6.1 Files to validate
+
+Validate:
+	•	every in-tree .worktreeinclude
+	•	every in-tree .gitignore
+	•	.git/info/exclude if present
+
+The user-global excludes file participates in Git’s ignore behavior, but because it is outside project control, parse problems there should be warnings, not hard failures, in v1. Git’s standard precedence includes that file.  ￼
+
+6.2 Parser choice
+
+For validation and .worktreeinclude explanation, use the ignore crate’s gitignore parser rather than hand-rolled glob logic. The crate states that its gitignore module implements the gitignore man-page specification from scratch, GitignoreBuilder can add whole files or individual lines, it can report partial errors, and it supports case-insensitive matching.  ￼
+
+Read core.ignoreCase from the source repo and apply that setting to .worktreeinclude parsing. Git documents that core.ignoreCase controls Git’s behavior on case-insensitive filesystems, and GitignoreBuilder::case_insensitive exposes the matching toggle. Set it before adding any patterns; the builder docs note that the flag only affects globs added after the change.  ￼
+
+Do not make parsing stricter than Git-compatible behavior. Keep allow_unclosed_class at its default; the builder docs say that default exists to match established gitignore semantics.  ￼
+
+6.3 Validation failures
+
+Treat these as hard errors:
+	•	unreadable .worktreeinclude
+	•	syntactically invalid pattern lines as reported by the parser
+	•	symlinked .worktreeinclude files
+	•	invalid source/destination worktree relationship
+
+Treat these as warnings:
+	•	parse errors in user-global excludes
+	•	patterns that currently match nothing
+	•	suspicious negation patterns that are likely shadowed by parent-directory matches
+
+7. .worktreeinclude explanation engine
+
+For list --verbose, info, and validation warnings, build a dedicated .worktreeinclude evaluator.
+
+Recommended implementation:
+	•	Discover applicable .worktreeinclude files from repo root to the queried path’s parent.
+	•	Parse each file line-by-line with GitignoreBuilder::add_line.
+	•	Store line metadata explicitly: file path, line number, raw text, compiled matcher.
+	•	Evaluate each file in file order; the last match within a file wins.
+	•	Evaluate files from shallowest to deepest; the last match across files wins.
+
+Return one of:
+	•	Included { file, line, pattern }
+	•	ExcludedByNegation { file, line, pattern }
+	•	NoMatch
+
+This evaluator is mainly for explanation and validation. For actual copy/list membership, Git CLI remains authoritative.
+
+8. Git ignore explanation engine
+
+For info, first determine tracked status, then determine ignore status.
+
+Recommended flow:
+	1.	Batch-query tracked files with:
+
+git -C <source_root> ls-files --cached --full-name -z -- <paths...>
+
+--cached shows tracked files.  ￼
+
+	2.	For paths that are not tracked, batch-query ignore explanation with:
+
+git -C <source_root> check-ignore --stdin -z -v -n
+
+Git documents that tracked files are not shown by default, and that verbose output emits source, line, pattern, and path.  ￼
+
+Return one of:
+	•	Tracked
+	•	Ignored { source, line, pattern }
+	•	NotIgnored
+	•	QueryError
+
+For missing paths, still run the ignore query on the path string; info should remain useful even when the file does not exist.
+
+9. Copy planning rules
+
+The planner should never mutate the filesystem.
+
+For each eligible path, classify destination state as one of:
+	•	Missing
+	•	UpToDate — destination regular file exists and bytes are identical
+	•	UntrackedConflict — destination untracked regular file exists but differs
+	•	TrackedConflict — destination path is tracked in the destination worktree
+	•	TypeConflict — destination exists but is not a regular file
+	•	UnsafePath — destination parent contains symlinked path segments
+	•	UnsupportedSourceType — source is not a regular file
+
+Planner behavior:
+	•	Missing → PlannedEntry::Copy
+	•	UpToDate → PlannedEntry::NoOp
+	•	UntrackedConflict → Skip unless --overwrite
+	•	TrackedConflict → always Skip
+	•	TypeConflict → Skip
+	•	UnsafePath → Skip
+	•	UnsupportedSourceType → Skip
+
+Sort every plan entry by normalized repo-relative path for deterministic output and stable tests.
+
+10. Copy execution rules
+
+The executor applies only CopyOp entries.
+
+Rules:
+	•	Never follow source symlinks.
+	•	Never write through a symlinked destination parent.
+	•	Create missing destination directories as needed.
+	•	Copy file contents with streaming I/O.
+	•	Preserve mode bits on Unix best-effort.
+	•	Preserve read-only attribute on Windows best-effort.
+	•	Do not preserve ownership or ACLs in v1.
+	•	Write to a temp file in the target directory, then atomically rename into place.
+	•	If --dry-run is set, do not create dirs, temp files, or destination files.
+
+If one file fails, continue executing the rest and return a report that includes all failures. Exit non-zero if any CopyOp failed. Skips and no-ops should not make the command fail.
+
+11. list command contract
+
+Default output:
+	•	one eligible repo-relative path per line
+	•	stable lexical order
+	•	no extra prose in non-verbose mode
+
+Verbose mode should include, for each path:
+	•	source size
+	•	Git ignore source/line/pattern
+	•	.worktreeinclude source/line/pattern
+	•	predicted copy action (copy, no-op, skip-conflict)
+
+list must not inspect destination unless --dest is provided or implied by current linked worktree and verbose output needs predicted action.
+
+12. info command contract
+
+info should accept one or more repo-relative or absolute paths and print a structured report per path.
+
+Required fields:
+	•	normalized repo-relative path
+	•	source exists / kind
+	•	tracked status
+	•	gitignore status
+	•	.worktreeinclude status
+	•	effective copy eligibility
+	•	if destination known: destination exists / tracked / conflict / up-to-date
+
+Example human output shape:
+
+path: .env
+source_exists: yes
+source_kind: file
+tracked: no
+gitignore: ignored (.gitignore:12: .env)
+worktreeinclude: included (.worktreeinclude:1: .env)
+eligible_to_copy: yes
+destination: missing
+planned_action: copy
+
+For tracked files, report tracked as the primary Git status, because Git ignore rules do not apply to tracked paths.  ￼
+
+13. Unit tests, integration tests, property tests
+
+Use both conventional unit tests and property tests. proptest is appropriate here because it is built for generated test cases and shrinking failing inputs.  ￼
+
+13.1 Unit tests
+
+Pure unit tests should cover:
+	•	path normalization and root-escape rejection
+	•	plan sorting and determinism
+	•	destination classification
+	•	overwrite rules
+	•	symlink safety checks
+	•	validation issue formatting
+	•	dry-run report generation
+
+13.2 Integration tests with real Git
+
+Create temp repos and invoke real git commands.
+
+Must-cover scenarios:
+	•	root .worktreeinclude copies .env
+	•	nested .worktreeinclude overrides root
+	•	nested .gitignore overrides root
+	•	negation patterns
+	•	directory-only patterns
+	•	** patterns
+	•	tracked file named in .worktreeinclude is not copied
+	•	.git/info/exclude ignored file is copied if selected
+	•	destination tracked-file conflict
+	•	destination identical file is a no-op
+	•	symlinked .worktreeinclude causes validation failure
+	•	copy --dry-run produces the same selected set as list
+	•	running wiff with no subcommand inside a linked worktree performs default-copy planning correctly
+
+13.3 Differential property tests against Git
+
+This is the most important testing recommendation.
+
+Use generated small repos and compare wiff behavior against Git as oracle:
+	•	Generate random file trees plus random nested .worktreeinclude files.
+	•	Compare wiff’s selected-set logic against:
+
+git ls-files --others --ignored --exclude-per-directory=.worktreeinclude
+
+
+	•	Generate random .gitignore hierarchies and compare per-path ignore explanations against git check-ignore -v -n.
+
+This is the fastest way to keep parity and catch edge cases in precedence, !, /, and ** handling.
+
+14. CI and release
+
+Basic CI should be in GitHub Actions.
+
+14.1 ci.yml
+
+Run on push and pull request with a matrix of:
+	•	ubuntu-latest
+	•	macos-latest
+	•	windows-latest
+
+Jobs:
+	•	cargo fmt --check
+	•	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	•	cargo test --workspace --all-features
+	•	cargo test --doc
+	•	optional: cargo doc --no-deps to ensure docs build cleanly
+
+14.2 release.yml
+
+Scaffold now, enable for real once v1 is ready.
+
+Trigger on:
+	•	workflow_dispatch
+	•	semver tags like v1.0.0
+
+Steps:
+	•	run the same checks as CI on Linux
+	•	cargo publish --locked using CRATES_IO_TOKEN
+	•	create GitHub Release
+	•	optionally upload built binaries and checksums
+
+15. Documentation requirements
+
+Internal Rust docs should be treated as part of the product.
+
+Required:
+	•	crate-level docs in lib.rs
+	•	doc comments on every public type used in planning/execution
+	•	module docs for git, worktreeinclude, planner, executor
+	•	architecture note in docs/architecture.md
+	•	examples in rustdoc for the main public planning types
+	•	#![warn(missing_docs)] and #![warn(rustdoc::broken_intra_doc_links)] in the library crate
+
+Document these invariants explicitly:
+	•	source must be main worktree
+	•	destination must be linked worktree in same worktree family
+	•	Git is authoritative for ignore membership
+	•	.worktreeinclude explanation is Git-compatible and tested against Git
+	•	symlink traversal is intentionally blocked for safety
+
+16. Recommended implementation order
+	1.	CLI skeleton with clap
+	2.	repo/context discovery (rev-parse, worktree list)
+	3.	validation engine
+	4.	Git backend for candidate listing and ignore explanation
+	5.	.worktreeinclude explanation engine
+	6.	list
+	7.	info
+	8.	copy --dry-run
+	9.	real copy executor
+	10.	test hardening, CI, docs
+
+17. Definition of done
+
+v1 is done when all of the following are true:
+	•	wiff in a linked worktree, with no subcommand, plans/copies from the main worktree by default.
+	•	copy, list, and info all work with nested .worktreeinclude and nested .gitignore.
+	•	Git remains the source of truth for ignore membership and explanations.
+	•	.worktreeinclude explanations report file, line, and raw pattern.
+	•	Copy is safe: no symlink traversal, no overwrite of tracked destination files, atomic writes.
+	•	copy --dry-run is mutation-free.
+	•	Unit tests, integration tests, and differential property tests pass.
+	•	CI runs on Linux, macOS, and Windows.
+	•	Public Rust docs and architecture docs are present.
+
+This is the split I would hand to a coding agent.
