@@ -306,7 +306,12 @@ fn run_list(cli: &Cli, _args: &ListArgs) -> Result<()> {
 
             // Predicted action (only when --dest is available)
             if let Some(ref dest_root) = ctx.dest_root {
-                if abs_path.is_file() {
+                if abs_path.is_symlink() || !abs_path.is_file() {
+                    // Planner skips non-regular-file and symlink sources
+                    if abs_path.exists() {
+                        println!("\taction: skip (unsupported source type)");
+                    }
+                } else {
                     let dest_path = record.path.to_path(dest_root);
                     let state = crate::planner::classify_destination(
                         &record.path,
