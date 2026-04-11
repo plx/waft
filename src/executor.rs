@@ -1,6 +1,6 @@
 //! Copy plan execution with atomic writes.
 //!
-//! The executor consumes a [`CopyPlan`] and applies the [`CopyOp`]
+//! The executor consumes a `CopyPlan` and applies the `CopyOp`
 //! entries. It copies file contents via a temp file in the destination
 //! directory, then atomically renames into place.
 

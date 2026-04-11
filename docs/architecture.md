@@ -73,6 +73,39 @@ docs/
   architecture.md      # This file
 ```
 
+## Command Pipeline
+
+All commands follow this pipeline:
+
+1. **CLI parsing** (`cli.rs`) — clap derive parses args, dispatches to handler
+2. **Context resolution** (`context.rs`) — resolve source/dest worktrees via
+   `git rev-parse` and `git worktree list`
+3. **Validation** (`validate.rs`) — parse all ignore files with `GitignoreBuilder`
+4. **Candidate enumeration** (`git.rs`) — `git ls-files --exclude-per-directory`
+5. **Ignore filtering** (`git.rs`) — `git check-ignore --stdin -z -v -n`
+6. **Planning** (`planner.rs`) — classify destinations, produce `CopyPlan`
+7. **Execution** (`executor.rs`) — atomic copy via temp file + rename
+
+Commands stop at different stages: `validate` at step 3, `list` at step 5,
+`info` at step 5 plus explanation, `copy --dry-run` at step 6, and `copy` at
+step 7.
+
+## Testing Strategy
+
+Tests are organized in three layers:
+
+1. **Unit tests** — pure logic in `path.rs`, `git.rs` (parser tests),
+   `planner.rs` (mock filesystem), `worktreeinclude.rs`, `context.rs`
+   (mock git backend)
+2. **Integration tests** — real Git repos in temp directories for all commands
+3. **Differential/property tests** — compare wiff output against Git oracle
+   (`git ls-files` + `git check-ignore`) with both deterministic scenarios
+   and proptest-generated random repos
+
+The differential tests are the most important layer because they verify that
+wiff's behavior matches Git's behavior exactly, catching edge cases in
+precedence, negation, anchoring, and recursive patterns.
+
 ## Why Nested `.worktreeinclude` Must Mirror Git's Per-Directory Exclude Behavior
 
 Git's per-directory exclude files (`.gitignore`, and files loaded via
