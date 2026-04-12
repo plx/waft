@@ -268,43 +268,67 @@ impl GitBackend for GitCli {
 
 /// Parse the output of `git worktree list --porcelain -z`.
 ///
-/// The format uses NUL as the record separator and newlines within records.
-/// Each record starts with `worktree <path>` and may include `bare` or
-/// `HEAD`, `branch`, etc. The first record is always the main worktree.
+/// With `-z`, every attribute line's terminating newline is replaced with NUL,
+/// and the blank line separating records also becomes NUL. So the byte stream
+/// is a sequence of NUL-terminated fields:
+///
+/// ```text
+/// worktree /path\0HEAD sha\0branch ref\0\0worktree /path2\0bare\0\0
+/// ```
+///
+/// A `worktree <path>` field starts a new record. Subsequent fields (`HEAD`,
+/// `branch`, `bare`, `detached`) are attributes of the current record.
+/// An empty field (from the double-NUL record separator) finalizes the record.
+/// The first record is always the main worktree.
 fn parse_worktree_list(output: &[u8]) -> Result<Vec<WorktreeRecord>> {
     let text = String::from_utf8_lossy(output);
     let mut worktrees = Vec::new();
 
-    // Split on NUL for porcelain -z format.
-    // Each record is a block of lines separated by NUL.
-    let records: Vec<&str> = text.split('\0').collect();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_is_bare = false;
 
-    for record in &records {
-        let record = record.trim();
-        if record.is_empty() {
+    for field in text.split('\0') {
+        if field.is_empty() {
+            // Empty field = record separator. Finalize current record if any.
+            if let Some(path) = current_path.take() {
+                let is_main = worktrees.is_empty();
+                worktrees.push(WorktreeRecord {
+                    path,
+                    is_main,
+                    is_bare: current_is_bare,
+                });
+                current_is_bare = false;
+            }
             continue;
         }
 
-        let mut path: Option<PathBuf> = None;
-        let mut is_bare = false;
-
-        for line in record.lines() {
-            let line = line.trim();
-            if let Some(p) = line.strip_prefix("worktree ") {
-                path = Some(PathBuf::from(p));
-            } else if line == "bare" {
-                is_bare = true;
+        if let Some(p) = field.strip_prefix("worktree ") {
+            // A new record starts. Finalize any pending record first (handles
+            // streams that lack the trailing double-NUL).
+            if let Some(path) = current_path.take() {
+                let is_main = worktrees.is_empty();
+                worktrees.push(WorktreeRecord {
+                    path,
+                    is_main,
+                    is_bare: current_is_bare,
+                });
+                current_is_bare = false;
             }
+            current_path = Some(PathBuf::from(p));
+        } else if field == "bare" {
+            current_is_bare = true;
         }
+        // Other fields (HEAD, branch, detached) are ignored for now.
+    }
 
-        if let Some(path) = path {
-            let is_main = worktrees.is_empty(); // first is main
-            worktrees.push(WorktreeRecord {
-                path,
-                is_main,
-                is_bare,
-            });
-        }
+    // Finalize any trailing record (e.g., if output lacks trailing NUL).
+    if let Some(path) = current_path.take() {
+        let is_main = worktrees.is_empty();
+        worktrees.push(WorktreeRecord {
+            path,
+            is_main,
+            is_bare: current_is_bare,
+        });
     }
 
     if worktrees.is_empty() {
@@ -363,7 +387,7 @@ mod tests {
 
     #[test]
     fn parse_worktree_list_single() {
-        let output = b"worktree /home/user/repo\nHEAD abc123\nbranch refs/heads/main\n\0";
+        let output = b"worktree /home/user/repo\0HEAD abc123\0branch refs/heads/main\0\0";
         let wts = parse_worktree_list(output).unwrap();
         assert_eq!(wts.len(), 1);
         assert_eq!(wts[0].path, PathBuf::from("/home/user/repo"));
@@ -373,7 +397,7 @@ mod tests {
 
     #[test]
     fn parse_worktree_list_multiple() {
-        let output = b"worktree /home/user/repo\nHEAD abc123\nbranch refs/heads/main\n\0worktree /home/user/repo-wt\nHEAD abc123\nbranch refs/heads/feature\n\0";
+        let output = b"worktree /home/user/repo\0HEAD abc123\0branch refs/heads/main\0\0worktree /home/user/repo-wt\0HEAD abc123\0branch refs/heads/feature\0\0";
         let wts = parse_worktree_list(output).unwrap();
         assert_eq!(wts.len(), 2);
         assert!(wts[0].is_main);
@@ -383,7 +407,7 @@ mod tests {
 
     #[test]
     fn parse_worktree_list_bare() {
-        let output = b"worktree /home/user/repo.git\nbare\n\0";
+        let output = b"worktree /home/user/repo.git\0bare\0\0";
         let wts = parse_worktree_list(output).unwrap();
         assert_eq!(wts.len(), 1);
         assert!(wts[0].is_bare);
@@ -393,6 +417,67 @@ mod tests {
     fn parse_worktree_list_empty_fails() {
         let err = parse_worktree_list(b"").unwrap_err();
         assert!(err.to_string().contains("no worktrees"));
+    }
+
+    // ---- Tests using actual `git worktree list --porcelain -z` format ----
+    // With -z, each attribute is NUL-terminated and the blank-line record
+    // separator becomes a NUL (yielding double-NUL between records).
+
+    #[test]
+    fn parse_worktree_list_real_z_single() {
+        // Real -z format: each field NUL-terminated, double-NUL at end of record
+        let output = b"worktree /home/user/repo\0HEAD abc123\0branch refs/heads/main\0\0";
+        let wts = parse_worktree_list(output).unwrap();
+        assert_eq!(wts.len(), 1);
+        assert_eq!(wts[0].path, PathBuf::from("/home/user/repo"));
+        assert!(wts[0].is_main);
+        assert!(!wts[0].is_bare);
+    }
+
+    #[test]
+    fn parse_worktree_list_real_z_multiple() {
+        // Two worktrees in real -z format
+        let output = b"worktree /home/user/repo\0HEAD abc123\0branch refs/heads/main\0\0worktree /home/user/repo-wt\0HEAD def456\0branch refs/heads/feature\0\0";
+        let wts = parse_worktree_list(output).unwrap();
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[0].path, PathBuf::from("/home/user/repo"));
+        assert!(wts[0].is_main);
+        assert!(!wts[0].is_bare);
+        assert_eq!(wts[1].path, PathBuf::from("/home/user/repo-wt"));
+        assert!(!wts[1].is_main);
+        assert!(!wts[1].is_bare);
+    }
+
+    #[test]
+    fn parse_worktree_list_real_z_bare() {
+        // Bare repo in real -z format — bare attribute is its own NUL-terminated field
+        let output = b"worktree /home/user/repo.git\0bare\0\0";
+        let wts = parse_worktree_list(output).unwrap();
+        assert_eq!(wts.len(), 1);
+        assert_eq!(wts[0].path, PathBuf::from("/home/user/repo.git"));
+        assert!(wts[0].is_main);
+        assert!(wts[0].is_bare);
+    }
+
+    #[test]
+    fn parse_worktree_list_real_z_bare_with_linked() {
+        // Bare main worktree + linked worktree
+        let output = b"worktree /home/user/repo.git\0bare\0\0worktree /home/user/wt\0HEAD abc123\0branch refs/heads/feature\0\0";
+        let wts = parse_worktree_list(output).unwrap();
+        assert_eq!(wts.len(), 2);
+        assert!(wts[0].is_bare);
+        assert!(wts[0].is_main);
+        assert!(!wts[1].is_bare);
+        assert!(!wts[1].is_main);
+    }
+
+    #[test]
+    fn parse_worktree_list_real_z_detached_head() {
+        // Detached HEAD worktree (has HEAD and "detached" instead of "branch")
+        let output = b"worktree /home/user/repo\0HEAD abc123\0branch refs/heads/main\0\0worktree /home/user/wt\0HEAD def456\0detached\0\0";
+        let wts = parse_worktree_list(output).unwrap();
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[1].path, PathBuf::from("/home/user/wt"));
     }
 
     #[test]
