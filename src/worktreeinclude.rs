@@ -426,4 +426,106 @@ mod tests {
             "negation cannot deselect file inside selected directory (Git caveat), got {result:?}"
         );
     }
+
+    #[test]
+    fn nested_anchored_pattern_does_not_match_outside_dir() {
+        // Anchored pattern in config/.worktreeinclude should NOT match paths
+        // outside the config/ directory.
+        let dir = setup_repo();
+        let subdir = dir.path().join("config");
+        fs::create_dir(&subdir).unwrap();
+
+        fs::write(subdir.join(".worktreeinclude"), "/foo\n").unwrap();
+
+        // Should NOT match foo at root (anchored to config/, not repo root)
+        let result = explain(dir.path(), "foo", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::NoMatch),
+            "anchored pattern in config/.worktreeinclude should not match root-level foo, got {result:?}"
+        );
+
+        // Should NOT match foo in a sibling directory
+        let result = explain(dir.path(), "other/foo", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::NoMatch),
+            "anchored pattern in config/.worktreeinclude should not match other/foo, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_anchored_pattern() {
+        // Verify anchored patterns work correctly at deeper nesting levels
+        let dir = setup_repo();
+        let deep = dir.path().join("a").join("b").join("c");
+        fs::create_dir_all(&deep).unwrap();
+
+        fs::write(deep.join(".worktreeinclude"), "/secret.key\n").unwrap();
+
+        let result = explain(dir.path(), "a/b/c/secret.key", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::Included { .. }),
+            "deeply nested anchored pattern should match, got {result:?}"
+        );
+
+        // Should not match at a different depth
+        let result = explain(dir.path(), "a/b/secret.key", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::NoMatch),
+            "deeply nested anchored pattern should not match at wrong depth, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn negation_caveat_in_nested_worktreeinclude() {
+        // Verify the Git negation caveat works correctly in nested
+        // .worktreeinclude files, not just root-level ones.
+        let dir = setup_repo();
+        let subdir = dir.path().join("deploy");
+        fs::create_dir(&subdir).unwrap();
+
+        fs::write(
+            subdir.join(".worktreeinclude"),
+            "configs/\n!configs/local.yml\n",
+        )
+        .unwrap();
+
+        // File inside selected directory — caveat should prevent negation
+        let result = explain(dir.path(), "deploy/configs/local.yml", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::Included { .. }),
+            "negation caveat should apply in nested .worktreeinclude, got {result:?}"
+        );
+
+        // Another file inside the directory should be selected normally
+        let result = explain(dir.path(), "deploy/configs/prod.yml", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::Included { .. }),
+            "file inside selected dir in nested .worktreeinclude should be included, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn negation_without_dir_pattern_still_deselects() {
+        // When the positive match is a file pattern (not directory), negation
+        // should work normally — the caveat only applies to directory patterns.
+        let dir = setup_repo();
+        fs::write(
+            dir.path().join(".worktreeinclude"),
+            "*.env\n!staging.env\n",
+        )
+        .unwrap();
+
+        let result = explain(dir.path(), "staging.env", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::ExcludedByNegation { .. }),
+            "negation should deselect when positive is file pattern (no caveat), got {result:?}"
+        );
+
+        // Other .env files should still be selected
+        let result = explain(dir.path(), "production.env", false, false);
+        assert!(
+            matches!(result, WorktreeincludeStatus::Included { .. }),
+            "non-negated .env should still be included, got {result:?}"
+        );
+    }
 }
