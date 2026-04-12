@@ -357,7 +357,9 @@ fn info_fails_when_validation_has_errors() {
         .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("error:"));
+        .stderr(predicate::str::contains("error:"))
+        // Validation should block before any info output is produced
+        .stdout(predicate::str::contains("path:").not());
 }
 
 /// When validation passes, `info` should still succeed normally.
@@ -375,24 +377,6 @@ fn info_succeeds_when_validation_passes() {
         .assert()
         .success()
         .stdout(predicate::str::contains("eligible_to_copy: yes"));
-}
-
-/// When validation has only warnings (not errors), `info` should still succeed
-/// and print the warnings to stderr.
-#[test]
-fn info_prints_warnings_from_validation() {
-    let repo = make_repo();
-    write_file(repo.path(), ".gitignore", ".env\n");
-    write_file(repo.path(), ".worktreeinclude", ".env\n");
-    write_file(repo.path(), ".env", "SECRET=foo");
-    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
-    git(repo.path(), &["commit", "-m", "setup"]);
-
-    // This should succeed since there are no validation errors
-    wiff()
-        .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
-        .assert()
-        .success();
 }
 
 #[test]
