@@ -1,6 +1,6 @@
 //! Property and differential tests comparing wiff behavior against Git.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process;
@@ -284,4 +284,264 @@ proptest! {
         let git_result = git_oracle_eligible(repo.path());
         prop_assert_eq!(wiff_result, git_result, "wiff and git oracle must agree");
     }
+}
+
+// --- Differential explanation-parity tests ---
+//
+// These tests compare per-path explanation tuples (source file, line, pattern)
+// from `wiff info` against `git check-ignore -v -n`, as required by
+// ImplementationPlan.txt step 13 lines 256-260.
+
+/// Parsed explanation tuple from either wiff or git.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ExplanationTuple {
+    /// Basename of the source file (e.g., ".gitignore")
+    source_basename: String,
+    /// Line number of the matching rule
+    line: usize,
+    /// The pattern that matched
+    pattern: String,
+}
+
+/// Parse `wiff info` output for a single path, extracting the gitignore
+/// explanation tuple.  The format is:
+///   gitignore: ignored (.gitignore:5: *.log)
+/// Returns None if the path is not ignored.
+fn parse_wiff_info_explanation(stdout: &str, path: &str) -> Option<ExplanationTuple> {
+    // Find the block for this path
+    let mut in_block = false;
+    for line in stdout.lines() {
+        if line.starts_with("path: ") {
+            in_block = line.trim() == format!("path: {path}");
+            continue;
+        }
+        if !in_block {
+            continue;
+        }
+        // Look for: gitignore: ignored (<source>:<line>: <pattern>)
+        if let Some(rest) = line.strip_prefix("gitignore: ignored (") {
+            let rest = rest.trim_end_matches(')');
+            // Format: <source_file>:<line>: <pattern>
+            let first_colon = rest.find(':')?;
+            let source = &rest[..first_colon];
+            let after_source = &rest[first_colon + 1..];
+            let second_colon = after_source.find(':')?;
+            let line_str = &after_source[..second_colon];
+            let pattern = after_source[second_colon + 1..].trim();
+
+            let source_basename = Path::new(source)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+
+            return Some(ExplanationTuple {
+                source_basename,
+                line: line_str.trim().parse().ok()?,
+                pattern: pattern.to_string(),
+            });
+        }
+    }
+    None
+}
+
+/// Query `git check-ignore -v -n -z` for a set of paths and return
+/// explanation tuples keyed by pathname.
+fn git_check_ignore_explanations(
+    dir: &Path,
+    paths: &[&str],
+) -> BTreeMap<String, ExplanationTuple> {
+    if paths.is_empty() {
+        return BTreeMap::new();
+    }
+
+    let mut child = process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["check-ignore", "--stdin", "-z", "-v", "-n"])
+        .stdin(process::Stdio::piped())
+        .stdout(process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    {
+        use std::io::Write;
+        let stdin = child.stdin.as_mut().unwrap();
+        for p in paths {
+            stdin.write_all(p.as_bytes()).unwrap();
+            stdin.write_all(&[0]).unwrap();
+        }
+    }
+
+    let output = child.wait_with_output().unwrap();
+    let fields: Vec<&[u8]> = output.stdout.split(|&b| b == 0).collect();
+
+    let mut result = BTreeMap::new();
+    let mut i = 0;
+    while i + 3 < fields.len() {
+        let source = String::from_utf8_lossy(fields[i]).to_string();
+        let linenum_str = String::from_utf8_lossy(fields[i + 1]).to_string();
+        let pattern = String::from_utf8_lossy(fields[i + 2]).to_string();
+        let pathname = String::from_utf8_lossy(fields[i + 3]).to_string();
+
+        if !source.is_empty() {
+            let source_basename = Path::new(&source)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            result.insert(
+                pathname,
+                ExplanationTuple {
+                    source_basename,
+                    line: linenum_str.trim().parse().unwrap_or(0),
+                    pattern,
+                },
+            );
+        }
+        i += 4;
+    }
+
+    result
+}
+
+/// Run `wiff info` for multiple paths and return the full stdout.
+fn wiff_info(dir: &Path, paths: &[&str]) -> String {
+    let mut cmd = process::Command::new(env!("CARGO_BIN_EXE_wiff"));
+    cmd.args(["info", "--source", dir.to_str().unwrap()]);
+    for p in paths {
+        cmd.arg(p);
+    }
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "wiff info failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+/// Helper: set up a repo with given .gitignore, .worktreeinclude, and files,
+/// then compare per-path gitignore explanation tuples from wiff info against
+/// git check-ignore -v -n.
+fn assert_explanation_parity(
+    gitignore: &str,
+    worktreeinclude: &str,
+    files: &[&str],
+) {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", gitignore);
+    write_file(repo.path(), ".worktreeinclude", worktreeinclude);
+    for f in files {
+        write_file(repo.path(), f, "content");
+    }
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    let git_explanations = git_check_ignore_explanations(repo.path(), files);
+    let wiff_stdout = wiff_info(repo.path(), files);
+
+    for f in files {
+        let git_exp = git_explanations.get(*f);
+        let wiff_exp = parse_wiff_info_explanation(&wiff_stdout, f);
+
+        assert_eq!(
+            git_exp.cloned(),
+            wiff_exp,
+            "explanation parity mismatch for path '{}'\n\
+             git check-ignore says: {:?}\n\
+             wiff info says: {:?}\n\
+             wiff stdout:\n{}",
+            f,
+            git_exp,
+            wiff_exp,
+            wiff_stdout,
+        );
+    }
+}
+
+#[test]
+fn explanation_parity_simple_env() {
+    assert_explanation_parity(".env\n", ".env\n", &[".env"]);
+}
+
+#[test]
+fn explanation_parity_glob_patterns() {
+    assert_explanation_parity(
+        "*.log\n*.env\n",
+        "*.log\n*.env\n",
+        &["app.log", "debug.env", "README.md"],
+    );
+}
+
+#[test]
+fn explanation_parity_multi_line() {
+    // The matching rule should be on the correct line
+    assert_explanation_parity(
+        "first.txt\nsecond.log\nthird.env\n",
+        "first.txt\nsecond.log\nthird.env\n",
+        &["first.txt", "second.log", "third.env", "unmatched.rs"],
+    );
+}
+
+#[test]
+fn explanation_parity_negation() {
+    assert_explanation_parity(
+        "*.log\n!debug.log\nimportant.log\n",
+        "*.log\n",
+        &["app.log", "debug.log", "important.log"],
+    );
+}
+
+#[test]
+fn explanation_parity_doublestar() {
+    assert_explanation_parity(
+        "**/*.key\n",
+        "**/*.key\n",
+        &["shallow.key", "a/deep.key", "a/b/deeper.key"],
+    );
+}
+
+#[test]
+fn explanation_parity_directory_slash() {
+    // A pattern ending in / only matches directories in gitignore.
+    // Files named "logs" should NOT match "logs/" pattern.
+    assert_explanation_parity(
+        "logs/\n*.tmp\n",
+        "*.tmp\n",
+        &["test.tmp", "logs"],
+    );
+}
+
+#[test]
+fn explanation_parity_git_info_exclude() {
+    // When ignore rules come from .git/info/exclude instead of .gitignore,
+    // the source file in the explanation should reflect that.
+    let repo = make_repo();
+    write_file(repo.path(), ".worktreeinclude", "*.tmp\n");
+    write_file(repo.path(), "test.tmp", "content");
+
+    let info_dir = repo.path().join(".git/info");
+    fs::create_dir_all(&info_dir).unwrap();
+    fs::write(info_dir.join("exclude"), "*.tmp\n").unwrap();
+
+    git(repo.path(), &["add", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    let files = &["test.tmp"];
+    let git_explanations = git_check_ignore_explanations(repo.path(), files);
+    let wiff_stdout = wiff_info(repo.path(), files);
+
+    let git_exp = git_explanations.get("test.tmp");
+    let wiff_exp = parse_wiff_info_explanation(&wiff_stdout, "test.tmp");
+
+    // Both should agree that the source is "exclude" (from .git/info/exclude)
+    assert_eq!(
+        git_exp.cloned(),
+        wiff_exp,
+        "explanation parity mismatch for .git/info/exclude case\n\
+         git: {:?}\nwiff: {:?}",
+        git_exp,
+        wiff_exp,
+    );
 }

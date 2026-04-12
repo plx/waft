@@ -236,3 +236,70 @@ fn no_subcommand_in_linked_worktree_does_copy() {
 
     assert!(wt_path.join(".env").exists(), ".env should be auto-copied");
 }
+
+#[test]
+fn copy_skips_tracked_destination_conflict() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    // Create .env in source (main worktree)
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
+
+    // Track .env in the linked worktree (force-add since it's gitignored)
+    write_file(&wt_path, ".env", "DEST_TRACKED\n");
+    git(&wt_path, &["add", "-f", ".env"]);
+    git(&wt_path, &["commit", "-m", "track .env in dest"]);
+
+    // Copy without --overwrite should skip tracked destination
+    wiff()
+        .args([
+            "copy",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("skip"));
+
+    // Destination file should be unchanged
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "DEST_TRACKED\n"
+    );
+}
+
+#[test]
+fn copy_skips_tracked_destination_even_with_overwrite() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    // Create .env in source
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
+
+    // Track .env in the linked worktree
+    write_file(&wt_path, ".env", "DEST_TRACKED\n");
+    git(&wt_path, &["add", "-f", ".env"]);
+    git(&wt_path, &["commit", "-m", "track .env in dest"]);
+
+    // Even with --overwrite, tracked destination files must never be overwritten
+    wiff()
+        .args([
+            "copy",
+            "--overwrite",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("skip"));
+
+    // Destination file must remain unchanged
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "DEST_TRACKED\n"
+    );
+}
