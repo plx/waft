@@ -354,6 +354,28 @@ fn run_info(cli: &Cli, args: &InfoArgs) -> Result<()> {
         CommandKind::Info,
     )?;
 
+    // Validate
+    let report = validate::validate(&ctx, &git);
+    if report.has_errors() {
+        for issue in &report.issues {
+            if matches!(issue.severity, ValidationSeverity::Error) {
+                eprintln!("error: {}: {}", issue.file.display(), issue.message);
+            }
+        }
+        return Err(Error::Validation {
+            error_count: report.error_count(),
+        });
+    }
+
+    // Print warnings
+    if !cli.quiet {
+        for issue in &report.issues {
+            if matches!(issue.severity, ValidationSeverity::Warning) {
+                eprintln!("warning: {}: {}", issue.file.display(), issue.message);
+            }
+        }
+    }
+
     // Normalize all input paths to repo-relative
     let mut rel_paths = Vec::new();
     for path in &args.paths {

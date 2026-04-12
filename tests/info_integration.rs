@@ -340,6 +340,61 @@ fn info_dest_with_missing_source() {
         .stdout(predicate::str::contains("untracked-conflict").not());
 }
 
+/// `info` must run the validation phase just like `copy` and `list`.
+/// When validation finds errors (e.g., an invalid .gitignore pattern),
+/// `info` should exit non-zero and print the error.
+#[test]
+fn info_fails_when_validation_has_errors() {
+    let repo = make_repo();
+    // A dangling backslash is an invalid gitignore pattern
+    write_file(repo.path(), ".gitignore", "\\\n");
+    write_file(repo.path(), ".worktreeinclude", "*.env\n");
+    write_file(repo.path(), ".env", "SECRET=foo");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    wiff()
+        .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("error:"));
+}
+
+/// When validation passes, `info` should still succeed normally.
+#[test]
+fn info_succeeds_when_validation_passes() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), ".worktreeinclude", ".env\n");
+    write_file(repo.path(), ".env", "SECRET=foo");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    wiff()
+        .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("eligible_to_copy: yes"));
+}
+
+/// When validation has only warnings (not errors), `info` should still succeed
+/// and print the warnings to stderr.
+#[test]
+fn info_prints_warnings_from_validation() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), ".worktreeinclude", ".env\n");
+    write_file(repo.path(), ".env", "SECRET=foo");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    // This should succeed since there are no validation errors
+    wiff()
+        .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
+        .assert()
+        .success();
+}
+
 #[test]
 fn info_multiple_paths() {
     let repo = make_repo();
