@@ -85,24 +85,27 @@ fn discover_and_validate(
             }
         };
 
-        if entry.file_type().is_file() && entry.file_name().to_string_lossy() == filename {
-            let path = entry.path();
+        if entry.file_name().to_string_lossy() != filename {
+            continue;
+        }
 
-            // Check for symlinked ignore files (error for .worktreeinclude)
-            if filename == ".worktreeinclude" {
-                if let Ok(meta) = fs::symlink_metadata(path) {
-                    if meta.file_type().is_symlink() {
-                        report.issues.push(ValidationIssue {
-                            severity: ValidationSeverity::Error,
-                            file: path.to_path_buf(),
-                            line: None,
-                            message: "symlinked .worktreeinclude files are not allowed".to_string(),
-                        });
-                        continue;
-                    }
-                }
-            }
+        let path = entry.path();
 
+        // Check for symlinked .worktreeinclude files (hard error per spec).
+        // walkdir does not follow symlinks by default, so symlink entries
+        // have is_symlink()=true and is_file()=false. We must check before
+        // the is_file() gate to avoid skipping them.
+        if filename == ".worktreeinclude" && entry.file_type().is_symlink() {
+            report.issues.push(ValidationIssue {
+                severity: ValidationSeverity::Error,
+                file: path.to_path_buf(),
+                line: None,
+                message: "symlinked .worktreeinclude files are not allowed".to_string(),
+            });
+            continue;
+        }
+
+        if entry.file_type().is_file() {
             validate_ignore_file(path, root, case_insensitive, severity, report);
         }
     }
@@ -401,6 +404,62 @@ mod tests {
             .filter(|i| matches!(i.severity, ValidationSeverity::Warning))
             .collect();
         assert!(!warnings.is_empty(), "expected a warning for invalid global excludes pattern");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_worktreeinclude_is_error() {
+        let dir = make_repo();
+        let real_path = dir.path().join("real.wti");
+        fs::write(&real_path, "*.env\n").unwrap();
+        std::os::unix::fs::symlink(&real_path, dir.path().join(".worktreeinclude")).unwrap();
+
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+        let report = validate(&ctx, &git);
+
+        let errors: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| {
+                matches!(i.severity, ValidationSeverity::Error)
+                    && i.message.contains("symlinked .worktreeinclude")
+            })
+            .collect();
+        assert!(
+            !errors.is_empty(),
+            "expected an error for symlinked .worktreeinclude, got: {:?}",
+            report.issues
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_worktreeinclude_in_subdir_is_error() {
+        let dir = make_repo();
+        let subdir = dir.path().join("sub");
+        fs::create_dir(&subdir).unwrap();
+        let real_path = subdir.join("real.wti");
+        fs::write(&real_path, "*.env\n").unwrap();
+        std::os::unix::fs::symlink(&real_path, subdir.join(".worktreeinclude")).unwrap();
+
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+        let report = validate(&ctx, &git);
+
+        let errors: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| {
+                matches!(i.severity, ValidationSeverity::Error)
+                    && i.message.contains("symlinked .worktreeinclude")
+            })
+            .collect();
+        assert!(
+            !errors.is_empty(),
+            "expected an error for symlinked .worktreeinclude in subdir, got: {:?}",
+            report.issues
+        );
     }
 
     #[test]
