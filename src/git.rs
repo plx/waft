@@ -481,6 +481,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_worktree_list_real_z_locked_and_prunable() {
+        // Worktree with locked and prunable attributes (unknown fields are ignored)
+        let output = b"worktree /home/user/repo\0HEAD abc123\0branch refs/heads/main\0\0worktree /home/user/wt\0HEAD def456\0branch refs/heads/feature\0locked\0prunable\0\0";
+        let wts = parse_worktree_list(output).unwrap();
+        assert_eq!(wts.len(), 2);
+        assert_eq!(wts[1].path, PathBuf::from("/home/user/wt"));
+        assert!(!wts[1].is_bare);
+    }
+
+    #[test]
+    fn parse_worktree_list_real_z_path_with_spaces() {
+        let output = b"worktree /home/user/my project/repo\0HEAD abc123\0branch refs/heads/main\0\0";
+        let wts = parse_worktree_list(output).unwrap();
+        assert_eq!(wts.len(), 1);
+        assert_eq!(wts[0].path, PathBuf::from("/home/user/my project/repo"));
+    }
+
+    #[test]
+    fn parse_worktree_list_real_z_no_trailing_double_nul() {
+        // Handles output without trailing double-NUL (robustness)
+        let output = b"worktree /home/user/repo\0HEAD abc123\0branch refs/heads/main";
+        let wts = parse_worktree_list(output).unwrap();
+        assert_eq!(wts.len(), 1);
+        assert_eq!(wts[0].path, PathBuf::from("/home/user/repo"));
+    }
+
+    #[test]
     fn parse_check_ignore_matched() {
         // source\0linenum\0pattern\0pathname\0
         let output = b".gitignore\x005\x00*.log\x00debug.log\x00";
