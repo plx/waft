@@ -386,3 +386,21 @@ fn validate_passes_with_valid_files() {
         .success()
         .stderr(predicate::str::contains("validation passed"));
 }
+
+#[cfg(unix)]
+#[test]
+fn validate_rejects_symlinked_worktreeinclude() {
+    let repo = make_repo();
+    write_file(repo.path(), "real.wti", "*.env\n");
+    std::os::unix::fs::symlink(
+        repo.path().join("real.wti"),
+        repo.path().join(".worktreeinclude"),
+    )
+    .unwrap();
+
+    wiff()
+        .args(["validate", "--source", repo.path().to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("symlinked .worktreeinclude"));
+}
