@@ -166,6 +166,83 @@ fn validate_ignore_file(
             message: format!("failed to compile patterns: {err}"),
         });
     }
+
+    // Run lint-style checks for suspicious-but-legal patterns
+    check_suspicious_patterns(path, &content, report);
+}
+
+/// Lint-style checks for suspicious-but-legal patterns.
+///
+/// Detects:
+/// - **Shadowed negations**: a negation like `!dir/file` after `dir/` was excluded.
+///   Git won't descend into a directory-excluded path, so the negation is ineffective.
+/// - **Duplicate patterns**: the same pattern text appearing more than once.
+fn check_suspicious_patterns(path: &Path, content: &str, report: &mut ValidationReport) {
+    // Track literal directory exclusion patterns (e.g. "build/", "vendor/pkg/")
+    let mut dir_exclusions: Vec<String> = Vec::new();
+    // Track seen patterns for duplicate detection (pattern text → first line number)
+    let mut seen_patterns: Vec<(&str, usize)> = Vec::new();
+
+    for (line_num, line_text) in content.lines().enumerate() {
+        let line_1based = line_num + 1;
+        let trimmed = line_text.trim();
+
+        // Skip empty lines and comments
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        // Skip lines with escaped leading characters (e.g. `\!pattern`, `\#pattern`)
+        let is_negation = trimmed.starts_with('!') && !trimmed.starts_with("\\!");
+        let pattern_text = if is_negation { &trimmed[1..] } else { trimmed };
+
+        // --- Duplicate detection ---
+        if let Some((_, first_line)) = seen_patterns.iter().find(|(p, _)| *p == trimmed) {
+            report.issues.push(ValidationIssue {
+                severity: ValidationSeverity::Warning,
+                file: path.to_path_buf(),
+                line: Some(line_1based),
+                message: format!(
+                    "duplicate pattern '{}' (first appeared on line {})",
+                    trimmed, first_line
+                ),
+            });
+        } else {
+            seen_patterns.push((trimmed, line_1based));
+        }
+
+        // --- Shadowed negation detection ---
+        if is_negation {
+            for dir_pat in &dir_exclusions {
+                if pattern_text.starts_with(dir_pat.as_str()) {
+                    report.issues.push(ValidationIssue {
+                        severity: ValidationSeverity::Warning,
+                        file: path.to_path_buf(),
+                        line: Some(line_1based),
+                        message: format!(
+                            "negation '{}' is likely shadowed by directory exclusion '{}' \
+                             (git will not descend into excluded directories)",
+                            trimmed,
+                            dir_pat.trim_end_matches('/')
+                        ),
+                    });
+                    break; // One warning per negation is enough
+                }
+            }
+        } else {
+            // Track literal directory exclusion patterns (ending with `/`,
+            // no glob wildcards). Patterns with `*`, `?`, or `[` are not
+            // simple directory exclusions — e.g. `build/*` still allows
+            // git to descend into `build/`.
+            if pattern_text.ends_with('/')
+                && !pattern_text.contains('*')
+                && !pattern_text.contains('?')
+                && !pattern_text.contains('[')
+            {
+                dir_exclusions.push(pattern_text.to_string());
+            }
+        }
+    }
 }
 
 /// Try to find the global Git excludes file.
@@ -459,6 +536,165 @@ mod tests {
             !errors.is_empty(),
             "expected an error for symlinked .worktreeinclude in subdir, got: {:?}",
             report.issues
+        );
+    }
+
+    #[test]
+    fn shadowed_negation_produces_warning() {
+        let dir = make_repo();
+        // `build/` excludes the directory; `!build/important.txt` is a negation
+        // that git will never evaluate because it won't descend into build/.
+        fs::write(
+            dir.path().join(".gitignore"),
+            "build/\n!build/important.txt\n",
+        )
+        .unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+
+        let report = validate(&ctx, &git);
+        let warnings: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| {
+                matches!(i.severity, ValidationSeverity::Warning)
+                    && i.message.contains("shadowed")
+            })
+            .collect();
+        assert!(
+            !warnings.is_empty(),
+            "expected a shadowed negation warning, got: {:?}",
+            report.issues
+        );
+        // The warning should point to line 2 (the negation)
+        assert_eq!(warnings[0].line, Some(2));
+    }
+
+    #[test]
+    fn shadowed_negation_nested_path() {
+        let dir = make_repo();
+        // `vendor/` excludes the directory; `!vendor/lib/keep.so` is shadowed
+        fs::write(
+            dir.path().join(".gitignore"),
+            "vendor/\n!vendor/lib/keep.so\n",
+        )
+        .unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+
+        let report = validate(&ctx, &git);
+        let warnings: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| {
+                matches!(i.severity, ValidationSeverity::Warning)
+                    && i.message.contains("shadowed")
+            })
+            .collect();
+        assert!(
+            !warnings.is_empty(),
+            "expected a shadowed negation warning for nested path"
+        );
+    }
+
+    #[test]
+    fn wildcard_exclusion_not_shadowed() {
+        let dir = make_repo();
+        // `build/*` uses a wildcard (not a directory exclusion), so git still
+        // descends into build/ and the negation `!build/important.txt` works.
+        fs::write(
+            dir.path().join(".gitignore"),
+            "build/*\n!build/important.txt\n",
+        )
+        .unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+
+        let report = validate(&ctx, &git);
+        let warnings: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| {
+                matches!(i.severity, ValidationSeverity::Warning)
+                    && i.message.contains("shadowed")
+            })
+            .collect();
+        assert!(
+            warnings.is_empty(),
+            "wildcard exclusion should not trigger shadowed warning: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_pattern_produces_warning() {
+        let dir = make_repo();
+        fs::write(dir.path().join(".gitignore"), "*.log\n*.tmp\n*.log\n").unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+
+        let report = validate(&ctx, &git);
+        let warnings: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| {
+                matches!(i.severity, ValidationSeverity::Warning)
+                    && i.message.contains("duplicate")
+            })
+            .collect();
+        assert!(
+            !warnings.is_empty(),
+            "expected a duplicate pattern warning, got: {:?}",
+            report.issues
+        );
+        // The warning should point to line 3 (the duplicate)
+        assert_eq!(warnings[0].line, Some(3));
+    }
+
+    #[test]
+    fn no_warnings_for_clean_patterns() {
+        let dir = make_repo();
+        // All patterns are unique and no shadowed negations
+        fs::write(
+            dir.path().join(".gitignore"),
+            "*.log\n*.tmp\ntarget/\n",
+        )
+        .unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+
+        let report = validate(&ctx, &git);
+        let warnings: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| matches!(i.severity, ValidationSeverity::Warning))
+            .collect();
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    #[test]
+    fn suspicious_patterns_in_worktreeinclude() {
+        let dir = make_repo();
+        // Suspicious patterns should also be detected in .worktreeinclude files
+        fs::write(
+            dir.path().join(".worktreeinclude"),
+            "secrets/\n!secrets/public.key\n",
+        )
+        .unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+
+        let report = validate(&ctx, &git);
+        let warnings: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| {
+                matches!(i.severity, ValidationSeverity::Warning)
+                    && i.message.contains("shadowed")
+            })
+            .collect();
+        assert!(
+            !warnings.is_empty(),
+            "expected a shadowed negation warning in .worktreeinclude"
         );
     }
 
