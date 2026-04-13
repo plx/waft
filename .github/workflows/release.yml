@@ -6,9 +6,6 @@ on:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   check:
     name: Pre-release checks
@@ -18,22 +15,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: taiki-e/install-action@just
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo fmt --check
-        run: cargo fmt --check
+      - name: just check-format
+        run: just check-format
 
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: just check-clippy
+        run: just check-clippy
 
-      - name: cargo test
-        run: cargo test --workspace --all-features
+      - name: just check-test
+        run: just check-test
 
-      - name: cargo test --doc
-        run: cargo test --doc
+      - name: just check-doc-test
+        run: just check-doc-test
 
-      - name: cargo doc --no-deps
-        run: cargo doc --no-deps
+      - name: just check-doc-build
+        run: just check-doc-build
 
   # Placeholder for future cargo publish and binary builds
   # publish:

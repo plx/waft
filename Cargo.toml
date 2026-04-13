@@ -1,7 +1,7 @@
 [package]
 name = "wiff"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Copy .worktreeinclude-selected ignored files between Git worktrees"
 license = "MIT"
 

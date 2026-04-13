@@ -114,8 +114,7 @@ pub fn explain(
     let mut last_result = WorktreeincludeStatus::NoMatch;
 
     for ctx in &contexts {
-        if let Some(result) =
-            evaluate_against_context(ctx, &full_path, rel_path, is_dir, repo_root)
+        if let Some(result) = evaluate_against_context(ctx, &full_path, rel_path, is_dir, repo_root)
         {
             last_result = result;
         }
@@ -128,12 +127,9 @@ pub fn explain(
     if matches!(
         last_result,
         WorktreeincludeStatus::ExcludedByNegation { .. }
-    ) {
-        if let Some(override_result) =
-            cross_file_ancestor_check(&contexts, rel_path, repo_root)
-        {
-            return override_result;
-        }
+    ) && let Some(override_result) = cross_file_ancestor_check(&contexts, rel_path, repo_root)
+    {
+        return override_result;
     }
 
     last_result
@@ -468,7 +464,11 @@ mod tests {
         let subdir = dir.path().join("sub");
         fs::create_dir(&subdir).unwrap();
 
-        fs::write(subdir.join(".worktreeinclude"), "/secrets/\n!/secrets/public\n").unwrap();
+        fs::write(
+            subdir.join(".worktreeinclude"),
+            "/secrets/\n!/secrets/public\n",
+        )
+        .unwrap();
 
         // secrets/ directory pattern should select files inside it
         let result = explain(dir.path(), "sub/secrets/private.key", false, false);
@@ -589,11 +589,7 @@ mod tests {
         // When the positive match is a file pattern (not directory), negation
         // should work normally — the caveat only applies to directory patterns.
         let dir = setup_repo();
-        fs::write(
-            dir.path().join(".worktreeinclude"),
-            "*.env\n!staging.env\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join(".worktreeinclude"), "*.env\n!staging.env\n").unwrap();
 
         let result = explain(dir.path(), "staging.env", false, false);
         assert!(

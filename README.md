@@ -99,13 +99,13 @@ A file is eligible for copying when **all** of these are true:
 ## Building
 
 ```sh
-cargo build --release
+just build-release
 ```
 
 ## Testing
 
 ```sh
-cargo test --workspace --all-features
+just check-test
 ```
 
 ## License

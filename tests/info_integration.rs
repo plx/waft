@@ -130,8 +130,16 @@ fn info_missing_file() {
 fn setup_worktrees() -> (TempDir, TempDir) {
     let main_dir = make_repo();
 
-    write_file(main_dir.path(), ".gitignore", ".env\n*.secret\nconfig\nnested/secret.env\n");
-    write_file(main_dir.path(), ".worktreeinclude", ".env\n*.secret\nconfig\nnested/secret.env\n");
+    write_file(
+        main_dir.path(),
+        ".gitignore",
+        ".env\n*.secret\nconfig\nnested/secret.env\n",
+    );
+    write_file(
+        main_dir.path(),
+        ".worktreeinclude",
+        ".env\n*.secret\nconfig\nnested/secret.env\n",
+    );
     git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(main_dir.path(), &["commit", "-m", "init"]);
 
@@ -179,7 +187,9 @@ fn info_dest_tracked_conflict() {
         .assert()
         .success()
         .stdout(predicate::str::contains("destination: tracked-conflict"))
-        .stdout(predicate::str::contains("planned_action: skip (tracked conflict)"));
+        .stdout(predicate::str::contains(
+            "planned_action: skip (tracked conflict)",
+        ));
 }
 
 /// When a destination file exists, differs, and is NOT tracked, info should
@@ -205,7 +215,9 @@ fn info_dest_untracked_conflict() {
         .assert()
         .success()
         .stdout(predicate::str::contains("destination: untracked-conflict"))
-        .stdout(predicate::str::contains("planned_action: skip (untracked conflict)"));
+        .stdout(predicate::str::contains(
+            "planned_action: skip (untracked conflict)",
+        ));
 }
 
 /// When a destination file is byte-identical to source, info should report
@@ -256,7 +268,9 @@ fn info_dest_type_conflict() {
         .assert()
         .success()
         .stdout(predicate::str::contains("destination: type-conflict"))
-        .stdout(predicate::str::contains("planned_action: skip (type conflict)"));
+        .stdout(predicate::str::contains(
+            "planned_action: skip (type conflict)",
+        ));
 }
 
 /// When the destination's parent path contains a symlink, info should report
@@ -285,7 +299,9 @@ fn info_dest_unsafe_path() {
         .assert()
         .success()
         .stdout(predicate::str::contains("destination: unsafe-path"))
-        .stdout(predicate::str::contains("planned_action: skip (unsafe path)"));
+        .stdout(predicate::str::contains(
+            "planned_action: skip (unsafe path)",
+        ));
 }
 
 /// When destination does not exist and file is eligible, info should report

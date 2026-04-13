@@ -492,7 +492,8 @@ mod tests {
 
     #[test]
     fn parse_worktree_list_real_z_path_with_spaces() {
-        let output = b"worktree /home/user/my project/repo\0HEAD abc123\0branch refs/heads/main\0\0";
+        let output =
+            b"worktree /home/user/my project/repo\0HEAD abc123\0branch refs/heads/main\0\0";
         let wts = parse_worktree_list(output).unwrap();
         assert_eq!(wts.len(), 1);
         assert_eq!(wts[0].path, PathBuf::from("/home/user/my project/repo"));

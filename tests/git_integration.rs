@@ -261,7 +261,10 @@ fn list_verbose_no_predicted_action_without_dest() {
         .success();
 
     let stdout = String::from_utf8(output.get_output().stdout.clone()).unwrap();
-    assert!(!stdout.contains("action:"), "should not show predicted action without --dest");
+    assert!(
+        !stdout.contains("action:"),
+        "should not show predicted action without --dest"
+    );
 }
 
 fn setup_list_worktrees() -> (TempDir, TempDir) {
@@ -298,8 +301,10 @@ fn list_verbose_dest_missing_shows_copy() {
     wiff()
         .args([
             "list",
-            "--source", main_dir.path().to_str().unwrap(),
-            "--dest", wt_path.to_str().unwrap(),
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
             "-v",
         ])
         .assert()
@@ -318,8 +323,10 @@ fn list_verbose_dest_up_to_date_shows_noop() {
     wiff()
         .args([
             "list",
-            "--source", main_dir.path().to_str().unwrap(),
-            "--dest", wt_path.to_str().unwrap(),
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
             "-v",
         ])
         .assert()
@@ -338,13 +345,17 @@ fn list_verbose_dest_untracked_conflict_shows_skip() {
     wiff()
         .args([
             "list",
-            "--source", main_dir.path().to_str().unwrap(),
-            "--dest", wt_path.to_str().unwrap(),
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
             "-v",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("action: skip (untracked conflict)"));
+        .stdout(predicate::str::contains(
+            "action: skip (untracked conflict)",
+        ));
 }
 
 #[test]
@@ -361,8 +372,10 @@ fn list_verbose_dest_tracked_conflict_shows_skip() {
     wiff()
         .args([
             "list",
-            "--source", main_dir.path().to_str().unwrap(),
-            "--dest", wt_path.to_str().unwrap(),
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
             "-v",
         ])
         .assert()

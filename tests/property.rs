@@ -347,10 +347,7 @@ fn parse_wiff_info_explanation(stdout: &str, path: &str) -> Option<ExplanationTu
 
 /// Query `git check-ignore -v -n -z` for a set of paths and return
 /// explanation tuples keyed by pathname.
-fn git_check_ignore_explanations(
-    dir: &Path,
-    paths: &[&str],
-) -> BTreeMap<String, ExplanationTuple> {
+fn git_check_ignore_explanations(dir: &Path, paths: &[&str]) -> BTreeMap<String, ExplanationTuple> {
     if paths.is_empty() {
         return BTreeMap::new();
     }
@@ -424,11 +421,7 @@ fn wiff_info(dir: &Path, paths: &[&str]) -> String {
 /// Helper: set up a repo with given .gitignore, .worktreeinclude, and files,
 /// then compare per-path gitignore explanation tuples from wiff info against
 /// git check-ignore -v -n.
-fn assert_explanation_parity(
-    gitignore: &str,
-    worktreeinclude: &str,
-    files: &[&str],
-) {
+fn assert_explanation_parity(gitignore: &str, worktreeinclude: &str, files: &[&str]) {
     let repo = make_repo();
     write_file(repo.path(), ".gitignore", gitignore);
     write_file(repo.path(), ".worktreeinclude", worktreeinclude);
@@ -506,11 +499,7 @@ fn explanation_parity_doublestar() {
 fn explanation_parity_directory_slash() {
     // A pattern ending in / only matches directories in gitignore.
     // Files named "logs" should NOT match "logs/" pattern.
-    assert_explanation_parity(
-        "logs/\n*.tmp\n",
-        "*.tmp\n",
-        &["test.tmp", "logs"],
-    );
+    assert_explanation_parity("logs/\n*.tmp\n", "*.tmp\n", &["test.tmp", "logs"]);
 }
 
 #[test]

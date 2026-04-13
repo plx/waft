@@ -41,5 +41,7 @@ pub mod git;
 pub mod model;
 pub mod path;
 pub mod planner;
+/// Subcommand argument types and command handlers.
+pub mod subcommands;
 pub mod validate;
 pub mod worktreeinclude;

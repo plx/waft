@@ -47,16 +47,16 @@ pub fn validate(ctx: &RepoContext, git: &dyn GitBackend) -> ValidationReport {
     }
 
     // Optionally validate global excludes (warning-only)
-    if let Some(global_path) = find_global_excludes(&ctx.source_root, git) {
-        if global_path.exists() {
-            validate_ignore_file(
-                &global_path,
-                &ctx.source_root,
-                ctx.core_ignore_case,
-                ValidationSeverity::Warning,
-                &mut report,
-            );
-        }
+    if let Some(global_path) = find_global_excludes(&ctx.source_root, git)
+        && global_path.exists()
+    {
+        validate_ignore_file(
+            &global_path,
+            &ctx.source_root,
+            ctx.core_ignore_case,
+            ValidationSeverity::Warning,
+            &mut report,
+        );
     }
 
     report
@@ -248,11 +248,11 @@ fn check_suspicious_patterns(path: &Path, content: &str, report: &mut Validation
 /// Try to find the global Git excludes file.
 fn find_global_excludes(source_root: &Path, git: &dyn GitBackend) -> Option<PathBuf> {
     // Try git config core.excludesFile via the backend
-    if let Ok(Some(path_str)) = git.read_config(source_root, "core.excludesFile") {
-        if !path_str.is_empty() {
-            let path = expand_tilde(&path_str);
-            return Some(path);
-        }
+    if let Ok(Some(path_str)) = git.read_config(source_root, "core.excludesFile")
+        && !path_str.is_empty()
+    {
+        let path = expand_tilde(&path_str);
+        return Some(path);
     }
 
     // Fall back to default location
@@ -268,10 +268,10 @@ fn find_global_excludes(source_root: &Path, git: &dyn GitBackend) -> Option<Path
 
 /// Expand `~` at the start of a path.
 fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = home_dir() {
-            return home.join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = home_dir()
+    {
+        return home.join(rest);
     }
     PathBuf::from(path)
 }
@@ -296,10 +296,10 @@ fn walkdir(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use crate::error::Result;
     use crate::git::{GitBackend, IgnoreCheckRecord, WorktreeRecord};
     use crate::path::RepoRelPath;
+    use std::collections::HashSet;
     use tempfile::TempDir;
 
     fn make_repo() -> TempDir {
@@ -480,7 +480,10 @@ mod tests {
             .iter()
             .filter(|i| matches!(i.severity, ValidationSeverity::Warning))
             .collect();
-        assert!(!warnings.is_empty(), "expected a warning for invalid global excludes pattern");
+        assert!(
+            !warnings.is_empty(),
+            "expected a warning for invalid global excludes pattern"
+        );
     }
 
     #[cfg(unix)]
@@ -557,8 +560,7 @@ mod tests {
             .issues
             .iter()
             .filter(|i| {
-                matches!(i.severity, ValidationSeverity::Warning)
-                    && i.message.contains("shadowed")
+                matches!(i.severity, ValidationSeverity::Warning) && i.message.contains("shadowed")
             })
             .collect();
         assert!(
@@ -587,8 +589,7 @@ mod tests {
             .issues
             .iter()
             .filter(|i| {
-                matches!(i.severity, ValidationSeverity::Warning)
-                    && i.message.contains("shadowed")
+                matches!(i.severity, ValidationSeverity::Warning) && i.message.contains("shadowed")
             })
             .collect();
         assert!(
@@ -615,8 +616,7 @@ mod tests {
             .issues
             .iter()
             .filter(|i| {
-                matches!(i.severity, ValidationSeverity::Warning)
-                    && i.message.contains("shadowed")
+                matches!(i.severity, ValidationSeverity::Warning) && i.message.contains("shadowed")
             })
             .collect();
         assert!(
@@ -637,8 +637,7 @@ mod tests {
             .issues
             .iter()
             .filter(|i| {
-                matches!(i.severity, ValidationSeverity::Warning)
-                    && i.message.contains("duplicate")
+                matches!(i.severity, ValidationSeverity::Warning) && i.message.contains("duplicate")
             })
             .collect();
         assert!(
@@ -654,11 +653,7 @@ mod tests {
     fn no_warnings_for_clean_patterns() {
         let dir = make_repo();
         // All patterns are unique and no shadowed negations
-        fs::write(
-            dir.path().join(".gitignore"),
-            "*.log\n*.tmp\ntarget/\n",
-        )
-        .unwrap();
+        fs::write(dir.path().join(".gitignore"), "*.log\n*.tmp\ntarget/\n").unwrap();
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
@@ -688,8 +683,7 @@ mod tests {
             .issues
             .iter()
             .filter(|i| {
-                matches!(i.severity, ValidationSeverity::Warning)
-                    && i.message.contains("shadowed")
+                matches!(i.severity, ValidationSeverity::Warning) && i.message.contains("shadowed")
             })
             .collect();
         assert!(
