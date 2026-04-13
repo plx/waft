@@ -178,7 +178,9 @@ mod tests {
     use std::collections::HashSet;
 
     fn test_path(name: &str) -> PathBuf {
-        std::env::current_dir().expect("current dir should be available").join(name)
+        std::env::current_dir()
+            .expect("current dir should be available")
+            .join(name)
     }
 
     fn main_repo_path() -> PathBuf {
@@ -304,14 +306,8 @@ mod tests {
     fn copy_requires_dest_from_main_worktree() {
         let main = main_repo_path();
         let git = MockGit::new(main_and_linked());
-        let err = resolve_context(
-            &git,
-            Some(main.as_path()),
-            None,
-            None,
-            CommandKind::Copy,
-        )
-        .unwrap_err();
+        let err =
+            resolve_context(&git, Some(main.as_path()), None, None, CommandKind::Copy).unwrap_err();
         assert!(err.to_string().contains("destination"));
     }
 
@@ -319,14 +315,8 @@ mod tests {
     fn list_does_not_require_dest() {
         let main = main_repo_path();
         let git = MockGit::new(main_and_linked());
-        let ctx = resolve_context(
-            &git,
-            Some(main.as_path()),
-            None,
-            None,
-            CommandKind::List,
-        )
-        .unwrap();
+        let ctx =
+            resolve_context(&git, Some(main.as_path()), None, None, CommandKind::List).unwrap();
         assert_eq!(ctx.source_root, main);
         assert!(ctx.dest_root.is_none());
     }
