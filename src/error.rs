@@ -1,8 +1,8 @@
-//! Error types for wiff.
+//! Error types for waft.
 
 use std::path::PathBuf;
 
-/// Top-level error type for wiff operations.
+/// Top-level error type for waft operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// An I/O error occurred.
@@ -75,5 +75,5 @@ pub enum Error {
     },
 }
 
-/// Result type alias for wiff operations.
+/// Result type alias for waft operations.
 pub type Result<T> = std::result::Result<T, Error>;

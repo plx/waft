@@ -1,10 +1,10 @@
-Below is a v1 handoff spec for wiff.
+Below is a v1 handoff spec for waft.
 
 Anthropic’s documented rule is the right starting point: .worktreeinclude uses .gitignore syntax, and only files that both match .worktreeinclude and are Git-ignored should be copied. This spec keeps that rule, but explicitly extends it to nested .worktreeinclude files by using the same per-directory matching model Git uses for per-directory ignore files, where deeper files override shallower ones and patterns are relative to the directory containing the file.  ￼
 
 1. Product contract
 
-wiff is a Rust CLI for copying local ignored files from a repository’s main worktree into a linked worktree.
+waft is a Rust CLI for copying local ignored files from a repository’s main worktree into a linked worktree.
 
 The logical rule for whether a path is eligible is:
 
@@ -39,11 +39,11 @@ Implement the CLI with clap derive APIs. clap documents derive-based subcommands
 
 Suggested surface:
 
-wiff [GLOBAL_OPTS]                    # same as: wiff copy
-wiff copy [GLOBAL_OPTS] [COPY_OPTS]
-wiff list [GLOBAL_OPTS] [LIST_OPTS]
-wiff info [GLOBAL_OPTS] <PATH>...
-wiff validate [GLOBAL_OPTS]
+waft [GLOBAL_OPTS]                    # same as: waft copy
+waft copy [GLOBAL_OPTS] [COPY_OPTS]
+waft list [GLOBAL_OPTS] [LIST_OPTS]
+waft info [GLOBAL_OPTS] <PATH>...
+waft validate [GLOBAL_OPTS]
 
 Suggested global options:
 	•	--source <PATH>: source/main worktree. Optional.
@@ -58,8 +58,8 @@ Suggested copy options:
 	•	--no-validate is not needed in v1; fail fast on validation errors
 
 Suggested defaults:
-	•	If run inside a linked worktree with no args, wiff should auto-detect the main worktree as source and treat the current worktree as destination.
-	•	If run inside the main worktree, wiff list and wiff info should default source to the current repo. wiff copy should require --dest in that case.
+	•	If run inside a linked worktree with no args, waft should auto-detect the main worktree as source and treat the current worktree as destination.
+	•	If run inside the main worktree, waft list and waft info should default source to the current repo. waft copy should require --dest in that case.
 
 Use git worktree list --porcelain -z for worktree discovery. Git documents that the main worktree is listed first and that the porcelain format is stable for scripts. Use git rev-parse --show-toplevel to normalize any repo path to the worktree root.  ￼
 
@@ -67,7 +67,7 @@ Use git worktree list --porcelain -z for worktree discovery. Git documents that 
 
 3.1 Git ignore semantics
 
-For Git ignore status, wiff must defer to Git, not approximate it.
+For Git ignore status, waft must defer to Git, not approximate it.
 
 Important rules to preserve:
 	•	Tracked files are not affected by ignore rules.  ￼
@@ -80,7 +80,7 @@ Important rules to preserve:
 
 3.2 .worktreeinclude semantics
 
-wiff should treat .worktreeinclude as a Git-compatible per-directory exclude file whose matches mean “selected for copy”.
+waft should treat .worktreeinclude as a Git-compatible per-directory exclude file whose matches mean “selected for copy”.
 
 That sounds inverted, but it is the cleanest way to preserve Git behavior exactly.
 
@@ -419,15 +419,15 @@ Must-cover scenarios:
 	•	destination identical file is a no-op
 	•	symlinked .worktreeinclude causes validation failure
 	•	copy --dry-run produces the same selected set as list
-	•	running wiff with no subcommand inside a linked worktree performs default-copy planning correctly
+	•	running waft with no subcommand inside a linked worktree performs default-copy planning correctly
 
 13.3 Differential property tests against Git
 
 This is the most important testing recommendation.
 
-Use generated small repos and compare wiff behavior against Git as oracle:
+Use generated small repos and compare waft behavior against Git as oracle:
 	•	Generate random file trees plus random nested .worktreeinclude files.
-	•	Compare wiff’s selected-set logic against:
+	•	Compare waft’s selected-set logic against:
 
 git ls-files --others --ignored --exclude-per-directory=.worktreeinclude
 
@@ -502,7 +502,7 @@ Document these invariants explicitly:
 17. Definition of done
 
 v1 is done when all of the following are true:
-	•	wiff in a linked worktree, with no subcommand, plans/copies from the main worktree by default.
+	•	waft in a linked worktree, with no subcommand, plans/copies from the main worktree by default.
 	•	copy, list, and info all work with nested .worktreeinclude and nested .gitignore.
 	•	Git remains the source of truth for ignore membership and explanations.
 	•	.worktreeinclude explanations report file, line, and raw pattern.

@@ -1,4 +1,4 @@
-Yes. After looking through the ignore source, the right extraction target is not WalkBuilder. The useful seam is lower down: keep the public gitignore parser/compiler almost intact, then pull the internal directory-hierarchy matcher out of dir.rs and turn it into a public path-classification API. The current public API is built to answer “should this entry be skipped while walking?”; wiff needs “for this same path, what does Git-ignore say, what does worktreeinclude say, and what is their intersection?” Those are different abstractions.  ￼
+Yes. After looking through the ignore source, the right extraction target is not WalkBuilder. The useful seam is lower down: keep the public gitignore parser/compiler almost intact, then pull the internal directory-hierarchy matcher out of dir.rs and turn it into a public path-classification API. The current public API is built to answer “should this entry be skipped while walking?”; waft needs “for this same path, what does Git-ignore say, what does worktreeinclude say, and what is their intersection?” Those are different abstractions.  ￼
 
 What is already solid and worth reusing
 
@@ -6,17 +6,17 @@ The best reusable part is ignore::gitignore. The crate docs explicitly say it ex
 
 The part that matters for nested files is in dir.rs. That module’s own top comment says it exists to connect directory traversal with ignore matchers, organized by directory hierarchy, with one matcher per directory pointing to its parent, implemented as a persistent structure that also supports parallel traversal. That is almost exactly the “nested .gitignore / nested .worktreeinclude” machinery you want.  ￼
 
-There is also an important performance hint in the existing code: Gitignore::matched_path_or_any_parents is explicitly documented as a convenient one-off API, but somewhat wasteful if called repeatedly while walking a tree, because it rescans parent directories for each path. That is why the hierarchical dir::Ignore layer exists. For wiff, even if you do “walk files, then query both matchers,” you still want the directory-stack model instead of calling the one-off parent-scanning API for every file.  ￼
+There is also an important performance hint in the existing code: Gitignore::matched_path_or_any_parents is explicitly documented as a convenient one-off API, but somewhat wasteful if called repeatedly while walking a tree, because it rescans parent directories for each path. That is why the hierarchical dir::Ignore layer exists. For waft, even if you do “walk files, then query both matchers,” you still want the directory-stack model instead of calling the one-off parent-scanning API for every file.  ￼
 
-Why the public API is the wrong fit for wiff
+Why the public API is the wrong fit for waft
 
-WalkBuilder bakes a traversal policy and a precedence chain into one decision. Its docs say the standard filters include .ignore, .gitignore, .git/info/exclude, and the global Git ignore file, plus hidden-file filtering and type filtering. The implementation then combines rule families in a fixed order, and add_custom_ignore_filename gives custom per-directory ignore files higher precedence than all other ignore files. That is useful for ripgrep-style walking, but it is not the model you need for wiff, because .worktreeinclude should be an independent classifier, not just another contributor to one global skip/keep decision.  ￼
+WalkBuilder bakes a traversal policy and a precedence chain into one decision. Its docs say the standard filters include .ignore, .gitignore, .git/info/exclude, and the global Git ignore file, plus hidden-file filtering and type filtering. The implementation then combines rule families in a fixed order, and add_custom_ignore_filename gives custom per-directory ignore files higher precedence than all other ignore files. That is useful for ripgrep-style walking, but it is not the model you need for waft, because .worktreeinclude should be an independent classifier, not just another contributor to one global skip/keep decision.  ￼
 
 The internal engine already knows how to support arbitrary per-directory filenames. add_custom_ignore_filename stores custom names, and the lower-level create_gitignore helper takes a list of names and builds matchers for whichever of those files exist in a given directory. That means the missing piece is not syntax support for .worktreeinclude; the missing piece is public exposure and separation of rule families.  ￼
 
-Another limitation is explainability. dir.rs has an internal IgnoreMatch type that distinguishes where a result came from, but it is pub(crate), not public. So the current crate does not give you a clean public way to ask “which .worktreeinclude line selected this file?” and separately “which .gitignore line ignored it?” That is exactly the sort of output wiff info wants.  ￼
+Another limitation is explainability. dir.rs has an internal IgnoreMatch type that distinguishes where a result came from, but it is pub(crate), not public. So the current crate does not give you a clean public way to ask “which .worktreeinclude line selected this file?” and separately “which .gitignore line ignored it?” That is exactly the sort of output waft info wants.  ￼
 
-One more caveat matters for wiff: the ignore crate does not consult the Git index. The module docs say it does not shell out to Git, and the maintainer has pointed out that Git’s own behavior also depends on repository state, such as whether a file is tracked. So even a perfect extraction of the matcher engine is not enough to tell you “this is Git-ignored” in the same sense Git does. wiff still needs a separate tracked/untracked check before treating a path as eligible.  ￼
+One more caveat matters for waft: the ignore crate does not consult the Git index. The module docs say it does not shell out to Git, and the maintainer has pointed out that Git’s own behavior also depends on repository state, such as whether a file is tracked. So even a perfect extraction of the matcher engine is not enough to tell you “this is Git-ignored” in the same sense Git does. waft still needs a separate tracked/untracked check before treating a path as eligible.  ￼
 
 The extraction target I would build
 
@@ -26,13 +26,13 @@ This is mostly today’s gitignore.rs. Keep it as close to upstream as possible.
 	2.	Hierarchical matcher tree
 This is the useful part of dir.rs: parent-linked per-directory matchers, child-cache reuse, and top-down classification.
 	3.	Optional traversal helper
-Keep this separate. wiff does not need the ripgrep walker as its core abstraction.
+Keep this separate. waft does not need the ripgrep walker as its core abstraction.
 
-That gives you two independent matcher trees in wiff:
+That gives you two independent matcher trees in waft:
 	•	one configured as the Git-ignore family
 	•	one configured as the worktreeinclude family
 
-Then wiff walks the source tree once and computes:
+Then waft walks the source tree once and computes:
 
 gitignored(path)      = ignore_matcher says ignored  AND path is not tracked
 worktreeincluded(path)= worktreeinclude_matcher says selected
@@ -92,7 +92,7 @@ pub struct FamilyConfig {
     pub semantics: Semantics,
 }
 
-For wiff, that becomes:
+For waft, that becomes:
 	•	gitignore family: .gitignore, .git/info/exclude, global excludes
 	•	worktreeinclude family: .worktreeinclude only
 
@@ -108,7 +108,7 @@ pub enum Decision {
     NoMatch,
 }
 
-or, even better for wiff:
+or, even better for waft:
 
 pub enum Decision {
     Selected,
@@ -116,7 +116,7 @@ pub enum Decision {
     NoMatch,
 }
 
-The upstream Match<T> type already has the combination/inversion primitives you would need internally; the public surface just should not force wiff to say “Ignore means included.”  ￼
+The upstream Match<T> type already has the combination/inversion primitives you would need internally; the public surface just should not force waft to say “Ignore means included.”  ￼
 
 Phase 5: make explanation data first-class
 
@@ -135,7 +135,7 @@ pub struct Classification {
     pub hit: Option<RuleHit>,
 }
 
-That gives wiff info exactly what it needs, and it removes the need to reverse-engineer results out of a traversal-oriented skip decision. The upstream code already has the shape of this internally through IgnoreMatch and the stored glob metadata; it just is not exposed cleanly today.  ￼
+That gives waft info exactly what it needs, and it removes the need to reverse-engineer results out of a traversal-oriented skip decision. The upstream code already has the shape of this internally through IgnoreMatch and the stored glob metadata; it just is not exposed cleanly today.  ￼
 
 Phase 6: keep trackedness outside the matcher
 
@@ -149,7 +149,7 @@ That separation matters because the matcher engine is about pattern semantics, w
 
 Phase 7: only then add a thin traversal layer
 
-For wiff, a plain recursive walk is enough. The important part is that when the walker enters a directory, it should descend both matcher cursors once and reuse them for children. That gives you the same top-down benefit as the current internal design without inheriting the whole ripgrep walker surface. This is also why I would not build v1 on repeated calls to matched_path_or_any_parents.  ￼
+For waft, a plain recursive walk is enough. The important part is that when the walker enters a directory, it should descend both matcher cursors once and reuse them for children. That gives you the same top-down benefit as the current internal design without inheriting the whole ripgrep walker surface. This is also why I would not build v1 on repeated calls to matched_path_or_any_parents.  ￼
 
 The practical cut line
 
@@ -173,6 +173,6 @@ Use the upstream code as a semantics reference, but use Git as the final oracle 
 	•	mixed case with core.ignoreCase
 	•	“tracked file matches ignore pattern” cases
 
-The reason for that last class is the repository-state caveat above; the matcher can say “pattern matched,” while wiff must still decide whether Git would actually treat the file as ignored. The upstream discussion and bug reports are enough reason to make this test suite part of the extraction, not an afterthought.  ￼
+The reason for that last class is the repository-state caveat above; the matcher can say “pattern matched,” while waft must still decide whether Git would actually treat the file as ignored. The upstream discussion and bug reports are enough reason to make this test suite part of the extraction, not an afterthought.  ￼
 
-For wiff specifically, I would build two matcher trees and intersect them, rather than trying to coerce WalkBuilder plus add_custom_ignore_filename(".worktreeinclude") into doing both jobs. The parser/compiler is reusable; the walker abstraction is the wrong center of gravity.
+For waft specifically, I would build two matcher trees and intersect them, rather than trying to coerce WalkBuilder plus add_custom_ignore_filename(".worktreeinclude") into doing both jobs. The parser/compiler is reusable; the walker abstraction is the wrong center of gravity.

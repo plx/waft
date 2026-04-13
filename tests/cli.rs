@@ -1,13 +1,13 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-fn wiff() -> Command {
-    Command::cargo_bin("wiff").unwrap()
+fn waft() -> Command {
+    Command::cargo_bin("waft").unwrap()
 }
 
 #[test]
 fn help_shows_usage() {
-    wiff()
+    waft()
         .arg("--help")
         .assert()
         .success()
@@ -20,7 +20,7 @@ fn help_shows_usage() {
 
 #[test]
 fn copy_help_shows_options() {
-    wiff()
+    waft()
         .args(["copy", "--help"])
         .assert()
         .success()
@@ -30,7 +30,7 @@ fn copy_help_shows_options() {
 
 #[test]
 fn list_help() {
-    wiff()
+    waft()
         .args(["list", "--help"])
         .assert()
         .success()
@@ -39,7 +39,7 @@ fn list_help() {
 
 #[test]
 fn info_help_shows_paths_arg() {
-    wiff()
+    waft()
         .args(["info", "--help"])
         .assert()
         .success()
@@ -48,7 +48,7 @@ fn info_help_shows_paths_arg() {
 
 #[test]
 fn validate_help() {
-    wiff()
+    waft()
         .args(["validate", "--help"])
         .assert()
         .success()
@@ -57,7 +57,7 @@ fn validate_help() {
 
 #[test]
 fn info_requires_paths() {
-    wiff()
+    waft()
         .arg("info")
         .assert()
         .failure()
@@ -66,9 +66,9 @@ fn info_requires_paths() {
 
 #[test]
 fn no_subcommand_dispatches_to_copy() {
-    // Running wiff with no subcommand should attempt copy (which is not
+    // Running waft with no subcommand should attempt copy (which is not
     // implemented yet and returns an error)
-    wiff()
+    waft()
         .assert()
         .failure()
         .stderr(predicate::str::contains("copy"));
@@ -76,9 +76,9 @@ fn no_subcommand_dispatches_to_copy() {
 
 #[test]
 fn version_flag() {
-    wiff()
+    waft()
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("wiff"));
+        .stdout(predicate::str::contains("waft"));
 }

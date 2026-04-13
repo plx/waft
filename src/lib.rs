@@ -1,6 +1,6 @@
-//! wiff — `.worktreeinclude` file fixer.
+//! waft — `.worktreeinclude` file fixer.
 //!
-//! `wiff` is a CLI tool for copying local ignored files from a repository's
+//! `waft` is a CLI tool for copying local ignored files from a repository's
 //! main worktree into a linked worktree, guided by `.worktreeinclude` files
 //! that use `.gitignore` syntax.
 //!

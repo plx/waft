@@ -1,4 +1,4 @@
-//! Property and differential tests comparing wiff behavior against Git.
+//! Property and differential tests comparing waft behavior against Git.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -34,8 +34,8 @@ fn make_repo() -> TempDir {
     dir
 }
 
-fn wiff_list(dir: &Path) -> BTreeSet<String> {
-    let output = process::Command::new(env!("CARGO_BIN_EXE_wiff"))
+fn waft_list(dir: &Path) -> BTreeSet<String> {
+    let output = process::Command::new(env!("CARGO_BIN_EXE_waft"))
         .args(["list", "--source", dir.to_str().unwrap()])
         .output()
         .unwrap();
@@ -48,7 +48,7 @@ fn wiff_list(dir: &Path) -> BTreeSet<String> {
 }
 
 /// Query git ls-files for worktreeinclude candidates, then filter through
-/// git check-ignore — the same algorithm wiff uses internally.
+/// git check-ignore — the same algorithm waft uses internally.
 fn git_oracle_eligible(dir: &Path) -> BTreeSet<String> {
     // Step 1: get worktreeinclude candidates
     let output = process::Command::new("git")
@@ -126,9 +126,9 @@ fn differential_simple_env() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    let wiff_result = wiff_list(repo.path());
+    let waft_result = waft_list(repo.path());
     let git_result = git_oracle_eligible(repo.path());
-    assert_eq!(wiff_result, git_result, "wiff and git oracle disagree");
+    assert_eq!(waft_result, git_result, "waft and git oracle disagree");
 }
 
 #[test]
@@ -152,11 +152,11 @@ fn differential_nested_override() {
     );
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    let wiff_result = wiff_list(repo.path());
+    let waft_result = waft_list(repo.path());
     let git_result = git_oracle_eligible(repo.path());
     assert_eq!(
-        wiff_result, git_result,
-        "wiff and git oracle disagree on nested override"
+        waft_result, git_result,
+        "waft and git oracle disagree on nested override"
     );
 }
 
@@ -170,9 +170,9 @@ fn differential_doublestar() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    let wiff_result = wiff_list(repo.path());
+    let waft_result = waft_list(repo.path());
     let git_result = git_oracle_eligible(repo.path());
-    assert_eq!(wiff_result, git_result);
+    assert_eq!(waft_result, git_result);
 }
 
 #[test]
@@ -190,11 +190,11 @@ fn differential_negation_chain() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    let wiff_result = wiff_list(repo.path());
+    let waft_result = waft_list(repo.path());
     let git_result = git_oracle_eligible(repo.path());
     assert_eq!(
-        wiff_result, git_result,
-        "wiff and git oracle disagree on negation chain"
+        waft_result, git_result,
+        "waft and git oracle disagree on negation chain"
     );
 }
 
@@ -209,10 +209,10 @@ fn differential_tracked_file_excluded() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "add ignore"]);
 
-    let wiff_result = wiff_list(repo.path());
+    let waft_result = waft_list(repo.path());
     let git_result = git_oracle_eligible(repo.path());
     assert_eq!(
-        wiff_result, git_result,
+        waft_result, git_result,
         "tracked file should be excluded by both"
     );
 }
@@ -229,9 +229,9 @@ fn differential_git_info_exclude() {
     git(repo.path(), &["add", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    let wiff_result = wiff_list(repo.path());
+    let waft_result = waft_list(repo.path());
     let git_result = git_oracle_eligible(repo.path());
-    assert_eq!(wiff_result, git_result, ".git/info/exclude should work");
+    assert_eq!(waft_result, git_result, ".git/info/exclude should work");
 }
 
 // --- Property-based test ---
@@ -257,7 +257,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(10))]
 
     #[test]
-    fn prop_wiff_matches_git_oracle(
+    fn prop_waft_matches_git_oracle(
         gitignore_patterns in prop::collection::vec(simple_pattern(), 1..4),
         wti_patterns in prop::collection::vec(simple_pattern(), 1..4),
         files in prop::collection::vec(safe_filename(), 1..6),
@@ -280,19 +280,19 @@ proptest! {
         git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
         git(repo.path(), &["commit", "-m", "setup"]);
 
-        let wiff_result = wiff_list(repo.path());
+        let waft_result = waft_list(repo.path());
         let git_result = git_oracle_eligible(repo.path());
-        prop_assert_eq!(wiff_result, git_result, "wiff and git oracle must agree");
+        prop_assert_eq!(waft_result, git_result, "waft and git oracle must agree");
     }
 }
 
 // --- Differential explanation-parity tests ---
 //
 // These tests compare per-path explanation tuples (source file, line, pattern)
-// from `wiff info` against `git check-ignore -v -n`, as required by
+// from `waft info` against `git check-ignore -v -n`, as required by
 // ImplementationPlan.txt step 13 lines 256-260.
 
-/// Parsed explanation tuple from either wiff or git.
+/// Parsed explanation tuple from either waft or git.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct ExplanationTuple {
     /// Basename of the source file (e.g., ".gitignore")
@@ -303,11 +303,11 @@ struct ExplanationTuple {
     pattern: String,
 }
 
-/// Parse `wiff info` output for a single path, extracting the gitignore
+/// Parse `waft info` output for a single path, extracting the gitignore
 /// explanation tuple.  The format is:
 ///   gitignore: ignored (.gitignore:5: *.log)
 /// Returns None if the path is not ignored.
-fn parse_wiff_info_explanation(stdout: &str, path: &str) -> Option<ExplanationTuple> {
+fn parse_waft_info_explanation(stdout: &str, path: &str) -> Option<ExplanationTuple> {
     // Find the block for this path
     let mut in_block = false;
     for line in stdout.lines() {
@@ -402,9 +402,9 @@ fn git_check_ignore_explanations(dir: &Path, paths: &[&str]) -> BTreeMap<String,
     result
 }
 
-/// Run `wiff info` for multiple paths and return the full stdout.
-fn wiff_info(dir: &Path, paths: &[&str]) -> String {
-    let mut cmd = process::Command::new(env!("CARGO_BIN_EXE_wiff"));
+/// Run `waft info` for multiple paths and return the full stdout.
+fn waft_info(dir: &Path, paths: &[&str]) -> String {
+    let mut cmd = process::Command::new(env!("CARGO_BIN_EXE_waft"));
     cmd.args(["info", "--source", dir.to_str().unwrap()]);
     for p in paths {
         cmd.arg(p);
@@ -412,14 +412,14 @@ fn wiff_info(dir: &Path, paths: &[&str]) -> String {
     let output = cmd.output().unwrap();
     assert!(
         output.status.success(),
-        "wiff info failed: {}",
+        "waft info failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
 /// Helper: set up a repo with given .gitignore, .worktreeinclude, and files,
-/// then compare per-path gitignore explanation tuples from wiff info against
+/// then compare per-path gitignore explanation tuples from waft info against
 /// git check-ignore -v -n.
 fn assert_explanation_parity(gitignore: &str, worktreeinclude: &str, files: &[&str]) {
     let repo = make_repo();
@@ -432,23 +432,23 @@ fn assert_explanation_parity(gitignore: &str, worktreeinclude: &str, files: &[&s
     git(repo.path(), &["commit", "-m", "setup"]);
 
     let git_explanations = git_check_ignore_explanations(repo.path(), files);
-    let wiff_stdout = wiff_info(repo.path(), files);
+    let waft_stdout = waft_info(repo.path(), files);
 
     for f in files {
         let git_exp = git_explanations.get(*f);
-        let wiff_exp = parse_wiff_info_explanation(&wiff_stdout, f);
+        let waft_exp = parse_waft_info_explanation(&waft_stdout, f);
 
         assert_eq!(
             git_exp.cloned(),
-            wiff_exp,
+            waft_exp,
             "explanation parity mismatch for path '{}'\n\
              git check-ignore says: {:?}\n\
-             wiff info says: {:?}\n\
-             wiff stdout:\n{}",
+             waft info says: {:?}\n\
+             waft stdout:\n{}",
             f,
             git_exp,
-            wiff_exp,
-            wiff_stdout,
+            waft_exp,
+            waft_stdout,
         );
     }
 }
@@ -519,18 +519,18 @@ fn explanation_parity_git_info_exclude() {
 
     let files = &["test.tmp"];
     let git_explanations = git_check_ignore_explanations(repo.path(), files);
-    let wiff_stdout = wiff_info(repo.path(), files);
+    let waft_stdout = waft_info(repo.path(), files);
 
     let git_exp = git_explanations.get("test.tmp");
-    let wiff_exp = parse_wiff_info_explanation(&wiff_stdout, "test.tmp");
+    let waft_exp = parse_waft_info_explanation(&waft_stdout, "test.tmp");
 
     // Both should agree that the source is "exclude" (from .git/info/exclude)
     assert_eq!(
         git_exp.cloned(),
-        wiff_exp,
+        waft_exp,
         "explanation parity mismatch for .git/info/exclude case\n\
-         git: {:?}\nwiff: {:?}",
+         git: {:?}\nwaft: {:?}",
         git_exp,
-        wiff_exp,
+        waft_exp,
     );
 }

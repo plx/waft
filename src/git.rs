@@ -1,6 +1,6 @@
 //! Git backend trait and CLI implementation.
 //!
-//! This module is the **only** place in wiff that shells out to `git`.
+//! This module is the **only** place in waft that shells out to `git`.
 //! All Git interactions go through the [`GitBackend`] trait, allowing
 //! the planner and other modules to be tested without real Git repos.
 
