@@ -8,9 +8,9 @@ use crate::subcommands::{
     CopyArgs, InfoArgs, ListArgs, ValidateArgs, run_copy, run_info, run_list, run_validate,
 };
 
-/// wiff — copy .worktreeinclude-selected ignored files between Git worktrees.
+/// waft — copy .worktreeinclude-selected ignored files between Git worktrees.
 #[derive(Debug, Parser)]
-#[command(name = "wiff", version, about, long_about = None)]
+#[command(name = "waft", version, about, long_about = None)]
 pub struct Cli {
     /// Source (main) worktree path.
     #[arg(long, global = true)]

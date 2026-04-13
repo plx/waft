@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::process;
 
-use wiff::cli::Cli;
+use waft::cli::Cli;
 
 fn main() {
     let cli = Cli::parse();

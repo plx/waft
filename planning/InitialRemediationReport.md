@@ -73,7 +73,7 @@ Code evidence:
 
 Concrete behavior evidence:
 ```text
-$ wiff list --source <repo> --dest <linked> -v
+$ waft list --source <repo> --dest <linked> -v
 .env    Included { file: ".../.worktreeinclude", line: 1, pattern: ".env" }
 ```
 No Git ignore explanation, no source size, no predicted action.
@@ -137,8 +137,8 @@ Code evidence:
 
 Concrete behavior evidence:
 With unreadable `.gitignore`:
-- `wiff validate --source <repo>` fails (non-zero)
-- `wiff info --source <repo> <path>` still succeeds and reports statuses
+- `waft validate --source <repo>` fails (non-zero)
+- `waft info --source <repo> <path>` still succeeds and reports statuses
 
 ### Suggested Fix
 Mirror `copy`/`list` behavior in `run_info`: run `validate::validate`, fail on errors, and print warnings consistently.
@@ -167,7 +167,7 @@ A repo with `.worktreeinclude -> real.wti` returns `validation passed`.
 Detect `.worktreeinclude` symlinks regardless of `is_file()` and emit error.
 
 ### Validation
-Add integration test: symlinked `.worktreeinclude` must make `wiff validate` fail.
+Add integration test: symlinked `.worktreeinclude` must make `waft validate` fail.
 
 ---
 
@@ -252,7 +252,7 @@ Current gaps:
 
 ### Suggested Fix
 - Add missing integration cases to `tests/copy_integration.rs`.
-- Add differential tests that compare explanation tuples from wiff vs `git check-ignore -v -n`.
+- Add differential tests that compare explanation tuples from waft vs `git check-ignore -v -n`.
 
 ### Validation
 Gate on new tests in CI to prevent regression of these semantics.

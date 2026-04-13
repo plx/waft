@@ -1,4 +1,4 @@
-# wiff
+# waft
 
 Copy `.worktreeinclude`-selected ignored files between Git worktrees.
 
@@ -8,29 +8,29 @@ When you use `git worktree` to work on multiple branches simultaneously,
 local configuration files (`.env`, API keys, build caches) don't carry
 over to linked worktrees because they're in `.gitignore`.
 
-`wiff` solves this: create a `.worktreeinclude` file listing which ignored
-files you want copied, and `wiff` handles the rest.
+`waft` solves this: create a `.worktreeinclude` file listing which ignored
+files you want copied, and `waft` handles the rest.
 
 ## Quick start
 
 ```sh
 # In a linked worktree — copies from main worktree automatically
-wiff
+waft
 
 # Explicit source and destination
-wiff copy --source /path/to/main --dest /path/to/linked
+waft copy --source /path/to/main --dest /path/to/linked
 
 # See what would be copied
-wiff copy --dry-run
+waft copy --dry-run
 
 # List eligible files
-wiff list
+waft list
 
 # Inspect a specific file
-wiff info .env
+waft info .env
 
 # Validate ignore files
-wiff validate
+waft validate
 ```
 
 ## `.worktreeinclude` format
@@ -66,10 +66,10 @@ A file is eligible for copying when **all** of these are true:
 
 | Command | Description |
 |---------|-------------|
-| `wiff` / `wiff copy` | Copy eligible files (default command) |
-| `wiff list` | List eligible files without copying |
-| `wiff info <PATH>...` | Show detailed status for specific files |
-| `wiff validate` | Check ignore files for syntax errors |
+| `waft` / `waft copy` | Copy eligible files (default command) |
+| `waft list` | List eligible files without copying |
+| `waft info <PATH>...` | Show detailed status for specific files |
+| `waft validate` | Check ignore files for syntax errors |
 
 ## Global options
 
@@ -91,7 +91,7 @@ A file is eligible for copying when **all** of these are true:
 ## Safety guarantees
 
 - **Tracked files are never overwritten** in the destination worktree
-- **Symlink traversal is blocked** — wiff refuses to follow symlinks in
+- **Symlink traversal is blocked** — waft refuses to follow symlinks in
   source files or write through symlinked destination parents
 - **Atomic writes** — files are written to a temp file first, then renamed
 - **Dry-run is mutation-free** — `--dry-run` reads only, writes nothing

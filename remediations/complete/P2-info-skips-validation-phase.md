@@ -15,8 +15,8 @@ Code evidence:
 
 Concrete behavior evidence:
 With unreadable `.gitignore`:
-- `wiff validate --source <repo>` fails (non-zero)
-- `wiff info --source <repo> <path>` still succeeds and reports statuses
+- `waft validate --source <repo>` fails (non-zero)
+- `waft info --source <repo> <path>` still succeeds and reports statuses
 
 ### Suggested Fix
 Mirror `copy`/`list` behavior in `run_info`: run `validate::validate`, fail on errors, and print warnings consistently.

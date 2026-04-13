@@ -7,8 +7,8 @@ use std::path::Path;
 use std::process;
 use tempfile::TempDir;
 
-fn wiff() -> Command {
-    Command::cargo_bin("wiff").unwrap()
+fn waft() -> Command {
+    Command::cargo_bin("waft").unwrap()
 }
 
 /// Create a git repo in a temp dir, returning the TempDir handle.
@@ -65,7 +65,7 @@ fn list_root_worktreeinclude_copies_env() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    wiff()
+    waft()
         .args(["list", "--source", repo.path().to_str().unwrap()])
         .assert()
         .success()
@@ -80,7 +80,7 @@ fn list_empty_when_no_worktreeinclude() {
     git(repo.path(), &["add", ".gitignore"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    wiff()
+    waft()
         .args(["list", "--source", repo.path().to_str().unwrap()])
         .assert()
         .success()
@@ -102,7 +102,7 @@ fn list_tracked_file_excluded() {
 
     // Even though .env is in both .gitignore and .worktreeinclude,
     // it's tracked, so git check-ignore won't report it as ignored.
-    wiff()
+    waft()
         .args(["list", "--source", repo.path().to_str().unwrap()])
         .assert()
         .success()
@@ -134,7 +134,7 @@ fn list_nested_worktreeinclude_override() {
     );
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    let output = wiff()
+    let output = waft()
         .args(["list", "--source", repo.path().to_str().unwrap()])
         .assert()
         .success();
@@ -159,7 +159,7 @@ fn list_doublestar_pattern() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    wiff()
+    waft()
         .args(["list", "--source", repo.path().to_str().unwrap()])
         .assert()
         .success()
@@ -179,7 +179,7 @@ fn list_output_sorted() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    let output = wiff()
+    let output = waft()
         .args(["list", "--source", repo.path().to_str().unwrap()])
         .assert()
         .success();
@@ -201,7 +201,7 @@ fn list_verbose_shows_source_size() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    wiff()
+    waft()
         .args(["list", "--source", repo.path().to_str().unwrap(), "-v"])
         .assert()
         .success()
@@ -218,7 +218,7 @@ fn list_verbose_shows_gitignore_info() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    wiff()
+    waft()
         .args(["list", "--source", repo.path().to_str().unwrap(), "-v"])
         .assert()
         .success()
@@ -237,7 +237,7 @@ fn list_verbose_shows_worktreeinclude_info() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    wiff()
+    waft()
         .args(["list", "--source", repo.path().to_str().unwrap(), "-v"])
         .assert()
         .success()
@@ -255,7 +255,7 @@ fn list_verbose_no_predicted_action_without_dest() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    let output = wiff()
+    let output = waft()
         .args(["list", "--source", repo.path().to_str().unwrap(), "-v"])
         .assert()
         .success();
@@ -298,7 +298,7 @@ fn list_verbose_dest_missing_shows_copy() {
 
     write_file(main_dir.path(), ".env", "SECRET=foo");
 
-    wiff()
+    waft()
         .args([
             "list",
             "--source",
@@ -320,7 +320,7 @@ fn list_verbose_dest_up_to_date_shows_noop() {
     write_file(main_dir.path(), ".env", "SAME_SECRET=foo");
     write_file(&wt_path, ".env", "SAME_SECRET=foo");
 
-    wiff()
+    waft()
         .args([
             "list",
             "--source",
@@ -342,7 +342,7 @@ fn list_verbose_dest_untracked_conflict_shows_skip() {
     write_file(main_dir.path(), ".env", "SOURCE_SECRET=foo");
     write_file(&wt_path, ".env", "DIFFERENT_SECRET=bar");
 
-    wiff()
+    waft()
         .args([
             "list",
             "--source",
@@ -369,7 +369,7 @@ fn list_verbose_dest_tracked_conflict_shows_skip() {
     git(&wt_path, &["add", "-f", ".env"]);
     git(&wt_path, &["commit", "-m", "track env in dest"]);
 
-    wiff()
+    waft()
         .args([
             "list",
             "--source",
@@ -393,7 +393,7 @@ fn validate_passes_with_valid_files() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    wiff()
+    waft()
         .args(["validate", "--source", repo.path().to_str().unwrap()])
         .assert()
         .success()
@@ -411,7 +411,7 @@ fn validate_rejects_symlinked_worktreeinclude() {
     )
     .unwrap();
 
-    wiff()
+    waft()
         .args(["validate", "--source", repo.path().to_str().unwrap()])
         .assert()
         .failure()

@@ -20,7 +20,7 @@ A repo with `.worktreeinclude -> real.wti` returns `validation passed`.
 Detect `.worktreeinclude` symlinks regardless of `is_file()` and emit error.
 
 ### Validation
-Add integration test: symlinked `.worktreeinclude` must make `wiff validate` fail.
+Add integration test: symlinked `.worktreeinclude` must make `waft validate` fail.
 
 ---
 

@@ -7,8 +7,8 @@ use std::path::Path;
 use std::process;
 use tempfile::TempDir;
 
-fn wiff() -> Command {
-    Command::cargo_bin("wiff").unwrap()
+fn waft() -> Command {
+    Command::cargo_bin("waft").unwrap()
 }
 
 fn make_repo() -> TempDir {
@@ -79,7 +79,7 @@ fn copy_basic() {
     write_file(main_dir.path(), ".env", "SECRET=value\n");
 
     // Run copy
-    wiff()
+    waft()
         .args([
             "copy",
             "--source",
@@ -107,7 +107,7 @@ fn copy_dry_run_does_not_copy() {
 
     write_file(main_dir.path(), ".env", "SECRET=value\n");
 
-    wiff()
+    waft()
         .args([
             "copy",
             "--dry-run",
@@ -136,7 +136,7 @@ fn copy_identical_file_is_noop() {
     write_file(main_dir.path(), ".env", "SECRET=same\n");
     write_file(&wt_path, ".env", "SECRET=same\n");
 
-    wiff()
+    waft()
         .args([
             "copy",
             "--source",
@@ -157,7 +157,7 @@ fn copy_skips_untracked_conflict_without_overwrite() {
     write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
     write_file(&wt_path, ".env", "DEST_SECRET\n");
 
-    wiff()
+    waft()
         .args([
             "copy",
             "--source",
@@ -184,7 +184,7 @@ fn copy_overwrites_with_flag() {
     write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
     write_file(&wt_path, ".env", "DEST_SECRET\n");
 
-    wiff()
+    waft()
         .args([
             "copy",
             "--overwrite",
@@ -212,7 +212,7 @@ fn copy_requires_destination() {
     git(main_dir.path(), &["add", "-A"]);
     git(main_dir.path(), &["commit", "-m", "init"]);
 
-    wiff()
+    waft()
         .args(["copy", "--source", main_dir.path().to_str().unwrap()])
         .assert()
         .failure()
@@ -226,9 +226,9 @@ fn no_subcommand_in_linked_worktree_does_copy() {
 
     write_file(main_dir.path(), ".env", "SECRET=auto\n");
 
-    // Run wiff with no subcommand from the linked worktree directory
+    // Run waft with no subcommand from the linked worktree directory
     // This should auto-detect source=main, dest=linked and do a copy
-    wiff()
+    waft()
         .arg("-C")
         .arg(wt_path.to_str().unwrap())
         .assert()
@@ -251,7 +251,7 @@ fn copy_skips_tracked_destination_conflict() {
     git(&wt_path, &["commit", "-m", "track .env in dest"]);
 
     // Copy without --overwrite should skip tracked destination
-    wiff()
+    waft()
         .args([
             "copy",
             "--source",
@@ -284,7 +284,7 @@ fn copy_skips_tracked_destination_even_with_overwrite() {
     git(&wt_path, &["commit", "-m", "track .env in dest"]);
 
     // Even with --overwrite, tracked destination files must never be overwritten
-    wiff()
+    waft()
         .args([
             "copy",
             "--overwrite",

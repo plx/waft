@@ -1,4 +1,4 @@
-# wiff Architecture
+# waft Architecture
 
 ## Foundational Decisions (v1)
 
@@ -7,7 +7,7 @@ revisited during development.
 
 ### 1. Git CLI is authoritative for actual Git-ignored membership and trackedness
 
-wiff does **not** reimplement Git's ignore logic for determining whether a file
+waft does **not** reimplement Git's ignore logic for determining whether a file
 is actually ignored or tracked. Instead, it shells out to `git check-ignore` and
 `git ls-files` and treats their answers as ground truth. The `ignore` crate is
 used only for parsing, validation, and explanation — never as the final oracle
@@ -41,7 +41,7 @@ renders the plan without executing it.
 ### 4. `ignore` is used as parser/compiler reference, not as the only source of truth
 
 The `ignore` crate's `gitignore` module provides pattern parsing, compilation,
-and matching. wiff uses it for `.worktreeinclude` explanation and for validation
+and matching. waft uses it for `.worktreeinclude` explanation and for validation
 of ignore files. However, the crate does not consult the Git index and cannot
 determine whether a file is tracked, so it cannot be the sole authority for
 "Git-ignored" status.
@@ -98,12 +98,12 @@ Tests are organized in three layers:
    `planner.rs` (mock filesystem), `worktreeinclude.rs`, `context.rs`
    (mock git backend)
 2. **Integration tests** — real Git repos in temp directories for all commands
-3. **Differential/property tests** — compare wiff output against Git oracle
+3. **Differential/property tests** — compare waft output against Git oracle
    (`git ls-files` + `git check-ignore`) with both deterministic scenarios
    and proptest-generated random repos
 
 The differential tests are the most important layer because they verify that
-wiff's behavior matches Git's behavior exactly, catching edge cases in
+waft's behavior matches Git's behavior exactly, catching edge cases in
 precedence, negation, anchoring, and recursive patterns.
 
 ## Why Nested `.worktreeinclude` Must Mirror Git's Per-Directory Exclude Behavior
@@ -123,6 +123,6 @@ Git's per-directory exclude files (`.gitignore`, and files loaded via
 
 - Users expect the same syntax to behave the same way.
 - Git's `--exclude-per-directory=.worktreeinclude` flag already implements these
-  semantics, and wiff uses that flag for authoritative candidate enumeration.
+  semantics, and waft uses that flag for authoritative candidate enumeration.
 - The explanation engine must produce results consistent with what Git computes,
   which requires matching the same per-directory evaluation model.

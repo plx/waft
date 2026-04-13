@@ -7,8 +7,8 @@ use std::path::Path;
 use std::process;
 use tempfile::TempDir;
 
-fn wiff() -> Command {
-    Command::cargo_bin("wiff").unwrap()
+fn waft() -> Command {
+    Command::cargo_bin("waft").unwrap()
 }
 
 fn make_repo() -> TempDir {
@@ -49,7 +49,7 @@ fn info_tracked_file() {
     git(repo.path(), &["add", "README.md"]);
     git(repo.path(), &["commit", "-m", "init"]);
 
-    wiff()
+    waft()
         .args([
             "info",
             "--source",
@@ -71,7 +71,7 @@ fn info_ignored_and_included() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    wiff()
+    waft()
         .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
         .assert()
         .success()
@@ -90,7 +90,7 @@ fn info_not_ignored_not_eligible() {
     git(repo.path(), &["commit", "-m", "setup"]);
 
     // README.md is not ignored and not matched by .worktreeinclude
-    wiff()
+    waft()
         .args([
             "info",
             "--source",
@@ -110,7 +110,7 @@ fn info_missing_file() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    wiff()
+    waft()
         .args([
             "info",
             "--source",
@@ -175,7 +175,7 @@ fn info_dest_tracked_conflict() {
     git(&wt_path, &["add", "-f", ".env"]);
     git(&wt_path, &["commit", "-m", "track env in dest"]);
 
-    wiff()
+    waft()
         .args([
             "info",
             "--source",
@@ -203,7 +203,7 @@ fn info_dest_untracked_conflict() {
     // .env exists in dest but is NOT tracked (just written, not git-added)
     write_file(&wt_path, ".env", "DIFFERENT_SECRET=bar");
 
-    wiff()
+    waft()
         .args([
             "info",
             "--source",
@@ -230,7 +230,7 @@ fn info_dest_up_to_date() {
     write_file(main_dir.path(), ".env", "SAME_SECRET=foo");
     write_file(&wt_path, ".env", "SAME_SECRET=foo");
 
-    wiff()
+    waft()
         .args([
             "info",
             "--source",
@@ -256,7 +256,7 @@ fn info_dest_type_conflict() {
     // In dest, "config" is a directory, not a file
     fs::create_dir_all(wt_path.join("config")).unwrap();
 
-    wiff()
+    waft()
         .args([
             "info",
             "--source",
@@ -287,7 +287,7 @@ fn info_dest_unsafe_path() {
     let symlink_target = tempfile::TempDir::new().unwrap();
     std::os::unix::fs::symlink(symlink_target.path(), wt_path.join("nested")).unwrap();
 
-    wiff()
+    waft()
         .args([
             "info",
             "--source",
@@ -313,7 +313,7 @@ fn info_dest_missing() {
 
     write_file(main_dir.path(), ".env", "SECRET=foo");
 
-    wiff()
+    waft()
         .args([
             "info",
             "--source",
@@ -339,7 +339,7 @@ fn info_dest_with_missing_source() {
     // .env exists in dest but NOT in source
     write_file(&wt_path, ".env", "DEST_ONLY=bar");
 
-    wiff()
+    waft()
         .args([
             "info",
             "--source",
@@ -369,7 +369,7 @@ fn info_fails_when_validation_has_errors() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    wiff()
+    waft()
         .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
         .assert()
         .failure()
@@ -388,7 +388,7 @@ fn info_succeeds_when_validation_passes() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    wiff()
+    waft()
         .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
         .assert()
         .success()
@@ -405,7 +405,7 @@ fn info_multiple_paths() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    let output = wiff()
+    let output = waft()
         .args([
             "info",
             "--source",

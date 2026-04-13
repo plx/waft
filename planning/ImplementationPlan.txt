@@ -1,6 +1,6 @@
 Yes. Use the plan below as the coding-agent handoff. It is intentionally linear.
 
-The safest sequence is: first ship a correct wiff v1 with Git as the source of truth for actual ignored/tracked status; then, after v1 is green, extract the reusable matcher pieces from ignore into an internal module. That order matters because Git’s ignore mechanism does not apply to tracked files, git check-ignore suppresses tracked files by default, ignore::gitignore is a from-scratch matcher that does not shell out to Git, dir.rs is the hierarchy implementation worth mining, and WalkBuilder is the wrong center of gravity because it merges rule families into one skip policy and gives custom ignore filenames higher precedence than all other ignore files.  ￼
+The safest sequence is: first ship a correct waft v1 with Git as the source of truth for actual ignored/tracked status; then, after v1 is green, extract the reusable matcher pieces from ignore into an internal module. That order matters because Git’s ignore mechanism does not apply to tracked files, git check-ignore suppresses tracked files by default, ignore::gitignore is a from-scratch matcher that does not shell out to Git, dir.rs is the hierarchy implementation worth mining, and WalkBuilder is the wrong center of gravity because it merges rule families into one skip policy and gives custom ignore filenames higher precedence than all other ignore files.  ￼
 
 At the end of every step, run the same gate:
 
@@ -9,7 +9,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo test --doc
 
-Milestone A — ship wiff v1
+Milestone A — ship waft v1
 
 1. Freeze the architecture before writing code
 
@@ -69,7 +69,7 @@ Implement these commands and args now, but make them return placeholder “not i
 
 Add snapshot-like CLI tests for --help, copy --help, info --help, and the default invocation behavior.
 
-Done when: help output is stable and wiff with no subcommand dispatches into the copy code path.
+Done when: help output is stable and waft with no subcommand dispatches into the copy code path.
 
 4. Implement the core model and path-safety layer
 
@@ -146,7 +146,7 @@ Validation policy for v1:
 	•	invalid global exclude file: warning
 	•	suspicious but legal patterns: warning
 
-Done when: wiff validate fails on bad in-repo files, warns on external/global issues, and reports file + line where possible.
+Done when: waft validate fails on bad in-repo files, warns on external/global issues, and reports file + line where possible.
 
 8. Implement the minimal .worktreeinclude explanation engine
 
@@ -294,7 +294,7 @@ Add src/matcher_core/ and start by moving in a minimized internal fork of the re
 	•	path utilities modeled on pathutil.rs
 	•	a neutral match-result type based on Match<T>
 
-Keep license notices intact. Keep this internal to wiff first. ignore’s own dir.rs comment explicitly says the hierarchy API was intentionally not exposed because the public API would be too complicated and poorly documented, so do not start by designing a polished public crate API.  ￼
+Keep license notices intact. Keep this internal to waft first. ignore’s own dir.rs comment explicitly says the hierarchy API was intentionally not exposed because the public API would be too complicated and poorly documented, so do not start by designing a polished public crate API.  ￼
 
 Done when: the new internal module builds and existing tests still pass with the old code path active.
 
@@ -346,7 +346,7 @@ Done when: internal-intersection results match the Git-backed implementation acr
 Final release gate
 
 Only call the project “v1 ready” when all of these are true:
-	•	wiff with no subcommand defaults to copy
+	•	waft with no subcommand defaults to copy
 	•	copy, list, info, and validate all work
 	•	nested .gitignore and .worktreeinclude behave correctly
 	•	copy --dry-run is mutation-free

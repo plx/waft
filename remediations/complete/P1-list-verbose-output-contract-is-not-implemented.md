@@ -17,7 +17,7 @@ Code evidence:
 
 Concrete behavior evidence:
 ```text
-$ wiff list --source <repo> --dest <linked> -v
+$ waft list --source <repo> --dest <linked> -v
 .env    Included { file: ".../.worktreeinclude", line: 1, pattern: ".env" }
 ```
 No Git ignore explanation, no source size, no predicted action.

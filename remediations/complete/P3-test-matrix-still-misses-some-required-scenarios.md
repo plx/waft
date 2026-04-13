@@ -16,7 +16,7 @@ Current gaps:
 
 ### Suggested Fix
 - Add missing integration cases to `tests/copy_integration.rs`.
-- Add differential tests that compare explanation tuples from wiff vs `git check-ignore -v -n`.
+- Add differential tests that compare explanation tuples from waft vs `git check-ignore -v -n`.
 
 ### Validation
 Gate on new tests in CI to prevent regression of these semantics.
