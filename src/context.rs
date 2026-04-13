@@ -177,6 +177,22 @@ mod tests {
     use crate::path::RepoRelPath;
     use std::collections::HashSet;
 
+    fn test_path(name: &str) -> PathBuf {
+        std::env::current_dir().expect("current dir should be available").join(name)
+    }
+
+    fn main_repo_path() -> PathBuf {
+        test_path("repo")
+    }
+
+    fn linked_repo_path() -> PathBuf {
+        test_path("repo-wt")
+    }
+
+    fn outside_repo_path() -> PathBuf {
+        test_path("other-repo")
+    }
+
     /// A mock Git backend for testing context resolution.
     struct MockGit {
         worktrees: Vec<WorktreeRecord>,
@@ -240,12 +256,12 @@ mod tests {
     fn main_and_linked() -> Vec<WorktreeRecord> {
         vec![
             WorktreeRecord {
-                path: PathBuf::from("/repo"),
+                path: main_repo_path(),
                 is_main: true,
                 is_bare: false,
             },
             WorktreeRecord {
-                path: PathBuf::from("/repo-wt"),
+                path: linked_repo_path(),
                 is_main: false,
                 is_bare: false,
             },
@@ -254,26 +270,29 @@ mod tests {
 
     #[test]
     fn explicit_source_and_dest() {
+        let main = main_repo_path();
+        let linked = linked_repo_path();
         let git = MockGit::new(main_and_linked());
         let ctx = resolve_context(
             &git,
-            Some(Path::new("/repo")),
-            Some(Path::new("/repo-wt")),
+            Some(main.as_path()),
+            Some(linked.as_path()),
             None,
             CommandKind::Copy,
         )
         .unwrap();
-        assert_eq!(ctx.source_root, PathBuf::from("/repo"));
-        assert_eq!(ctx.dest_root, Some(PathBuf::from("/repo-wt")));
+        assert_eq!(ctx.source_root, main);
+        assert_eq!(ctx.dest_root, Some(linked));
     }
 
     #[test]
     fn copy_rejects_same_source_and_dest() {
+        let main = main_repo_path();
         let git = MockGit::new(main_and_linked());
         let err = resolve_context(
             &git,
-            Some(Path::new("/repo")),
-            Some(Path::new("/repo")),
+            Some(main.as_path()),
+            Some(main.as_path()),
             None,
             CommandKind::Copy,
         )
@@ -283,10 +302,11 @@ mod tests {
 
     #[test]
     fn copy_requires_dest_from_main_worktree() {
+        let main = main_repo_path();
         let git = MockGit::new(main_and_linked());
         let err = resolve_context(
             &git,
-            Some(Path::new("/repo")),
+            Some(main.as_path()),
             None,
             None,
             CommandKind::Copy,
@@ -297,30 +317,33 @@ mod tests {
 
     #[test]
     fn list_does_not_require_dest() {
+        let main = main_repo_path();
         let git = MockGit::new(main_and_linked());
         let ctx = resolve_context(
             &git,
-            Some(Path::new("/repo")),
+            Some(main.as_path()),
             None,
             None,
             CommandKind::List,
         )
         .unwrap();
-        assert_eq!(ctx.source_root, PathBuf::from("/repo"));
+        assert_eq!(ctx.source_root, main);
         assert!(ctx.dest_root.is_none());
     }
 
     #[test]
     fn copy_rejects_dest_outside_family() {
+        let main = main_repo_path();
+        let outside = outside_repo_path();
         let git = MockGit::new(vec![WorktreeRecord {
-            path: PathBuf::from("/repo"),
+            path: main.clone(),
             is_main: true,
             is_bare: false,
         }]);
         let err = resolve_context(
             &git,
-            Some(Path::new("/repo")),
-            Some(Path::new("/other-repo")),
+            Some(main.as_path()),
+            Some(outside.as_path()),
             None,
             CommandKind::Copy,
         )
