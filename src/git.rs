@@ -184,6 +184,10 @@ impl GitGix {
             ),
         })
     }
+
+    fn normalize_repo_path(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
 }
 
 impl GitBackend for GitCli {
@@ -309,14 +313,13 @@ impl GitBackend for GitCli {
 impl GitBackend for GitGix {
     fn show_toplevel(&self, path: &Path) -> Result<PathBuf> {
         let repo = self.discover_repo(path)?;
-        repo.workdir()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| Error::Git {
-                message: format!(
-                    "cannot resolve worktree toplevel for bare repository at {}",
-                    repo.path().display()
-                ),
-            })
+        let workdir = repo.workdir().ok_or_else(|| Error::Git {
+            message: format!(
+                "cannot resolve worktree toplevel for bare repository at {}",
+                repo.path().display()
+            ),
+        })?;
+        Ok(Self::normalize_repo_path(workdir))
     }
 
     fn list_worktrees(&self, source_root: &Path) -> Result<Vec<WorktreeRecord>> {
@@ -330,8 +333,8 @@ impl GitBackend for GitGix {
 
         let main_path = main_repo
             .workdir()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| main_repo.path().to_path_buf());
+            .map(Self::normalize_repo_path)
+            .unwrap_or_else(|| Self::normalize_repo_path(main_repo.path()));
 
         let mut records = vec![WorktreeRecord {
             path: main_path.clone(),
@@ -352,6 +355,7 @@ impl GitBackend for GitGix {
                 context: format!("reading linked worktree at {}", proxy.git_dir().display()),
                 source: e,
             })?;
+            let path = Self::normalize_repo_path(&path);
             if path == main_path {
                 continue;
             }
@@ -398,7 +402,59 @@ impl GitBackend for GitGix {
         source_root: &Path,
         paths: &[RepoRelPath],
     ) -> Result<Vec<IgnoreCheckRecord>> {
-        self.cli_fallback.check_ignore(source_root, paths)
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let repo = self.discover_repo(source_root)?;
+        let worktree = repo.worktree().ok_or_else(|| Error::Git {
+            message: format!(
+                "cannot run ignore checks for bare repository at {}",
+                repo.path().display()
+            ),
+        })?;
+        let mut excludes = worktree.excludes(None).map_err(|e| Error::Git {
+            message: format!(
+                "gix failed to initialize exclude stack for {}: {e}",
+                source_root.display()
+            ),
+        })?;
+        let tracked = self.tracked_paths(source_root, paths)?;
+
+        let mut records = Vec::with_capacity(paths.len());
+        for path in paths {
+            let match_info = if tracked.contains(path) {
+                None
+            } else {
+                let abs = path.to_path(source_root);
+                let mode = if abs.is_dir() {
+                    Some(gix::index::entry::Mode::DIR)
+                } else {
+                    None
+                };
+                let platform = excludes
+                    .at_path(Path::new(path.as_str()), mode)
+                    .map_err(|e| Error::Io {
+                        context: format!("matching ignore patterns for {}", path.as_str()),
+                        source: e,
+                    })?;
+
+                platform
+                    .matching_exclude_pattern()
+                    .map(|m| IgnoreMatchInfo {
+                        source_file: m.source.map(Path::to_path_buf).unwrap_or_default(),
+                        line: m.sequence_number,
+                        pattern: m.pattern.to_string(),
+                    })
+            };
+
+            records.push(IgnoreCheckRecord {
+                path: path.clone(),
+                match_info,
+            });
+        }
+
+        Ok(records)
     }
 
     fn list_worktreeinclude_candidates(&self, source_root: &Path) -> Result<Vec<RepoRelPath>> {
