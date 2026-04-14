@@ -162,18 +162,14 @@ impl GitCli {
 
 /// Git backend implemented with the `gix` crate.
 ///
-/// During migration, operations not yet ported delegate to [`GitCli`].
+/// During migration, operations not yet ported may still delegate to [`GitCli`].
 #[derive(Debug, Default)]
-pub struct GitGix {
-    cli_fallback: GitCli,
-}
+pub struct GitGix;
 
 impl GitGix {
     /// Create a new `GitGix` backend.
     pub fn new() -> Self {
-        Self {
-            cli_fallback: GitCli::new(),
-        }
+        Self
     }
 
     fn discover_repo(&self, path: &Path) -> Result<gix::Repository> {
@@ -458,8 +454,54 @@ impl GitBackend for GitGix {
     }
 
     fn list_worktreeinclude_candidates(&self, source_root: &Path) -> Result<Vec<RepoRelPath>> {
-        self.cli_fallback
-            .list_worktreeinclude_candidates(source_root)
+        let repo = self.discover_repo(source_root)?;
+        let index = repo.index_or_empty().map_err(|e| Error::Git {
+            message: format!(
+                "gix failed to read index for {}: {e}",
+                source_root.display()
+            ),
+        })?;
+        let ignore_case = repo
+            .config_snapshot()
+            .boolean("core.ignoreCase")
+            .unwrap_or(false);
+
+        let mut candidates = Vec::new();
+        for entry in walkdir::WalkDir::new(source_root)
+            .into_iter()
+            .filter_entry(|e| {
+                !(e.file_type().is_dir() && e.file_name().to_string_lossy() == ".git")
+            })
+        {
+            let entry = entry.map_err(|e| Error::Git {
+                message: format!("failed walking {}: {e}", source_root.display()),
+            })?;
+
+            if entry.file_type().is_dir() {
+                continue;
+            }
+
+            let rel = match RepoRelPath::normalize(entry.path(), source_root) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let rela_bstr = rel.as_str().as_bytes().as_bstr();
+            if index.entry_by_path(rela_bstr).is_some() {
+                continue;
+            }
+
+            let selected = matches!(
+                crate::worktreeinclude::explain(source_root, rel.as_str(), false, ignore_case),
+                crate::model::WorktreeincludeStatus::Included { .. }
+            );
+            if selected {
+                candidates.push(rel);
+            }
+        }
+
+        candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(candidates)
     }
 
     fn read_bool_config(&self, source_root: &Path, key: &str) -> Result<bool> {
