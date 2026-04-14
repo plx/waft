@@ -3,7 +3,7 @@ use clap::Args;
 use crate::cli::Cli;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
-use crate::git::GitCli;
+use crate::git::default_git_backend;
 use crate::model::ValidationSeverity;
 use crate::validate;
 
@@ -13,17 +13,17 @@ pub struct ValidateArgs {}
 
 /// Run the `validate` subcommand.
 pub fn run_validate(cli: &Cli, _args: &ValidateArgs) -> Result<()> {
-    let git = GitCli::new();
+    let git = default_git_backend();
 
     let ctx = context::resolve_context(
-        &git,
+        git.as_ref(),
         cli.source.as_deref(),
         cli.dest.as_deref(),
         cli.directory.as_deref(),
         CommandKind::Validate,
     )?;
 
-    let report = validate::validate(&ctx, &git);
+    let report = validate::validate(&ctx, git.as_ref());
 
     for issue in &report.issues {
         let severity = match issue.severity {

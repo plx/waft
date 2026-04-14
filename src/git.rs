@@ -8,6 +8,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use gix::bstr::ByteSlice;
+
 use crate::error::{Error, Result};
 use crate::path::RepoRelPath;
 
@@ -72,6 +74,18 @@ pub trait GitBackend {
 
     /// Read a Git config value as a string. Returns `None` if the key is unset.
     fn read_config(&self, source_root: &Path, key: &str) -> Result<Option<String>>;
+}
+
+/// Create the configured Git backend.
+///
+/// Use `WAFT_GIT_BACKEND=gix` to opt into the in-process backend. Any other
+/// value uses the CLI backend.
+pub fn default_git_backend() -> Box<dyn GitBackend> {
+    if std::env::var("WAFT_GIT_BACKEND").as_deref() == Ok("gix") {
+        Box::new(GitGix::new())
+    } else {
+        Box::new(GitCli::new())
+    }
 }
 
 /// Git backend that shells out to the `git` CLI.
@@ -143,6 +157,32 @@ impl GitCli {
         }
 
         Ok(output.stdout)
+    }
+}
+
+/// Git backend implemented with the `gix` crate.
+///
+/// During migration, operations not yet ported delegate to [`GitCli`].
+#[derive(Debug, Default)]
+pub struct GitGix {
+    cli_fallback: GitCli,
+}
+
+impl GitGix {
+    /// Create a new `GitGix` backend.
+    pub fn new() -> Self {
+        Self {
+            cli_fallback: GitCli::new(),
+        }
+    }
+
+    fn discover_repo(&self, path: &Path) -> Result<gix::Repository> {
+        gix::discover(path).map_err(|e| Error::Git {
+            message: format!(
+                "gix failed to discover repository from {}: {e}",
+                path.display()
+            ),
+        })
     }
 }
 
@@ -262,6 +302,130 @@ impl GitBackend for GitCli {
                 // Config key not set
                 Ok(None)
             }
+        }
+    }
+}
+
+impl GitBackend for GitGix {
+    fn show_toplevel(&self, path: &Path) -> Result<PathBuf> {
+        let repo = self.discover_repo(path)?;
+        repo.workdir()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| Error::Git {
+                message: format!(
+                    "cannot resolve worktree toplevel for bare repository at {}",
+                    repo.path().display()
+                ),
+            })
+    }
+
+    fn list_worktrees(&self, source_root: &Path) -> Result<Vec<WorktreeRecord>> {
+        let repo = self.discover_repo(source_root)?;
+        let main_repo = repo.main_repo().map_err(|e| Error::Git {
+            message: format!(
+                "gix failed to open main repository for {}: {e}",
+                source_root.display()
+            ),
+        })?;
+
+        let main_path = main_repo
+            .workdir()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| main_repo.path().to_path_buf());
+
+        let mut records = vec![WorktreeRecord {
+            path: main_path.clone(),
+            is_main: true,
+            is_bare: main_repo.is_bare(),
+        }];
+
+        let linked = main_repo.worktrees().map_err(|e| Error::Io {
+            context: format!(
+                "listing linked worktrees in {}",
+                main_repo.common_dir().display()
+            ),
+            source: e,
+        })?;
+
+        for proxy in linked {
+            let path = proxy.base().map_err(|e| Error::Io {
+                context: format!("reading linked worktree at {}", proxy.git_dir().display()),
+                source: e,
+            })?;
+            if path == main_path {
+                continue;
+            }
+            records.push(WorktreeRecord {
+                path,
+                is_main: false,
+                is_bare: false,
+            });
+        }
+
+        Ok(records)
+    }
+
+    fn tracked_paths(
+        &self,
+        source_root: &Path,
+        paths: &[RepoRelPath],
+    ) -> Result<HashSet<RepoRelPath>> {
+        if paths.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let repo = self.discover_repo(source_root)?;
+        let index = repo.index_or_empty().map_err(|e| Error::Git {
+            message: format!(
+                "gix failed to read index for {}: {e}",
+                source_root.display()
+            ),
+        })?;
+
+        let mut tracked = HashSet::new();
+        for path in paths {
+            let rela = path.as_str().as_bytes().as_bstr();
+            if index.entry_by_path(rela).is_some() {
+                tracked.insert(path.clone());
+            }
+        }
+
+        Ok(tracked)
+    }
+
+    fn check_ignore(
+        &self,
+        source_root: &Path,
+        paths: &[RepoRelPath],
+    ) -> Result<Vec<IgnoreCheckRecord>> {
+        self.cli_fallback.check_ignore(source_root, paths)
+    }
+
+    fn list_worktreeinclude_candidates(&self, source_root: &Path) -> Result<Vec<RepoRelPath>> {
+        self.cli_fallback
+            .list_worktreeinclude_candidates(source_root)
+    }
+
+    fn read_bool_config(&self, source_root: &Path, key: &str) -> Result<bool> {
+        let repo = self.discover_repo(source_root)?;
+        Ok(repo.config_snapshot().boolean(key).unwrap_or(false))
+    }
+
+    fn read_config(&self, source_root: &Path, key: &str) -> Result<Option<String>> {
+        let repo = self.discover_repo(source_root)?;
+        let value = repo.config_snapshot().string(key);
+        match value {
+            Some(v) => {
+                let trimmed = String::from_utf8_lossy(v.as_ref().as_ref())
+                    .trim()
+                    .to_string();
+                if trimmed.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(trimmed))
+                }
+            }
+            None => Ok(None),
         }
     }
 }

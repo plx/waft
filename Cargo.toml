@@ -7,6 +7,7 @@ license = "MIT"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+gix = "0.81"
 ignore = "0.4"
 tempfile = "3"
 thiserror = "2"
