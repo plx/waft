@@ -78,13 +78,13 @@ pub trait GitBackend {
 
 /// Create the configured Git backend.
 ///
-/// Use `WAFT_GIT_BACKEND=gix` to opt into the in-process backend. Any other
-/// value uses the CLI backend.
+/// Uses the in-process `gix` backend by default.
+/// Set `WAFT_GIT_BACKEND=cli` to use the Git CLI backend as a fallback.
 pub fn default_git_backend() -> Box<dyn GitBackend> {
-    if std::env::var("WAFT_GIT_BACKEND").as_deref() == Ok("gix") {
-        Box::new(GitGix::new())
-    } else {
+    if std::env::var("WAFT_GIT_BACKEND").as_deref() == Ok("cli") {
         Box::new(GitCli::new())
+    } else {
+        Box::new(GitGix::new())
     }
 }
 
@@ -183,6 +183,12 @@ impl GitGix {
 
     fn normalize_repo_path(path: &Path) -> PathBuf {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    fn normalize_ignore_source(path: &Path, source_root: &Path) -> PathBuf {
+        path.strip_prefix(source_root)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| path.to_path_buf())
     }
 }
 
@@ -438,7 +444,10 @@ impl GitBackend for GitGix {
                 platform
                     .matching_exclude_pattern()
                     .map(|m| IgnoreMatchInfo {
-                        source_file: m.source.map(Path::to_path_buf).unwrap_or_default(),
+                        source_file: m
+                            .source
+                            .map(|p| Self::normalize_ignore_source(p, source_root))
+                            .unwrap_or_default(),
                         line: m.sequence_number,
                         pattern: m.pattern.to_string(),
                     })
