@@ -181,10 +181,6 @@ impl GitGix {
         })
     }
 
-    fn normalize_repo_path(path: &Path) -> PathBuf {
-        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-    }
-
     fn normalize_ignore_source(path: &Path, source_root: &Path) -> PathBuf {
         path.strip_prefix(source_root)
             .map(Path::to_path_buf)
@@ -192,11 +188,39 @@ impl GitGix {
     }
 }
 
+/// Canonicalize a repo-root path and strip the Windows `\\?\` UNC prefix
+/// so both backends produce paths in the same form (critical for
+/// `strip_prefix` and display parity between backends).
+fn normalize_repo_path(path: &Path) -> PathBuf {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    strip_unc_prefix(&canonical)
+}
+
+#[cfg(windows)]
+fn strip_unc_prefix(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        if let Some(unc_rest) = rest.strip_prefix(r"UNC\") {
+            PathBuf::from(format!(r"\\{unc_rest}"))
+        } else {
+            PathBuf::from(rest)
+        }
+    } else {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_unc_prefix(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 impl GitBackend for GitCli {
     fn show_toplevel(&self, path: &Path) -> Result<PathBuf> {
         let output = self.run_git(path, &["rev-parse", "--show-toplevel"])?;
         let s = String::from_utf8_lossy(&output);
-        Ok(PathBuf::from(s.trim_end_matches(['\n', '\r'])))
+        let raw = PathBuf::from(s.trim_end_matches(['\n', '\r']));
+        Ok(normalize_repo_path(&raw))
     }
 
     fn list_worktrees(&self, source_root: &Path) -> Result<Vec<WorktreeRecord>> {
@@ -321,7 +345,7 @@ impl GitBackend for GitGix {
                 repo.path().display()
             ),
         })?;
-        Ok(Self::normalize_repo_path(workdir))
+        Ok(normalize_repo_path(workdir))
     }
 
     fn list_worktrees(&self, source_root: &Path) -> Result<Vec<WorktreeRecord>> {
@@ -335,8 +359,8 @@ impl GitBackend for GitGix {
 
         let main_path = main_repo
             .workdir()
-            .map(Self::normalize_repo_path)
-            .unwrap_or_else(|| Self::normalize_repo_path(main_repo.path()));
+            .map(normalize_repo_path)
+            .unwrap_or_else(|| normalize_repo_path(main_repo.path()));
 
         let mut records = vec![WorktreeRecord {
             path: main_path.clone(),
@@ -357,7 +381,7 @@ impl GitBackend for GitGix {
                 context: format!("reading linked worktree at {}", proxy.git_dir().display()),
                 source: e,
             })?;
-            let path = Self::normalize_repo_path(&path);
+            let path = normalize_repo_path(&path);
             if path == main_path {
                 continue;
             }
