@@ -1,3 +1,5 @@
+//! `list` subcommand — enumerate files eligible to copy without mutating.
+
 use clap::Args;
 
 use crate::cli::Cli;

@@ -52,7 +52,13 @@ determine whether a file is tracked, so it cannot be the sole authority for
 src/
   main.rs              # Entry point: parse args, dispatch, exit
   lib.rs               # Library root with public module declarations
-  cli.rs               # clap derive CLI structs and dispatch
+  cli.rs               # clap derive root Cli struct and dispatch
+  subcommands/         # Per-subcommand argument types and handlers
+    mod.rs             # Re-exports for copy/list/info/validate
+    copy.rs            # `copy` subcommand (plan + execute)
+    list.rs            # `list` subcommand (enumerate eligible files)
+    info.rs            # `info` subcommand (per-path status)
+    validate.rs        # `validate` subcommand (ignore-file linting)
   context.rs           # Repo/worktree context resolution
   git.rs               # GitBackend trait and GitCli implementation
   validate.rs          # Ignore/worktreeinclude file validation
@@ -77,7 +83,8 @@ docs/
 
 All commands follow this pipeline:
 
-1. **CLI parsing** (`cli.rs`) — clap derive parses args, dispatches to handler
+1. **CLI parsing** (`cli.rs`) — clap derive parses args, dispatches to a
+   subcommand handler in `subcommands/`
 2. **Context resolution** (`context.rs`) — resolve source/dest worktrees via
    `git rev-parse` and `git worktree list`
 3. **Validation** (`validate.rs`) — parse all ignore files with `GitignoreBuilder`

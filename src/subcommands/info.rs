@@ -1,3 +1,5 @@
+//! `info` subcommand — detailed status for one or more paths.
+
 use clap::Args;
 use std::path::PathBuf;
 

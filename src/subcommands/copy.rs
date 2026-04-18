@@ -1,3 +1,5 @@
+//! `copy` subcommand — the full plan-and-execute pipeline.
+
 use clap::Args;
 
 use crate::cli::Cli;

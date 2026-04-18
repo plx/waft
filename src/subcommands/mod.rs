@@ -1,3 +1,10 @@
+//! Subcommand argument types and top-level handlers.
+//!
+//! Each submodule owns the `clap::Args` struct and the `run_*` entry point
+//! for one subcommand. The handlers share the same early stages — context
+//! resolution and validation — then diverge based on which pipeline stage the
+//! subcommand needs to reach (see `docs/architecture.md`).
+
 mod copy;
 mod info;
 mod list;
