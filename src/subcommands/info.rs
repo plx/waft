@@ -8,7 +8,6 @@ use crate::error::{Error, Result};
 use crate::git::default_git_backend;
 use crate::model::ValidationSeverity;
 use crate::validate;
-use crate::worktreeinclude;
 
 /// Arguments for the info command.
 #[derive(Debug, Args)]
@@ -125,7 +124,8 @@ pub fn run_info(cli: &Cli, policy: &ResolvedPolicy, args: &InfoArgs) -> Result<(
         };
 
         // Worktreeinclude status
-        let wti = worktreeinclude::explain(
+        let engine = crate::worktreeinclude_engine::engine_for(policy.semantics);
+        let wti = engine.evaluate(
             &ctx.source_root,
             rp.as_str(),
             abs_path.is_dir(),

@@ -226,3 +226,176 @@ fn f8_wt_profile_follows_symlink() {
     let expected: BTreeSet<String> = [".env".to_string()].into_iter().collect();
     assert_eq!(paths, expected);
 }
+
+// --- F1: root-simple ---
+//
+// .gitignore: .env
+// .worktreeinclude: .env
+// source files: .env
+// Expected: claude/git/wt all → {.env}
+
+fn setup_f1() -> TempDir {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), ".worktreeinclude", ".env\n");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+    repo
+}
+
+#[test]
+fn f1_git_profile_selects_env() {
+    let repo = setup_f1();
+    let paths = list_paths(repo.path(), &["--compat-profile", "git"]);
+    let expected: BTreeSet<String> = [".env".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}
+
+// --- F3: nested-worktreeinclude-override under git ---
+//
+// .gitignore: *.env
+// root .worktreeinclude: *.env
+// config/.worktreeinclude: !*.env
+// source files: root.env, config/sub.env
+// Expected git: {root.env}
+
+fn setup_f3() -> TempDir {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", "*.env\n");
+    write_file(repo.path(), ".worktreeinclude", "*.env\n");
+    write_file(repo.path(), "config/.worktreeinclude", "!*.env\n");
+    git(
+        repo.path(),
+        &[
+            "add",
+            ".gitignore",
+            ".worktreeinclude",
+            "config/.worktreeinclude",
+        ],
+    );
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), "root.env", "r\n");
+    write_file(repo.path(), "config/sub.env", "s\n");
+    repo
+}
+
+#[test]
+fn f3_git_profile_negation_excludes_subdir() {
+    let repo = setup_f3();
+    let paths = list_paths(repo.path(), &["--compat-profile", "git"]);
+    let expected: BTreeSet<String> = ["root.env".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}
+
+// --- F4: nested-anchored-pattern under git ---
+//
+// .gitignore: foo, config/foo
+// config/.worktreeinclude: /foo
+// source files: foo, config/foo
+// Expected git: {config/foo}
+
+fn setup_f4() -> TempDir {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", "foo\nconfig/foo\n");
+    write_file(repo.path(), "config/.worktreeinclude", "/foo\n");
+    git(
+        repo.path(),
+        &["add", ".gitignore", "config/.worktreeinclude"],
+    );
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), "foo", "f\n");
+    write_file(repo.path(), "config/foo", "f\n");
+    repo
+}
+
+#[test]
+fn f4_git_profile_anchored_pattern_only_matches_subdir() {
+    let repo = setup_f4();
+    let paths = list_paths(repo.path(), &["--compat-profile", "git"]);
+    let expected: BTreeSet<String> = ["config/foo".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}
+
+// --- F5: cross-file-negation-caveat under git ---
+//
+// .gitignore: secrets/
+// root .worktreeinclude: secrets/
+// secrets/.worktreeinclude: !private.key
+// source files: secrets/private.key
+// Expected git: {secrets/private.key} (negation blocked by parent dir)
+
+fn setup_f5() -> TempDir {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", "secrets/\n");
+    write_file(repo.path(), ".worktreeinclude", "secrets/\n");
+    write_file(repo.path(), "secrets/.worktreeinclude", "!private.key\n");
+    // -f: secrets/.worktreeinclude lives under a gitignored directory.
+    git(
+        repo.path(),
+        &[
+            "add",
+            "-f",
+            ".gitignore",
+            ".worktreeinclude",
+            "secrets/.worktreeinclude",
+        ],
+    );
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), "secrets/private.key", "k\n");
+    repo
+}
+
+#[test]
+fn f5_git_profile_caveat_blocks_nested_negation() {
+    let repo = setup_f5();
+    let paths = list_paths(repo.path(), &["--compat-profile", "git"]);
+    let expected: BTreeSet<String> = ["secrets/private.key".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}
+
+// --- F6: nested-worktree-in-repo (all profiles agree) ---
+
+fn setup_f6() -> TempDir {
+    let main_repo = make_repo();
+    write_file(main_repo.path(), ".gitignore", ".worktrees/\n");
+    write_file(
+        main_repo.path(),
+        ".worktreeinclude",
+        ".worktrees/**/*.env\n",
+    );
+    git(main_repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_repo.path(), &["commit", "-m", "init"]);
+    // Create a real linked worktree inside .worktrees/.
+    let nested = main_repo.path().join(".worktrees/nested");
+    git(
+        main_repo.path(),
+        &["worktree", "add", nested.to_str().unwrap(), "-b", "feature"],
+    );
+    write_file(&nested, ".env", "n\n");
+    main_repo
+}
+
+#[test]
+fn f6_git_profile_skips_nested_worktree_contents() {
+    let repo = setup_f6();
+    let paths = list_paths(repo.path(), &["--compat-profile", "git"]);
+    assert!(
+        paths.is_empty(),
+        "f6 should not enumerate nested worktree contents; got {paths:?}"
+    );
+}
+
+#[test]
+fn f6_claude_profile_skips_nested_worktree_contents() {
+    let repo = setup_f6();
+    let paths = list_paths(repo.path(), &["--compat-profile", "claude"]);
+    assert!(paths.is_empty());
+}
+
+#[test]
+fn f6_wt_profile_skips_nested_worktree_contents() {
+    let repo = setup_f6();
+    let paths = list_paths(repo.path(), &["--compat-profile", "wt"]);
+    assert!(paths.is_empty());
+}

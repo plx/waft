@@ -47,3 +47,4 @@ pub mod policy_filter;
 pub mod subcommands;
 pub mod validate;
 pub mod worktreeinclude;
+pub mod worktreeinclude_engine;

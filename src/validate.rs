@@ -369,6 +369,7 @@ mod tests {
         fn list_worktreeinclude_candidates(
             &self,
             _source_root: &Path,
+            _semantics: crate::config::WorktreeincludeSemantics,
             _symlink_policy: crate::config::SymlinkPolicy,
         ) -> Result<Vec<RepoRelPath>> {
             unimplemented!()
