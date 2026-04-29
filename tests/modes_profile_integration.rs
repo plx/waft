@@ -168,3 +168,61 @@ fn f7_wt_profile_drops_conductor_key() {
         "wt profile should drop .conductor/* via tooling-v1 builtin set; got {paths:?}"
     );
 }
+
+// --- Scenario F8: symlinked-worktreeinclude (Unix only) ---
+//
+// Setup:
+//   .gitignore: .env
+//   symlink .worktreeinclude -> real.wti
+//   real.wti: .env
+//   source files: .env
+//
+// Expected outcomes:
+//   claude (symlink_policy=follow): {.env}
+//   git (symlink_policy=ignore): {} (symlinked rule file ignored)
+//   wt (symlink_policy=follow): {.env}
+
+#[cfg(unix)]
+fn setup_f8() -> TempDir {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), "real.wti", ".env\n");
+    std::os::unix::fs::symlink("real.wti", repo.path().join(".worktreeinclude")).unwrap();
+    git(
+        repo.path(),
+        &["add", "-f", ".gitignore", "real.wti", ".worktreeinclude"],
+    );
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+    repo
+}
+
+#[cfg(unix)]
+#[test]
+fn f8_claude_profile_follows_symlink() {
+    let repo = setup_f8();
+    let paths = list_paths(repo.path(), &["--compat-profile", "claude"]);
+    let expected: BTreeSet<String> = [".env".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn f8_git_profile_ignores_symlink() {
+    let repo = setup_f8();
+    let paths = list_paths(repo.path(), &["--compat-profile", "git"]);
+    // git preset's symlink_policy=ignore plus when_missing=blank produces {}.
+    assert!(
+        paths.is_empty(),
+        "git profile should ignore symlinked rule file; got {paths:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn f8_wt_profile_follows_symlink() {
+    let repo = setup_f8();
+    let paths = list_paths(repo.path(), &["--compat-profile", "wt"]);
+    let expected: BTreeSet<String> = [".env".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}

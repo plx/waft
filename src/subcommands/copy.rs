@@ -35,7 +35,7 @@ pub fn run_copy(cli: &Cli, policy: &ResolvedPolicy, args: &CopyArgs) -> Result<(
     )?;
 
     // Validate
-    let report = validate::validate(&ctx, git.as_ref());
+    let report = validate::validate(&ctx, git.as_ref(), policy.symlink_policy);
     if report.has_errors() {
         for issue in &report.issues {
             if matches!(issue.severity, ValidationSeverity::Error) {

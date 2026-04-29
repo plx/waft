@@ -202,6 +202,80 @@ fn extra_exclude_repeatable() {
     );
 }
 
+// --- F8 symlink-policy overrides (Unix only) ---
+
+#[cfg(unix)]
+fn setup_f8() -> TempDir {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), "real.wti", ".env\n");
+    std::os::unix::fs::symlink("real.wti", repo.path().join(".worktreeinclude")).unwrap();
+    git(
+        repo.path(),
+        &["add", "-f", ".gitignore", "real.wti", ".worktreeinclude"],
+    );
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+    repo
+}
+
+#[cfg(unix)]
+#[test]
+fn f8_symlink_policy_error_fails() {
+    let repo = setup_f8();
+    waft()
+        .current_dir(repo.path())
+        .args([
+            "list",
+            "--source",
+            repo.path().to_str().unwrap(),
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-symlink-policy",
+            "error",
+        ])
+        .assert()
+        .failure();
+}
+
+#[cfg(unix)]
+#[test]
+fn f8_symlink_policy_follow_selects_env() {
+    let repo = setup_f8();
+    let paths = list_paths(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-symlink-policy",
+            "follow",
+        ],
+    );
+    let expected: BTreeSet<String> = [".env".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn f8_symlink_policy_ignore_selects_nothing_under_blank() {
+    // Claude when_missing=blank means with the symlink hidden, no candidate
+    // remains.
+    let repo = setup_f8();
+    let paths = list_paths(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-symlink-policy",
+            "ignore",
+        ],
+    );
+    assert!(
+        paths.is_empty(),
+        "claude + ignore should select nothing; got {paths:?}"
+    );
+}
+
 #[test]
 fn replace_extra_excludes_drops_inherited() {
     // Same fixture, but rely on a project .waft.toml setting an extra

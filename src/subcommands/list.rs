@@ -27,7 +27,7 @@ pub fn run_list(cli: &Cli, policy: &ResolvedPolicy, _args: &ListArgs) -> Result<
     )?;
 
     // Validate
-    let report = validate::validate(&ctx, git.as_ref());
+    let report = validate::validate(&ctx, git.as_ref(), policy.symlink_policy);
     if report.has_errors() {
         for issue in &report.issues {
             if matches!(issue.severity, ValidationSeverity::Error) {
@@ -105,7 +105,13 @@ pub fn run_list(cli: &Cli, policy: &ResolvedPolicy, _args: &ListArgs) -> Result<
             };
 
             // Worktreeinclude info
-            let wti = worktreeinclude::explain(&ctx.source_root, path, false, ctx.core_ignore_case);
+            let wti = worktreeinclude::explain(
+                &ctx.source_root,
+                path,
+                false,
+                ctx.core_ignore_case,
+                policy.symlink_policy,
+            );
             let wti_str = match &wti {
                 crate::model::WorktreeincludeStatus::Included {
                     file,

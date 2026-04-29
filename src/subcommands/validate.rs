@@ -13,7 +13,7 @@ use crate::validate;
 pub struct ValidateArgs {}
 
 /// Run the `validate` subcommand.
-pub fn run_validate(cli: &Cli, _policy: &ResolvedPolicy, _args: &ValidateArgs) -> Result<()> {
+pub fn run_validate(cli: &Cli, policy: &ResolvedPolicy, _args: &ValidateArgs) -> Result<()> {
     let git = default_git_backend();
 
     let ctx = context::resolve_context(
@@ -24,7 +24,7 @@ pub fn run_validate(cli: &Cli, _policy: &ResolvedPolicy, _args: &ValidateArgs) -
         CommandKind::Validate,
     )?;
 
-    let report = validate::validate(&ctx, git.as_ref());
+    let report = validate::validate(&ctx, git.as_ref(), policy.symlink_policy);
 
     for issue in &report.issues {
         let severity = match issue.severity {

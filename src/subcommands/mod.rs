@@ -34,8 +34,8 @@ pub(crate) fn select_candidates(
     source_root: &Path,
     policy: &ResolvedPolicy,
 ) -> Result<Vec<RepoRelPath>> {
-    if git.worktreeinclude_exists_anywhere(source_root)? {
-        git.list_worktreeinclude_candidates(source_root)
+    if git.worktreeinclude_exists_anywhere(source_root, policy.symlink_policy)? {
+        git.list_worktreeinclude_candidates(source_root, policy.symlink_policy)
     } else {
         match policy.when_missing {
             WhenMissingWorktreeinclude::Blank => Ok(Vec::new()),
