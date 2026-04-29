@@ -43,6 +43,52 @@ fn write_file(dir: &Path, rel_path: &str, content: &str) {
 }
 
 #[test]
+fn info_verbose_emits_resolved_policy() {
+    let repo = make_repo();
+    write_file(repo.path(), "README.md", "hello");
+    git(repo.path(), &["add", "README.md"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+
+    waft()
+        .args([
+            "info",
+            "-v",
+            "--compat-profile",
+            "wt",
+            "--source",
+            repo.path().to_str().unwrap(),
+            "README.md",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("policy:"))
+        .stdout(predicate::str::contains("profile: wt"))
+        .stdout(predicate::str::contains("when_missing: all-ignored"))
+        .stdout(predicate::str::contains("semantics: wt-0.39"))
+        .stdout(predicate::str::contains("symlink_policy: follow"))
+        .stdout(predicate::str::contains("builtin_exclude_set: tooling-v1"));
+}
+
+#[test]
+fn info_non_verbose_omits_policy_block() {
+    let repo = make_repo();
+    write_file(repo.path(), "README.md", "hello");
+    git(repo.path(), &["add", "README.md"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+
+    waft()
+        .args([
+            "info",
+            "--source",
+            repo.path().to_str().unwrap(),
+            "README.md",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("policy:").not());
+}
+
+#[test]
 fn info_tracked_file() {
     let repo = make_repo();
     write_file(repo.path(), "README.md", "hello");

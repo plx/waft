@@ -19,8 +19,12 @@ pub struct InfoArgs {
 }
 
 /// Run the `info` subcommand.
-pub fn run_info(cli: &Cli, _policy: &ResolvedPolicy, args: &InfoArgs) -> Result<()> {
+pub fn run_info(cli: &Cli, policy: &ResolvedPolicy, args: &InfoArgs) -> Result<()> {
     let git = default_git_backend();
+
+    if cli.verbose > 0 {
+        print_resolved_policy(policy);
+    }
 
     let ctx = context::resolve_context(
         git.as_ref(),
@@ -215,4 +219,26 @@ pub fn run_info(cli: &Cli, _policy: &ResolvedPolicy, args: &InfoArgs) -> Result<
     }
 
     Ok(())
+}
+
+/// Print the active resolved policy in a stable, machine-readable format.
+fn print_resolved_policy(policy: &ResolvedPolicy) {
+    println!("policy:");
+    println!("  profile: {}", policy.profile.as_str());
+    println!("  when_missing: {}", policy.when_missing.as_str());
+    println!("  semantics: {}", policy.semantics.as_str());
+    println!("  symlink_policy: {}", policy.symlink_policy.as_str());
+    println!(
+        "  builtin_exclude_set: {}",
+        policy.builtin_exclude_set.as_str()
+    );
+    if policy.extra_excludes.is_empty() {
+        println!("  extra_excludes: []");
+    } else {
+        println!("  extra_excludes:");
+        for entry in &policy.extra_excludes {
+            println!("    - {entry}");
+        }
+    }
+    println!();
 }

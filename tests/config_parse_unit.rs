@@ -354,6 +354,43 @@ fn empty_extra_exclude_env_yields_empty_list() {
     assert!(layer.extra_excludes.is_empty());
 }
 
+// --- Preset expansion smoke tests (full coverage in config_resolution_unit) ---
+
+#[test]
+fn preset_expands_unset_knobs_only_when_profile_chosen() {
+    // No profile anywhere: legacy defaults apply for all unset knobs.
+    let no_profile = ConfigLayer::default();
+    let policy = ResolvedPolicy::from_layers([&no_profile]);
+    assert_eq!(policy.symlink_policy, SymlinkPolicy::Error);
+    assert_eq!(policy.builtin_exclude_set, BuiltinExcludeSet::None);
+
+    // Wt profile: preset expands all unset knobs.
+    let wt = ConfigLayer {
+        profile: Some(CompatProfile::Wt),
+        ..ConfigLayer::default()
+    };
+    let policy = ResolvedPolicy::from_layers([&wt]);
+    assert_eq!(policy.symlink_policy, SymlinkPolicy::Follow);
+    assert_eq!(policy.builtin_exclude_set, BuiltinExcludeSet::ToolingV1);
+    assert_eq!(policy.when_missing, WhenMissingWorktreeinclude::AllIgnored);
+    assert_eq!(policy.semantics, WorktreeincludeSemantics::Wt039);
+}
+
+#[test]
+fn explicit_knob_beats_preset_regardless_of_layer() {
+    let user = ConfigLayer {
+        symlink_policy: Some(SymlinkPolicy::Error),
+        ..ConfigLayer::default()
+    };
+    let cli = ConfigLayer {
+        profile: Some(CompatProfile::Wt),
+        ..ConfigLayer::default()
+    };
+    let policy = ResolvedPolicy::from_layers([&user, &cli]);
+    // Wt preset says Follow but the user's explicit Error wins.
+    assert_eq!(policy.symlink_policy, SymlinkPolicy::Error);
+}
+
 // --- Resolution wrapper ---
 
 #[test]

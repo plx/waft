@@ -236,70 +236,159 @@ pub struct ResolvedPolicy {
     pub extra_excludes: Vec<String>,
 }
 
-impl Default for ResolvedPolicy {
-    /// Built-in defaults.
-    ///
-    /// These are chosen to preserve the behavior that existed before the
-    /// modes feature was introduced, NOT the eventual Claude preset. The
-    /// default flip lands in the final PR of this feature epic.
-    fn default() -> Self {
+/// Knob values implied by a compat profile preset.
+///
+/// Profiles never contribute `extra_excludes`; that array is owned by the
+/// layered config. `profile` is implicit in the preset itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Preset {
+    when_missing: WhenMissingWorktreeinclude,
+    semantics: WorktreeincludeSemantics,
+    symlink_policy: SymlinkPolicy,
+    builtin_exclude_set: BuiltinExcludeSet,
+}
+
+impl Preset {
+    fn for_profile(profile: CompatProfile) -> Self {
+        match profile {
+            CompatProfile::Claude => Self {
+                when_missing: WhenMissingWorktreeinclude::Blank,
+                semantics: WorktreeincludeSemantics::Claude202604,
+                symlink_policy: SymlinkPolicy::Follow,
+                builtin_exclude_set: BuiltinExcludeSet::None,
+            },
+            CompatProfile::Git => Self {
+                when_missing: WhenMissingWorktreeinclude::Blank,
+                semantics: WorktreeincludeSemantics::Git,
+                symlink_policy: SymlinkPolicy::Ignore,
+                builtin_exclude_set: BuiltinExcludeSet::None,
+            },
+            CompatProfile::Wt => Self {
+                when_missing: WhenMissingWorktreeinclude::AllIgnored,
+                semantics: WorktreeincludeSemantics::Wt039,
+                symlink_policy: SymlinkPolicy::Follow,
+                builtin_exclude_set: BuiltinExcludeSet::ToolingV1,
+            },
+        }
+    }
+}
+
+/// Knob values used when no `compat.profile` is explicitly set anywhere.
+///
+/// These preserve the behavior that existed before the modes feature was
+/// introduced. The default profile flip in the final PR of this epic
+/// replaces these fallbacks with [`Preset::for_profile(Claude)`] by setting
+/// the default profile to `Claude`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LegacyDefaults {
+    profile: CompatProfile,
+    when_missing: WhenMissingWorktreeinclude,
+    semantics: WorktreeincludeSemantics,
+    symlink_policy: SymlinkPolicy,
+    builtin_exclude_set: BuiltinExcludeSet,
+}
+
+impl LegacyDefaults {
+    const fn current() -> Self {
         Self {
+            // Profile label only; no preset expansion happens for the
+            // legacy default unless an explicit profile is provided in
+            // some layer.
             profile: CompatProfile::Claude,
             when_missing: WhenMissingWorktreeinclude::Blank,
             semantics: WorktreeincludeSemantics::Claude202604,
             // Pre-modes code rejected symlinked .worktreeinclude files;
-            // keep that until the symlink policy is wired up.
+            // keep that until the symlink policy is wired up and
+            // defaults are flipped.
             symlink_policy: SymlinkPolicy::Error,
             builtin_exclude_set: BuiltinExcludeSet::None,
+        }
+    }
+}
+
+impl Default for ResolvedPolicy {
+    /// Resolve to the legacy defaults (matches pre-modes behavior).
+    fn default() -> Self {
+        let d = LegacyDefaults::current();
+        Self {
+            profile: d.profile,
+            when_missing: d.when_missing,
+            semantics: d.semantics,
+            symlink_policy: d.symlink_policy,
+            builtin_exclude_set: d.builtin_exclude_set,
             extra_excludes: Vec::new(),
         }
     }
 }
 
 impl ResolvedPolicy {
-    /// Apply a layer's set values on top of `self`.
-    ///
-    /// Scalar keys overwrite. The `extra_excludes` array appends unless the
-    /// layer sets `replace_extra_excludes = true`, in which case the array
-    /// is replaced by the layer's values.
-    fn apply(&mut self, layer: &ConfigLayer) {
-        if let Some(v) = layer.profile {
-            self.profile = v;
-        }
-        if let Some(v) = layer.when_missing {
-            self.when_missing = v;
-        }
-        if let Some(v) = layer.semantics {
-            self.semantics = v;
-        }
-        if let Some(v) = layer.symlink_policy {
-            self.symlink_policy = v;
-        }
-        if let Some(v) = layer.builtin_exclude_set {
-            self.builtin_exclude_set = v;
-        }
-        if layer.replace_extra_excludes == Some(true) {
-            self.extra_excludes.clear();
-        }
-        self.extra_excludes
-            .extend(layer.extra_excludes.iter().cloned());
-    }
-
     /// Resolve a policy from an ordered iterator of layers (lowest
     /// precedence first).
     ///
-    /// PR1 contract: scalar values overwrite in precedence order; the
-    /// `compat.profile` is recorded but does not yet expand into other
-    /// knobs. Preset expansion lands in PR2.
+    /// The resolution rule is:
+    ///
+    /// - For each scalar knob, take the highest-precedence explicit value.
+    /// - If no explicit profile was set, fall back to the legacy defaults
+    ///   for any unset knob.
+    /// - If a profile was set anywhere, expand that profile's preset for
+    ///   any knob not explicitly set in any layer.
+    /// - Explicit knob settings (in any layer) ALWAYS beat preset values:
+    ///   "explicit knob > preset" is the documented contract.
+    /// - `extra_excludes` accumulate across layers; a layer's
+    ///   `replace_extra_excludes = true` clears accumulated values before
+    ///   appending the layer's own values.
     pub fn from_layers<'a, I>(layers: I) -> Self
     where
         I: IntoIterator<Item = &'a ConfigLayer>,
     {
-        let mut policy = Self::default();
+        let mut effective = ConfigLayer::default();
         for layer in layers {
-            policy.apply(layer);
+            if let Some(v) = layer.profile {
+                effective.profile = Some(v);
+            }
+            if let Some(v) = layer.when_missing {
+                effective.when_missing = Some(v);
+            }
+            if let Some(v) = layer.semantics {
+                effective.semantics = Some(v);
+            }
+            if let Some(v) = layer.symlink_policy {
+                effective.symlink_policy = Some(v);
+            }
+            if let Some(v) = layer.builtin_exclude_set {
+                effective.builtin_exclude_set = Some(v);
+            }
+            if layer.replace_extra_excludes == Some(true) {
+                effective.extra_excludes.clear();
+            }
+            effective
+                .extra_excludes
+                .extend(layer.extra_excludes.iter().cloned());
         }
-        policy
+
+        let preset = effective.profile.map(Preset::for_profile);
+        let legacy = LegacyDefaults::current();
+
+        Self {
+            profile: effective.profile.unwrap_or(legacy.profile),
+            when_missing: effective
+                .when_missing
+                .or(preset.map(|p| p.when_missing))
+                .unwrap_or(legacy.when_missing),
+            semantics: effective
+                .semantics
+                .or(preset.map(|p| p.semantics))
+                .unwrap_or(legacy.semantics),
+            symlink_policy: effective
+                .symlink_policy
+                .or(preset.map(|p| p.symlink_policy))
+                .unwrap_or(legacy.symlink_policy),
+            builtin_exclude_set: effective
+                .builtin_exclude_set
+                .or(preset.map(|p| p.builtin_exclude_set))
+                .unwrap_or(legacy.builtin_exclude_set),
+            extra_excludes: effective.extra_excludes,
+        }
     }
 }
 
