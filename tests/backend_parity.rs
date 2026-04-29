@@ -187,8 +187,9 @@ fn list_all_ignored_when_missing_matches_between_backends() {
 }
 
 /// Both backends must agree on the existence check that gates the
-/// `when_missing` fallback. With a `.worktreeinclude` present, the wt
-/// profile must NOT switch to all-ignored.
+/// `when_missing` fallback for the claude/git profiles. With a
+/// `.worktreeinclude` present, those profiles must NOT switch to
+/// all-ignored even if the rule file selects nothing.
 #[test]
 fn list_existence_gate_matches_between_backends() {
     let repo = make_repo();
@@ -202,15 +203,15 @@ fn list_existence_gate_matches_between_backends() {
     std::fs::write(repo.path().join("cache/build.bin"), "data\n").unwrap();
 
     let source = repo.path().to_string_lossy().to_string();
-    let args = &["list", "--compat-profile", "wt", "--source", &source];
+    // Use the git profile here: claude/git both have when_missing=blank
+    // and stay in explicit-selection mode when a rule file exists.
+    let args = &["list", "--compat-profile", "git", "--source", &source];
     let gix = run_waft(repo.path(), "gix", args);
     let cli = run_waft(repo.path(), "cli", args);
 
     assert!(gix.status.success() && cli.status.success());
     let gix_out = String::from_utf8_lossy(&gix.stdout);
     let cli_out = String::from_utf8_lossy(&cli.stdout);
-    // Both backends should see the existing .worktreeinclude and stay in
-    // explicit-selection mode (which selects nothing here).
     assert!(
         gix_out.trim().is_empty(),
         "gix backend wrongly fell back to all-ignored: {gix_out}"

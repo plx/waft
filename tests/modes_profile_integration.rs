@@ -314,6 +314,16 @@ fn f3_claude_profile_keeps_both_files() {
     assert_eq!(paths, expected);
 }
 
+#[test]
+fn f3_wt_profile_keeps_both_files() {
+    let repo = setup_f3();
+    let paths = list_paths(repo.path(), &["--compat-profile", "wt"]);
+    let expected: BTreeSet<String> = ["root.env".to_string(), "config/sub.env".to_string()]
+        .into_iter()
+        .collect();
+    assert_eq!(paths, expected);
+}
+
 // --- F4: nested-anchored-pattern under git ---
 //
 // .gitignore: foo, config/foo
@@ -350,6 +360,18 @@ fn f4_claude_profile_blank_no_root_file() {
     let repo = setup_f4();
     let paths = list_paths(repo.path(), &["--compat-profile", "claude"]);
     assert!(paths.is_empty(), "f4 claude should be empty; got {paths:?}");
+}
+
+#[test]
+fn f4_wt_profile_picks_up_all_ignored() {
+    // wt always uses the all-ignored set; both `foo` and `config/foo`
+    // are ignored by .gitignore.
+    let repo = setup_f4();
+    let paths = list_paths(repo.path(), &["--compat-profile", "wt"]);
+    let expected: BTreeSet<String> = ["foo".to_string(), "config/foo".to_string()]
+        .into_iter()
+        .collect();
+    assert_eq!(paths, expected);
 }
 
 // --- F5: cross-file-negation-caveat under git ---
@@ -397,6 +419,15 @@ fn f5_claude_profile_ignores_nested_negation() {
     let paths = list_paths(repo.path(), &["--compat-profile", "claude"]);
     let expected: BTreeSet<String> = ["secrets/private.key".to_string()].into_iter().collect();
     assert_eq!(paths, expected);
+}
+
+#[test]
+fn f5_wt_profile_literal_negation_drops_file() {
+    // Wt honors literal-name negations: `!private.key` in
+    // `secrets/.worktreeinclude` removes `secrets/private.key`.
+    let repo = setup_f5();
+    let paths = list_paths(repo.path(), &["--compat-profile", "wt"]);
+    assert!(paths.is_empty(), "f5 wt should be empty; got {paths:?}");
 }
 
 // --- F6: nested-worktree-in-repo (all profiles agree) ---

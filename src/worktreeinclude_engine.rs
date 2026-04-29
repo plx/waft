@@ -96,7 +96,21 @@ impl WorktreeincludeSemanticsEngine for Claude202604Semantics {
 
 /// Versioned snapshot of `worktrunk 0.39`'s observed behavior.
 ///
-/// PR6: thin delegate to [`GitSemantics`]. PR8 implements the divergence.
+/// Worktrunk's selection algorithm differs from Git's per-directory
+/// `.gitignore`-style matching in a way that is not captured by a single
+/// per-path evaluation: regardless of which `.worktreeinclude` files
+/// exist, wt always starts from the full set of git-ignored untracked
+/// files and then SUBTRACTS files matched by *literal* `!<filename>`
+/// negations (no globs). Glob negations and positive patterns are
+/// ignored.
+///
+/// Because the per-path engine interface is too narrow for this — there
+/// is no "all-ignored" base set per file — `subcommands::select_candidates`
+/// special-cases [`WorktreeincludeSemantics::Wt039`] and routes through
+/// [`wt_collect_candidates`] below. Calls to `evaluate` itself fall back
+/// to [`GitSemantics`] for clients (e.g. `info`) that ask about a single
+/// path; this keeps verbose output reasonable even when the candidate
+/// set is computed differently.
 #[derive(Debug, Default)]
 pub struct Wt039Semantics;
 
@@ -117,6 +131,79 @@ impl WorktreeincludeSemanticsEngine for Wt039Semantics {
             symlink_policy,
         )
     }
+}
+
+/// Compute candidate paths under the wt-0.39 algorithm.
+///
+/// 1. Start from `git.list_ignored_untracked(source_root)`.
+/// 2. Walk the source tree for `.worktreeinclude` files (honoring
+///    `symlink_policy`); for each literal `!<name>` line, resolve the
+///    referenced path relative to the rule file's directory and remove
+///    it from the candidate set.
+///
+/// Glob negations are ignored. Positive patterns are ignored — wt's
+/// observed behavior is that `.worktreeinclude` is purely subtractive.
+pub fn wt_collect_candidates(
+    source_root: &std::path::Path,
+    git: &dyn crate::git::GitBackend,
+    symlink_policy: SymlinkPolicy,
+) -> crate::error::Result<Vec<crate::path::RepoRelPath>> {
+    let mut paths = git.list_ignored_untracked(source_root)?;
+    let removals = collect_wt_literal_negations(source_root, symlink_policy);
+    paths.retain(|p| !removals.contains(p.as_str()));
+    Ok(paths)
+}
+
+fn collect_wt_literal_negations(
+    source_root: &std::path::Path,
+    symlink_policy: SymlinkPolicy,
+) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for entry in walkdir::WalkDir::new(source_root) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.file_name() != ".worktreeinclude" {
+            continue;
+        }
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        if entry.file_type().is_symlink() && symlink_policy == SymlinkPolicy::Ignore {
+            continue;
+        }
+        if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let dir = path.parent().unwrap_or(source_root);
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some(rest) = trimmed.strip_prefix('!') else {
+                continue;
+            };
+            // Skip glob patterns. Wt's observed behavior only honors
+            // literal-name negations; anything containing a glob meta
+            // character is left in the candidate set.
+            if rest.chars().any(|c| matches!(c, '*' | '?' | '[' | ']')) {
+                continue;
+            }
+            let stripped = rest.strip_prefix('/').unwrap_or(rest);
+            let abs = dir.join(stripped);
+            if let Ok(rel) = crate::path::RepoRelPath::normalize(&abs, source_root) {
+                out.insert(rel.as_str().to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Construct the engine implementing the requested semantics.
