@@ -242,8 +242,25 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn list_worktreeinclude_candidates(&self, _source_root: &Path) -> Result<Vec<RepoRelPath>> {
+        fn list_worktreeinclude_candidates(
+            &self,
+            _source_root: &Path,
+            _semantics: crate::config::WorktreeincludeSemantics,
+            _symlink_policy: crate::config::SymlinkPolicy,
+        ) -> Result<Vec<RepoRelPath>> {
             Ok(Vec::new())
+        }
+
+        fn list_ignored_untracked(&self, _source_root: &Path) -> Result<Vec<RepoRelPath>> {
+            Ok(Vec::new())
+        }
+
+        fn worktreeinclude_exists_anywhere(
+            &self,
+            _source_root: &Path,
+            _symlink_policy: crate::config::SymlinkPolicy,
+        ) -> Result<bool> {
+            Ok(false)
         }
 
         fn read_bool_config(&self, _source_root: &Path, _key: &str) -> Result<bool> {

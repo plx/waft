@@ -10,6 +10,7 @@ use std::process::Command;
 
 use gix::bstr::ByteSlice;
 
+use crate::config::{SymlinkPolicy, WorktreeincludeSemantics};
 use crate::error::{Error, Result};
 use crate::path::RepoRelPath;
 
@@ -67,7 +68,34 @@ pub trait GitBackend {
     ) -> Result<Vec<IgnoreCheckRecord>>;
 
     /// List files that match `.worktreeinclude` patterns (candidates for copy).
-    fn list_worktreeinclude_candidates(&self, source_root: &Path) -> Result<Vec<RepoRelPath>>;
+    ///
+    /// `symlink_policy` decides whether symlinked `.worktreeinclude` files
+    /// are followed (`Follow`/`Error`) or ignored (`Ignore`). `semantics`
+    /// selects the matcher engine.
+    fn list_worktreeinclude_candidates(
+        &self,
+        source_root: &Path,
+        semantics: WorktreeincludeSemantics,
+        symlink_policy: SymlinkPolicy,
+    ) -> Result<Vec<RepoRelPath>>;
+
+    /// List all untracked files under `source_root` that are git-ignored.
+    ///
+    /// Used by the `when_missing = all-ignored` mode as the candidate set when
+    /// no `.worktreeinclude` file exists anywhere in the repo.
+    fn list_ignored_untracked(&self, source_root: &Path) -> Result<Vec<RepoRelPath>>;
+
+    /// Return whether any `.worktreeinclude` file exists anywhere in the repo
+    /// (excluding nested git checkouts and registered submodules).
+    ///
+    /// Used to gate `when_missing` behavior. `symlink_policy = Ignore` causes
+    /// symlinked `.worktreeinclude` files to NOT count toward existence
+    /// (consistent with their being treated as absent during selection).
+    fn worktreeinclude_exists_anywhere(
+        &self,
+        source_root: &Path,
+        symlink_policy: SymlinkPolicy,
+    ) -> Result<bool>;
 
     /// Read a boolean Git config value.
     fn read_bool_config(&self, source_root: &Path, key: &str) -> Result<bool>;
@@ -278,7 +306,33 @@ impl GitBackend for GitCli {
         parse_check_ignore_output(&output)
     }
 
-    fn list_worktreeinclude_candidates(&self, source_root: &Path) -> Result<Vec<RepoRelPath>> {
+    fn list_worktreeinclude_candidates(
+        &self,
+        source_root: &Path,
+        semantics: WorktreeincludeSemantics,
+        symlink_policy: SymlinkPolicy,
+    ) -> Result<Vec<RepoRelPath>> {
+        // The CLI fast path uses `git ls-files --exclude-per-directory`,
+        // which is hard-wired to Git's per-directory exclude semantics. As
+        // long as the requested semantics engine produces the same result
+        // for this fixture (true in PR6 since Claude202604 and Wt039
+        // delegate to GitSemantics), the fast path is valid. PR7 / PR8
+        // will route divergent engines through the walk path below.
+        let semantics_matches_git_cli = matches!(
+            semantics,
+            WorktreeincludeSemantics::Git
+                | WorktreeincludeSemantics::Claude202604
+                | WorktreeincludeSemantics::Wt039
+        );
+
+        // Under Ignore policy, symlinked .worktreeinclude files must NOT
+        // contribute patterns. Git CLI's `--exclude-per-directory` follows
+        // symlinks unconditionally, so fall through to a walkdir + matcher
+        // path when Ignore is requested.
+        if symlink_policy == SymlinkPolicy::Ignore || !semantics_matches_git_cli {
+            return cli_list_candidates_skipping_symlinked_rules(self, source_root, semantics);
+        }
+
         let output = self.run_git(
             source_root,
             &[
@@ -300,6 +354,47 @@ impl GitBackend for GitCli {
             }
         }
         Ok(result)
+    }
+
+    fn list_ignored_untracked(&self, source_root: &Path) -> Result<Vec<RepoRelPath>> {
+        let output = self.run_git(
+            source_root,
+            &[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--full-name",
+                "-z",
+            ],
+        )?;
+
+        let mut result = Vec::new();
+        for entry in output.split(|&b| b == 0) {
+            let s = String::from_utf8_lossy(entry);
+            let s = s.trim();
+            if !s.is_empty() {
+                result.push(RepoRelPath::from_normalized(s.to_string()));
+            }
+        }
+        Ok(result)
+    }
+
+    fn worktreeinclude_exists_anywhere(
+        &self,
+        source_root: &Path,
+        symlink_policy: SymlinkPolicy,
+    ) -> Result<bool> {
+        // Use a filesystem walk that mirrors `is_nested_git_boundary` rules,
+        // querying the index for gitlinks via `git ls-files -s`. This keeps
+        // both backends in agreement on which subtrees count as "in the
+        // repo" for purposes of this check.
+        let gitlinks = read_gitlinks_via_cli(self, source_root)?;
+        Ok(walk_for_first_worktreeinclude(
+            source_root,
+            &gitlinks,
+            symlink_policy,
+        ))
     }
 
     fn read_bool_config(&self, source_root: &Path, key: &str) -> Result<bool> {
@@ -486,7 +581,12 @@ impl GitBackend for GitGix {
         Ok(records)
     }
 
-    fn list_worktreeinclude_candidates(&self, source_root: &Path) -> Result<Vec<RepoRelPath>> {
+    fn list_worktreeinclude_candidates(
+        &self,
+        source_root: &Path,
+        semantics: WorktreeincludeSemantics,
+        symlink_policy: SymlinkPolicy,
+    ) -> Result<Vec<RepoRelPath>> {
         let repo = self.discover_repo(source_root)?;
         let index = repo.index_or_empty().map_err(|e| Error::Git {
             message: format!(
@@ -509,6 +609,7 @@ impl GitBackend for GitGix {
             .map(|e| e.path(&index).to_str_lossy().into_owned())
             .collect();
 
+        let engine = crate::worktreeinclude_engine::engine_for(semantics);
         let mut candidates = Vec::new();
         for entry in walkdir::WalkDir::new(source_root)
             .into_iter()
@@ -533,7 +634,13 @@ impl GitBackend for GitGix {
             }
 
             let selected = matches!(
-                crate::worktreeinclude::explain(source_root, rel.as_str(), false, ignore_case),
+                engine.evaluate(
+                    source_root,
+                    rel.as_str(),
+                    false,
+                    ignore_case,
+                    symlink_policy
+                ),
                 crate::model::WorktreeincludeStatus::Included { .. }
             );
             if selected {
@@ -543,6 +650,104 @@ impl GitBackend for GitGix {
 
         candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         Ok(candidates)
+    }
+
+    fn list_ignored_untracked(&self, source_root: &Path) -> Result<Vec<RepoRelPath>> {
+        let repo = self.discover_repo(source_root)?;
+        let index = repo.index_or_empty().map_err(|e| Error::Git {
+            message: format!(
+                "gix failed to read index for {}: {e}",
+                source_root.display()
+            ),
+        })?;
+        let worktree = repo.worktree().ok_or_else(|| Error::Git {
+            message: format!(
+                "cannot enumerate ignored files for bare repository at {}",
+                repo.path().display()
+            ),
+        })?;
+        let mut excludes = worktree.excludes(None).map_err(|e| Error::Git {
+            message: format!(
+                "gix failed to initialize exclude stack for {}: {e}",
+                source_root.display()
+            ),
+        })?;
+
+        let gitlinks: HashSet<String> = index
+            .entries()
+            .iter()
+            .filter(|e| e.mode == gix::index::entry::Mode::COMMIT)
+            .map(|e| e.path(&index).to_str_lossy().into_owned())
+            .collect();
+
+        let mut result = Vec::new();
+        for entry in walkdir::WalkDir::new(source_root)
+            .into_iter()
+            .filter_entry(|e| !is_nested_git_boundary(e, source_root, &gitlinks))
+        {
+            let entry = entry.map_err(|e| Error::Git {
+                message: format!("failed walking {}: {e}", source_root.display()),
+            })?;
+
+            if entry.file_type().is_dir() {
+                continue;
+            }
+
+            let rel = match RepoRelPath::normalize(entry.path(), source_root) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let rela_bstr = rel.as_str().as_bytes().as_bstr();
+            if index.entry_by_path(rela_bstr).is_some() {
+                continue;
+            }
+
+            let abs = rel.to_path(source_root);
+            let mode = if abs.is_dir() {
+                Some(gix::index::entry::Mode::DIR)
+            } else {
+                None
+            };
+            let platform = excludes
+                .at_path(Path::new(rel.as_str()), mode)
+                .map_err(|e| Error::Io {
+                    context: format!("matching ignore patterns for {}", rel.as_str()),
+                    source: e,
+                })?;
+
+            if platform.matching_exclude_pattern().is_some() {
+                result.push(rel);
+            }
+        }
+
+        result.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(result)
+    }
+
+    fn worktreeinclude_exists_anywhere(
+        &self,
+        source_root: &Path,
+        symlink_policy: SymlinkPolicy,
+    ) -> Result<bool> {
+        let repo = self.discover_repo(source_root)?;
+        let index = repo.index_or_empty().map_err(|e| Error::Git {
+            message: format!(
+                "gix failed to read index for {}: {e}",
+                source_root.display()
+            ),
+        })?;
+        let gitlinks: HashSet<String> = index
+            .entries()
+            .iter()
+            .filter(|e| e.mode == gix::index::entry::Mode::COMMIT)
+            .map(|e| e.path(&index).to_str_lossy().into_owned())
+            .collect();
+        Ok(walk_for_first_worktreeinclude(
+            source_root,
+            &gitlinks,
+            symlink_policy,
+        ))
     }
 
     fn read_bool_config(&self, source_root: &Path, key: &str) -> Result<bool> {
@@ -567,6 +772,137 @@ impl GitBackend for GitGix {
             None => Ok(None),
         }
     }
+}
+
+/// Read the set of gitlink paths (mode 160000) from the index using the Git
+/// CLI. Used by the [`GitCli`] backend when it needs the same submodule
+/// boundary information that the gix backend gets from its in-process index.
+fn read_gitlinks_via_cli(cli: &GitCli, source_root: &Path) -> Result<HashSet<String>> {
+    // `git ls-files -s -z` emits one entry per line in the form
+    // `<mode> <hash> <stage>\t<path>` with NUL separators.
+    let output = match cli.run_git(source_root, &["ls-files", "-s", "-z"]) {
+        Ok(out) => out,
+        Err(_) => return Ok(HashSet::new()),
+    };
+    let mut links = HashSet::new();
+    for record in output.split(|&b| b == 0) {
+        if record.is_empty() {
+            continue;
+        }
+        let s = String::from_utf8_lossy(record);
+        // Format: "160000 <hash> <stage>\t<path>"
+        let mut parts = s.splitn(2, '\t');
+        let header = parts.next().unwrap_or("");
+        let path = parts.next().unwrap_or("").to_string();
+        if header.starts_with("160000 ") {
+            links.insert(path);
+        }
+    }
+    Ok(links)
+}
+
+/// Walk the source tree looking for the first `.worktreeinclude` file,
+/// skipping nested git checkouts/submodules.
+///
+/// Pure filesystem walk; the only Git-specific input is the gitlinks set.
+/// Under `SymlinkPolicy::Ignore`, symlinked rule files do not count toward
+/// existence (consistent with their being treated as absent during
+/// selection).
+fn walk_for_first_worktreeinclude(
+    source_root: &Path,
+    gitlinks: &HashSet<String>,
+    symlink_policy: SymlinkPolicy,
+) -> bool {
+    for entry in walkdir::WalkDir::new(source_root)
+        .into_iter()
+        .filter_entry(|e| !is_nested_git_boundary(e, source_root, gitlinks))
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        if entry.file_name() != ".worktreeinclude" {
+            continue;
+        }
+        if entry.file_type().is_symlink() {
+            if symlink_policy == SymlinkPolicy::Ignore {
+                continue;
+            }
+            return true;
+        }
+        if entry.file_type().is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+/// CLI-backend candidate enumeration that mirrors the gix walker.
+///
+/// Used when the CLI fast path (`git ls-files --exclude-per-directory`) is
+/// not safe — either because the requested `SymlinkPolicy::Ignore` requires
+/// hiding symlinked rule files or because `semantics` selects an engine
+/// whose output diverges from Git's per-directory rules.
+fn cli_list_candidates_skipping_symlinked_rules(
+    cli: &GitCli,
+    source_root: &Path,
+    semantics: WorktreeincludeSemantics,
+) -> Result<Vec<RepoRelPath>> {
+    let gitlinks = read_gitlinks_via_cli(cli, source_root)?;
+    let ignore_case = cli
+        .read_bool_config(source_root, "core.ignoreCase")
+        .unwrap_or(false);
+
+    // Tracked paths must be excluded from candidates, the same as the index
+    // check used by the gix backend. Use `git ls-files --cached` for a
+    // single CLI invocation rather than per-path checks.
+    let cached = cli.run_git(source_root, &["ls-files", "--cached", "-z"])?;
+    let tracked: HashSet<String> = cached
+        .split(|&b| b == 0)
+        .filter(|e| !e.is_empty())
+        .map(|e| String::from_utf8_lossy(e).into_owned())
+        .collect();
+
+    let engine = crate::worktreeinclude_engine::engine_for(semantics);
+    let mut candidates = Vec::new();
+    for entry in walkdir::WalkDir::new(source_root)
+        .into_iter()
+        .filter_entry(|e| !is_nested_git_boundary(e, source_root, &gitlinks))
+    {
+        let entry = entry.map_err(|e| Error::Git {
+            message: format!("failed walking {}: {e}", source_root.display()),
+        })?;
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        let rel = match RepoRelPath::normalize(entry.path(), source_root) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if tracked.contains(rel.as_str()) {
+            continue;
+        }
+
+        let selected = matches!(
+            engine.evaluate(
+                source_root,
+                rel.as_str(),
+                false,
+                ignore_case,
+                SymlinkPolicy::Ignore,
+            ),
+            crate::model::WorktreeincludeStatus::Included { .. }
+        );
+        if selected {
+            candidates.push(rel);
+        }
+    }
+
+    candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    Ok(candidates)
 }
 
 /// Return true when `entry` is a directory that should not be descended into
@@ -603,7 +939,18 @@ fn is_nested_git_boundary(
     if entry.depth() == 0 {
         return false;
     }
-    if entry.path().join(".git").is_dir() {
+    let dot_git = entry.path().join(".git");
+    if dot_git.is_dir() {
+        return true;
+    }
+    // A `.git` *file* with `gitdir: <path>` whose target exists indicates
+    // a linked worktree of the parent repo. `git ls-files` does not
+    // recurse into linked worktrees, and copying their contents would
+    // duplicate state from another worktree's untracked files. Skip.
+    if dot_git.is_file()
+        && let Some(target) = read_dot_git_pointer(&dot_git)
+        && target.exists()
+    {
         return true;
     }
     if let Ok(rel) = RepoRelPath::normalize(entry.path(), source_root)
@@ -612,6 +959,26 @@ fn is_nested_git_boundary(
         return true;
     }
     false
+}
+
+/// Parse the `gitdir: <path>` line from a `.git` pointer file, returning
+/// the absolute target. Returns `None` for malformed or unreadable files.
+fn read_dot_git_pointer(path: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        if let Some(rest) = line.strip_prefix("gitdir:") {
+            let target = rest.trim();
+            if target.is_empty() {
+                return None;
+            }
+            let candidate = PathBuf::from(target);
+            if candidate.is_absolute() {
+                return Some(candidate);
+            }
+            return path.parent().map(|p| p.join(candidate));
+        }
+    }
+    None
 }
 
 /// Parse the output of `git worktree list --porcelain -z`.
@@ -960,7 +1327,13 @@ mod tests {
         run_git(root, &["commit", "-m", "setup"]);
 
         let backend = GitGix::new();
-        let candidates = backend.list_worktreeinclude_candidates(root).unwrap();
+        let candidates = backend
+            .list_worktreeinclude_candidates(
+                root,
+                crate::config::WorktreeincludeSemantics::Git,
+                crate::config::SymlinkPolicy::Follow,
+            )
+            .unwrap();
         let names: Vec<&str> = candidates.iter().map(|p| p.as_str()).collect();
 
         assert!(
@@ -995,7 +1368,13 @@ mod tests {
         run_git(root, &["commit", "-m", "setup"]);
 
         let backend = GitGix::new();
-        let candidates = backend.list_worktreeinclude_candidates(root).unwrap();
+        let candidates = backend
+            .list_worktreeinclude_candidates(
+                root,
+                crate::config::WorktreeincludeSemantics::Git,
+                crate::config::SymlinkPolicy::Follow,
+            )
+            .unwrap();
         let names: Vec<&str> = candidates.iter().map(|p| p.as_str()).collect();
 
         assert!(
@@ -1027,7 +1406,13 @@ mod tests {
         run_git(root, &["commit", "-m", "setup"]);
 
         let backend = GitGix::new();
-        let candidates = backend.list_worktreeinclude_candidates(root).unwrap();
+        let candidates = backend
+            .list_worktreeinclude_candidates(
+                root,
+                crate::config::WorktreeincludeSemantics::Git,
+                crate::config::SymlinkPolicy::Follow,
+            )
+            .unwrap();
         let names: Vec<&str> = candidates.iter().map(|p| p.as_str()).collect();
 
         assert!(
@@ -1056,7 +1441,13 @@ mod tests {
         run_git(root, &["commit", "-m", "setup"]);
 
         let backend = GitGix::new();
-        let candidates = backend.list_worktreeinclude_candidates(root).unwrap();
+        let candidates = backend
+            .list_worktreeinclude_candidates(
+                root,
+                crate::config::WorktreeincludeSemantics::Git,
+                crate::config::SymlinkPolicy::Follow,
+            )
+            .unwrap();
         let names: Vec<&str> = candidates.iter().map(|p| p.as_str()).collect();
 
         assert!(

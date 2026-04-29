@@ -134,8 +134,16 @@ fn list_nested_worktreeinclude_override() {
     );
     git(repo.path(), &["commit", "-m", "setup"]);
 
+    // Pin git semantics; the default `claude` profile retains both files
+    // (covered separately by the modes-profile fixture suite).
     let output = waft()
-        .args(["list", "--source", repo.path().to_str().unwrap()])
+        .args([
+            "list",
+            "--compat-profile",
+            "git",
+            "--source",
+            repo.path().to_str().unwrap(),
+        ])
         .assert()
         .success();
 
@@ -402,7 +410,7 @@ fn validate_passes_with_valid_files() {
 
 #[cfg(unix)]
 #[test]
-fn validate_rejects_symlinked_worktreeinclude() {
+fn validate_rejects_symlinked_worktreeinclude_under_error_policy() {
     let repo = make_repo();
     write_file(repo.path(), "real.wti", "*.env\n");
     std::os::unix::fs::symlink(
@@ -411,8 +419,17 @@ fn validate_rejects_symlinked_worktreeinclude() {
     )
     .unwrap();
 
+    // Default profile (`claude`) follows symlinked rule files. Pin the
+    // legacy "error on symlink" policy explicitly to exercise the
+    // rejection path.
     waft()
-        .args(["validate", "--source", repo.path().to_str().unwrap()])
+        .args([
+            "validate",
+            "--source",
+            repo.path().to_str().unwrap(),
+            "--worktreeinclude-symlink-policy",
+            "error",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("symlinked .worktreeinclude"));

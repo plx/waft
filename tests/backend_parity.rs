@@ -151,6 +151,74 @@ fn list_skips_nested_git_checkouts_for_both_backends() {
     );
 }
 
+/// Both backends must agree on the all-ignored fallback when no
+/// `.worktreeinclude` exists. F2-style fixture: ignored file at root and
+/// inside an ignored directory.
+#[test]
+fn list_all_ignored_when_missing_matches_between_backends() {
+    let repo = make_repo();
+    std::fs::write(repo.path().join(".gitignore"), ".env\ncache/\n").unwrap();
+    git(repo.path(), &["add", ".gitignore"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    std::fs::write(repo.path().join(".env"), "secret\n").unwrap();
+    std::fs::create_dir_all(repo.path().join("cache")).unwrap();
+    std::fs::write(repo.path().join("cache/build.bin"), "data\n").unwrap();
+
+    let source = repo.path().to_string_lossy().to_string();
+    let args = &["list", "--compat-profile", "wt", "--source", &source];
+    let gix = run_waft(repo.path(), "gix", args);
+    let cli = run_waft(repo.path(), "cli", args);
+
+    assert!(
+        gix.status.success(),
+        "gix backend failed: {}",
+        String::from_utf8_lossy(&gix.stderr)
+    );
+    assert!(
+        cli.status.success(),
+        "cli backend failed: {}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&gix.stdout),
+        String::from_utf8_lossy(&cli.stdout),
+        "wt all-ignored output mismatch between gix and cli backends"
+    );
+}
+
+/// Both backends must agree on the existence check that gates the
+/// `when_missing` fallback for the claude/git profiles. With a
+/// `.worktreeinclude` present, those profiles must NOT switch to
+/// all-ignored even if the rule file selects nothing.
+#[test]
+fn list_existence_gate_matches_between_backends() {
+    let repo = make_repo();
+    std::fs::write(repo.path().join(".gitignore"), ".env\ncache/\n").unwrap();
+    // Empty .worktreeinclude file: present but selects nothing.
+    std::fs::write(repo.path().join(".worktreeinclude"), "").unwrap();
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    std::fs::write(repo.path().join(".env"), "secret\n").unwrap();
+    std::fs::create_dir_all(repo.path().join("cache")).unwrap();
+    std::fs::write(repo.path().join("cache/build.bin"), "data\n").unwrap();
+
+    let source = repo.path().to_string_lossy().to_string();
+    // Use the git profile here: claude/git both have when_missing=blank
+    // and stay in explicit-selection mode when a rule file exists.
+    let args = &["list", "--compat-profile", "git", "--source", &source];
+    let gix = run_waft(repo.path(), "gix", args);
+    let cli = run_waft(repo.path(), "cli", args);
+
+    assert!(gix.status.success() && cli.status.success());
+    let gix_out = String::from_utf8_lossy(&gix.stdout);
+    let cli_out = String::from_utf8_lossy(&cli.stdout);
+    assert!(
+        gix_out.trim().is_empty(),
+        "gix backend wrongly fell back to all-ignored: {gix_out}"
+    );
+    assert_eq!(gix_out, cli_out);
+}
+
 #[test]
 fn info_output_matches_between_backends() {
     let repo = make_repo();

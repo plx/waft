@@ -1,6 +1,7 @@
 use clap::Args;
 
 use crate::cli::Cli;
+use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
 use crate::git::default_git_backend;
@@ -20,7 +21,7 @@ pub struct CopyArgs {
 }
 
 /// Run the `copy` subcommand.
-pub fn run_copy(cli: &Cli, args: &CopyArgs) -> Result<()> {
+pub fn run_copy(cli: &Cli, policy: &ResolvedPolicy, args: &CopyArgs) -> Result<()> {
     let git = default_git_backend();
     let fs = crate::fs::RealFs;
 
@@ -34,7 +35,7 @@ pub fn run_copy(cli: &Cli, args: &CopyArgs) -> Result<()> {
     )?;
 
     // Validate
-    let report = validate::validate(&ctx, git.as_ref());
+    let report = validate::validate(&ctx, git.as_ref(), policy.symlink_policy);
     if report.has_errors() {
         for issue in &report.issues {
             if matches!(issue.severity, ValidationSeverity::Error) {
@@ -55,8 +56,10 @@ pub fn run_copy(cli: &Cli, args: &CopyArgs) -> Result<()> {
         }
     }
 
-    // Enumerate eligible files
-    let candidates = git.list_worktreeinclude_candidates(&ctx.source_root)?;
+    // Enumerate candidate files per the active policy.
+    let mut candidates = super::select_candidates(git.as_ref(), &ctx.source_root, policy)?;
+    // Apply post-selection exclusion policy (builtin set + extra excludes).
+    crate::policy_filter::filter_paths(&mut candidates, policy, &ctx.source_root)?;
     if candidates.is_empty() {
         if !cli.quiet {
             eprintln!("no eligible files found");

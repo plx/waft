@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
+use crate::config::SymlinkPolicy;
 use crate::model::WorktreeincludeStatus;
 
 /// Compiled context for a single `.worktreeinclude` file: its matcher, line
@@ -76,6 +77,7 @@ pub fn explain(
     rel_path: &str,
     is_dir: bool,
     case_insensitive: bool,
+    symlink_policy: SymlinkPolicy,
 ) -> WorktreeincludeStatus {
     let path_within_repo = Path::new(rel_path);
 
@@ -96,6 +98,10 @@ pub fn explain(
     for dir in &dirs_to_check {
         let wti_path = dir.join(".worktreeinclude");
         if !wti_path.is_file() {
+            continue;
+        }
+        if symlink_policy == SymlinkPolicy::Ignore && is_symlink(&wti_path) {
+            // Ignore policy: treat symlinked rule files as if absent.
             continue;
         }
 
@@ -246,6 +252,49 @@ fn glob_line_info(
     (0, original.to_string())
 }
 
+/// Evaluate `rel_path` using ONLY the repo-root `.worktreeinclude` file.
+///
+/// Used by the [`Claude202604Semantics`] engine: Claude observes the root
+/// rule file and ignores nested ones. Symlink policy is honored at the
+/// root file (`Ignore` skips a symlinked root file).
+///
+/// [`Claude202604Semantics`]: crate::worktreeinclude_engine::Claude202604Semantics
+pub fn evaluate_root_only(
+    repo_root: &Path,
+    rel_path: &str,
+    is_dir: bool,
+    case_insensitive: bool,
+    symlink_policy: SymlinkPolicy,
+) -> WorktreeincludeStatus {
+    let wti_path = repo_root.join(".worktreeinclude");
+    if !wti_path.is_file() {
+        return WorktreeincludeStatus::NoMatch;
+    }
+    if symlink_policy == SymlinkPolicy::Ignore && is_symlink(&wti_path) {
+        return WorktreeincludeStatus::NoMatch;
+    }
+
+    let content = match fs::read_to_string(&wti_path) {
+        Ok(c) => c,
+        Err(_) => return WorktreeincludeStatus::NoMatch,
+    };
+    let ctx = match build_file_match_context(&wti_path, repo_root, &content, case_insensitive) {
+        Some(c) => c,
+        None => return WorktreeincludeStatus::NoMatch,
+    };
+
+    let full_path: PathBuf = repo_root.join(rel_path).components().collect();
+    evaluate_against_context(&ctx, &full_path, rel_path, is_dir, repo_root)
+        .unwrap_or(WorktreeincludeStatus::NoMatch)
+}
+
+/// True if `path` itself is a symlink (without following).
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,7 +309,7 @@ mod tests {
         let dir = setup_repo();
         fs::write(dir.path().join(".worktreeinclude"), ".env\n").unwrap();
 
-        let result = explain(dir.path(), ".env", false, false);
+        let result = explain(dir.path(), ".env", false, false, SymlinkPolicy::Follow);
         match result {
             WorktreeincludeStatus::Included { pattern, line, .. } => {
                 assert_eq!(pattern, ".env");
@@ -275,7 +324,13 @@ mod tests {
         let dir = setup_repo();
         fs::write(dir.path().join(".worktreeinclude"), "*.env\n").unwrap();
 
-        let result = explain(dir.path(), "production.env", false, false);
+        let result = explain(
+            dir.path(),
+            "production.env",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(matches!(result, WorktreeincludeStatus::Included { .. }));
     }
 
@@ -284,7 +339,7 @@ mod tests {
         let dir = setup_repo();
         fs::write(dir.path().join(".worktreeinclude"), "*.env\n").unwrap();
 
-        let result = explain(dir.path(), "README.md", false, false);
+        let result = explain(dir.path(), "README.md", false, false, SymlinkPolicy::Follow);
         assert!(matches!(result, WorktreeincludeStatus::NoMatch));
     }
 
@@ -293,7 +348,7 @@ mod tests {
         let dir = setup_repo();
         fs::write(dir.path().join(".worktreeinclude"), "*.env\n!test.env\n").unwrap();
 
-        let result = explain(dir.path(), "test.env", false, false);
+        let result = explain(dir.path(), "test.env", false, false, SymlinkPolicy::Follow);
         match result {
             WorktreeincludeStatus::ExcludedByNegation { pattern, line, .. } => {
                 assert_eq!(pattern, "!test.env");
@@ -312,7 +367,13 @@ mod tests {
         )
         .unwrap();
 
-        let result = explain(dir.path(), "production.env", false, false);
+        let result = explain(
+            dir.path(),
+            "production.env",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         match result {
             WorktreeincludeStatus::Included { pattern, line, .. } => {
                 assert_eq!(pattern, "production.env");
@@ -333,7 +394,13 @@ mod tests {
         // Nested says exclude .env in config/
         fs::write(subdir.join(".worktreeinclude"), "!*.env\n").unwrap();
 
-        let result = explain(dir.path(), "config/prod.env", false, false);
+        let result = explain(
+            dir.path(),
+            "config/prod.env",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::ExcludedByNegation { .. }),
             "nested .worktreeinclude should override root, got {result:?}"
@@ -350,7 +417,7 @@ mod tests {
         fs::write(subdir.join(".worktreeinclude"), "!*.env\n").unwrap();
 
         // A .env file NOT in config/ should still match root
-        let result = explain(dir.path(), "app.env", false, false);
+        let result = explain(dir.path(), "app.env", false, false, SymlinkPolicy::Follow);
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "root .worktreeinclude should still apply to non-nested paths, got {result:?}"
@@ -362,7 +429,13 @@ mod tests {
         let dir = setup_repo();
         fs::write(dir.path().join(".worktreeinclude"), "**/*.secret\n").unwrap();
 
-        let result = explain(dir.path(), "a/b/c/key.secret", false, false);
+        let result = explain(
+            dir.path(),
+            "a/b/c/key.secret",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(matches!(result, WorktreeincludeStatus::Included { .. }));
     }
 
@@ -371,7 +444,7 @@ mod tests {
         let dir = setup_repo();
         fs::write(dir.path().join(".worktreeinclude"), "build/\n").unwrap();
 
-        let result = explain(dir.path(), "build", true, false);
+        let result = explain(dir.path(), "build", true, false, SymlinkPolicy::Follow);
         assert!(matches!(result, WorktreeincludeStatus::Included { .. }));
     }
 
@@ -380,7 +453,7 @@ mod tests {
         let dir = setup_repo();
         fs::write(dir.path().join(".worktreeinclude"), "build/\n").unwrap();
 
-        let result = explain(dir.path(), "build", false, false);
+        let result = explain(dir.path(), "build", false, false, SymlinkPolicy::Follow);
         assert!(
             matches!(result, WorktreeincludeStatus::NoMatch),
             "directory-only pattern should not match files, got {result:?}"
@@ -393,11 +466,23 @@ mod tests {
         fs::write(dir.path().join(".worktreeinclude"), "/root-only.env\n").unwrap();
 
         // Should match at root
-        let result = explain(dir.path(), "root-only.env", false, false);
+        let result = explain(
+            dir.path(),
+            "root-only.env",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(matches!(result, WorktreeincludeStatus::Included { .. }));
 
         // Should NOT match in subdirectory
-        let result = explain(dir.path(), "sub/root-only.env", false, false);
+        let result = explain(
+            dir.path(),
+            "sub/root-only.env",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::NoMatch),
             "anchored pattern should not match in subdirectory, got {result:?}"
@@ -407,7 +492,13 @@ mod tests {
     #[test]
     fn no_worktreeinclude_files() {
         let dir = setup_repo();
-        let result = explain(dir.path(), "anything.env", false, false);
+        let result = explain(
+            dir.path(),
+            "anything.env",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(matches!(result, WorktreeincludeStatus::NoMatch));
     }
 
@@ -416,7 +507,7 @@ mod tests {
         let dir = setup_repo();
         fs::write(dir.path().join(".worktreeinclude"), "*.ENV\n").unwrap();
 
-        let result = explain(dir.path(), "test.env", false, true);
+        let result = explain(dir.path(), "test.env", false, true, SymlinkPolicy::Follow);
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "case-insensitive matching should work, got {result:?}"
@@ -433,7 +524,13 @@ mod tests {
 
         fs::write(subdir.join(".worktreeinclude"), "/foo\n").unwrap();
 
-        let result = explain(dir.path(), "config/foo", false, false);
+        let result = explain(
+            dir.path(),
+            "config/foo",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "anchored pattern in nested .worktreeinclude should match relative to its dir, got {result:?}"
@@ -449,7 +546,7 @@ mod tests {
         let dir = setup_repo();
         fs::write(dir.path().join(".worktreeinclude"), "dir/\n!dir/keep\n").unwrap();
 
-        let result = explain(dir.path(), "dir/keep", false, false);
+        let result = explain(dir.path(), "dir/keep", false, false, SymlinkPolicy::Follow);
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "dir/ selection should win over !dir/keep negation (Git caveat), got {result:?}"
@@ -471,14 +568,26 @@ mod tests {
         .unwrap();
 
         // secrets/ directory pattern should select files inside it
-        let result = explain(dir.path(), "sub/secrets/private.key", false, false);
+        let result = explain(
+            dir.path(),
+            "sub/secrets/private.key",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "anchored dir pattern in nested file should select files inside, got {result:?}"
         );
 
         // Git caveat: negation cannot override directory selection
-        let result = explain(dir.path(), "sub/secrets/public", false, false);
+        let result = explain(
+            dir.path(),
+            "sub/secrets/public",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "negation cannot deselect file inside selected directory (Git caveat), got {result:?}"
@@ -496,14 +605,14 @@ mod tests {
         fs::write(subdir.join(".worktreeinclude"), "/foo\n").unwrap();
 
         // Should NOT match foo at root (anchored to config/, not repo root)
-        let result = explain(dir.path(), "foo", false, false);
+        let result = explain(dir.path(), "foo", false, false, SymlinkPolicy::Follow);
         assert!(
             matches!(result, WorktreeincludeStatus::NoMatch),
             "anchored pattern in config/.worktreeinclude should not match root-level foo, got {result:?}"
         );
 
         // Should NOT match foo in a sibling directory
-        let result = explain(dir.path(), "other/foo", false, false);
+        let result = explain(dir.path(), "other/foo", false, false, SymlinkPolicy::Follow);
         assert!(
             matches!(result, WorktreeincludeStatus::NoMatch),
             "anchored pattern in config/.worktreeinclude should not match other/foo, got {result:?}"
@@ -519,14 +628,26 @@ mod tests {
 
         fs::write(deep.join(".worktreeinclude"), "/secret.key\n").unwrap();
 
-        let result = explain(dir.path(), "a/b/c/secret.key", false, false);
+        let result = explain(
+            dir.path(),
+            "a/b/c/secret.key",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "deeply nested anchored pattern should match, got {result:?}"
         );
 
         // Should not match at a different depth
-        let result = explain(dir.path(), "a/b/secret.key", false, false);
+        let result = explain(
+            dir.path(),
+            "a/b/secret.key",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::NoMatch),
             "deeply nested anchored pattern should not match at wrong depth, got {result:?}"
@@ -548,14 +669,26 @@ mod tests {
         .unwrap();
 
         // File inside selected directory — caveat should prevent negation
-        let result = explain(dir.path(), "deploy/configs/local.yml", false, false);
+        let result = explain(
+            dir.path(),
+            "deploy/configs/local.yml",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "negation caveat should apply in nested .worktreeinclude, got {result:?}"
         );
 
         // Another file inside the directory should be selected normally
-        let result = explain(dir.path(), "deploy/configs/prod.yml", false, false);
+        let result = explain(
+            dir.path(),
+            "deploy/configs/prod.yml",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "file inside selected dir in nested .worktreeinclude should be included, got {result:?}"
@@ -577,7 +710,13 @@ mod tests {
         // Nested file tries to deselect a specific file
         fs::write(subdir.join(".worktreeinclude"), "!private.key\n").unwrap();
 
-        let result = explain(dir.path(), "secrets/private.key", false, false);
+        let result = explain(
+            dir.path(),
+            "secrets/private.key",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "cross-file caveat: dir selected by root should block nested negation, got {result:?}"
@@ -591,14 +730,26 @@ mod tests {
         let dir = setup_repo();
         fs::write(dir.path().join(".worktreeinclude"), "*.env\n!staging.env\n").unwrap();
 
-        let result = explain(dir.path(), "staging.env", false, false);
+        let result = explain(
+            dir.path(),
+            "staging.env",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::ExcludedByNegation { .. }),
             "negation should deselect when positive is file pattern (no caveat), got {result:?}"
         );
 
         // Other .env files should still be selected
-        let result = explain(dir.path(), "production.env", false, false);
+        let result = explain(
+            dir.path(),
+            "production.env",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
         assert!(
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "non-negated .env should still be included, got {result:?}"

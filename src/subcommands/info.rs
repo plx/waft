@@ -2,12 +2,12 @@ use clap::Args;
 use std::path::PathBuf;
 
 use crate::cli::Cli;
+use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
 use crate::git::default_git_backend;
 use crate::model::ValidationSeverity;
 use crate::validate;
-use crate::worktreeinclude;
 
 /// Arguments for the info command.
 #[derive(Debug, Args)]
@@ -18,8 +18,12 @@ pub struct InfoArgs {
 }
 
 /// Run the `info` subcommand.
-pub fn run_info(cli: &Cli, args: &InfoArgs) -> Result<()> {
+pub fn run_info(cli: &Cli, policy: &ResolvedPolicy, args: &InfoArgs) -> Result<()> {
     let git = default_git_backend();
+
+    if cli.verbose > 0 {
+        print_resolved_policy(policy);
+    }
 
     let ctx = context::resolve_context(
         git.as_ref(),
@@ -30,7 +34,7 @@ pub fn run_info(cli: &Cli, args: &InfoArgs) -> Result<()> {
     )?;
 
     // Validate
-    let report = validate::validate(&ctx, git.as_ref());
+    let report = validate::validate(&ctx, git.as_ref(), policy.symlink_policy);
     if report.has_errors() {
         for issue in &report.issues {
             if matches!(issue.severity, ValidationSeverity::Error) {
@@ -120,11 +124,13 @@ pub fn run_info(cli: &Cli, args: &InfoArgs) -> Result<()> {
         };
 
         // Worktreeinclude status
-        let wti = worktreeinclude::explain(
+        let engine = crate::worktreeinclude_engine::engine_for(policy.semantics);
+        let wti = engine.evaluate(
             &ctx.source_root,
             rp.as_str(),
             abs_path.is_dir(),
             ctx.core_ignore_case,
+            policy.symlink_policy,
         );
         let wti_str = match &wti {
             crate::model::WorktreeincludeStatus::Included {
@@ -214,4 +220,26 @@ pub fn run_info(cli: &Cli, args: &InfoArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Print the active resolved policy in a stable, machine-readable format.
+fn print_resolved_policy(policy: &ResolvedPolicy) {
+    println!("policy:");
+    println!("  profile: {}", policy.profile.as_str());
+    println!("  when_missing: {}", policy.when_missing.as_str());
+    println!("  semantics: {}", policy.semantics.as_str());
+    println!("  symlink_policy: {}", policy.symlink_policy.as_str());
+    println!(
+        "  builtin_exclude_set: {}",
+        policy.builtin_exclude_set.as_str()
+    );
+    if policy.extra_excludes.is_empty() {
+        println!("  extra_excludes: []");
+    } else {
+        println!("  extra_excludes:");
+        for entry in &policy.extra_excludes {
+            println!("    - {entry}");
+        }
+    }
+    println!();
 }

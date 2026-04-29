@@ -1,19 +1,19 @@
 use clap::Args;
 
 use crate::cli::Cli;
+use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
 use crate::git::default_git_backend;
 use crate::model::ValidationSeverity;
 use crate::validate;
-use crate::worktreeinclude;
 
 /// Arguments for the list command.
 #[derive(Debug, Args)]
 pub struct ListArgs {}
 
 /// Run the `list` subcommand.
-pub fn run_list(cli: &Cli, _args: &ListArgs) -> Result<()> {
+pub fn run_list(cli: &Cli, policy: &ResolvedPolicy, _args: &ListArgs) -> Result<()> {
     let git = default_git_backend();
 
     // Resolve context
@@ -26,7 +26,7 @@ pub fn run_list(cli: &Cli, _args: &ListArgs) -> Result<()> {
     )?;
 
     // Validate
-    let report = validate::validate(&ctx, git.as_ref());
+    let report = validate::validate(&ctx, git.as_ref(), policy.symlink_policy);
     if report.has_errors() {
         for issue in &report.issues {
             if matches!(issue.severity, ValidationSeverity::Error) {
@@ -47,8 +47,10 @@ pub fn run_list(cli: &Cli, _args: &ListArgs) -> Result<()> {
         }
     }
 
-    // Enumerate worktreeinclude candidates
-    let candidates = git.list_worktreeinclude_candidates(&ctx.source_root)?;
+    // Enumerate candidates per the active policy.
+    let mut candidates = super::select_candidates(git.as_ref(), &ctx.source_root, policy)?;
+    // Apply post-selection exclusion policy (builtin set + extra excludes).
+    crate::policy_filter::filter_paths(&mut candidates, policy, &ctx.source_root)?;
 
     if candidates.is_empty() {
         return Ok(());
@@ -102,7 +104,14 @@ pub fn run_list(cli: &Cli, _args: &ListArgs) -> Result<()> {
             };
 
             // Worktreeinclude info
-            let wti = worktreeinclude::explain(&ctx.source_root, path, false, ctx.core_ignore_case);
+            let engine = crate::worktreeinclude_engine::engine_for(policy.semantics);
+            let wti = engine.evaluate(
+                &ctx.source_root,
+                path,
+                false,
+                ctx.core_ignore_case,
+                policy.symlink_policy,
+            );
             let wti_str = match &wti {
                 crate::model::WorktreeincludeStatus::Included {
                     file,

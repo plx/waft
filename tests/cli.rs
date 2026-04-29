@@ -19,6 +19,32 @@ fn help_shows_usage() {
 }
 
 #[test]
+fn help_shows_compat_profile_flags() {
+    waft()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--compat-profile"))
+        .stdout(predicate::str::contains("--when-missing-worktreeinclude"))
+        .stdout(predicate::str::contains("--worktreeinclude-semantics"))
+        .stdout(predicate::str::contains("--worktreeinclude-symlink-policy"))
+        .stdout(predicate::str::contains("--builtin-exclude-set"))
+        .stdout(predicate::str::contains("--extra-exclude"))
+        .stdout(predicate::str::contains("--replace-extra-excludes"))
+        .stdout(predicate::str::contains("--config"));
+}
+
+#[test]
+fn invalid_compat_profile_value_rejected() {
+    waft()
+        .args(["--compat-profile", "rainbow"])
+        .arg("list")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("rainbow"));
+}
+
+#[test]
 fn copy_help_shows_options() {
     waft()
         .args(["copy", "--help"])
@@ -62,16 +88,6 @@ fn info_requires_paths() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("PATHS"));
-}
-
-#[test]
-fn no_subcommand_dispatches_to_copy() {
-    // Running waft with no subcommand should attempt copy (which is not
-    // implemented yet and returns an error)
-    waft()
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("copy"));
 }
 
 #[test]

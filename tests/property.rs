@@ -35,8 +35,18 @@ fn make_repo() -> TempDir {
 }
 
 fn waft_list(dir: &Path) -> BTreeSet<String> {
+    // These property tests compare waft against `git ls-files
+    // --exclude-per-directory=.worktreeinclude`, so pin the git profile
+    // explicitly. The default `claude` profile uses different semantics
+    // (covered by `tests/modes_profile_integration.rs`).
     let output = process::Command::new(env!("CARGO_BIN_EXE_waft"))
-        .args(["list", "--source", dir.to_str().unwrap()])
+        .args([
+            "list",
+            "--compat-profile",
+            "git",
+            "--source",
+            dir.to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

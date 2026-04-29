@@ -9,11 +9,16 @@ use std::path::{Path, PathBuf};
 
 use ignore::gitignore::GitignoreBuilder;
 
+use crate::config::SymlinkPolicy;
 use crate::git::GitBackend;
 use crate::model::{RepoContext, ValidationIssue, ValidationReport, ValidationSeverity};
 
 /// Validate all ignore and worktreeinclude files in the repository.
-pub fn validate(ctx: &RepoContext, git: &dyn GitBackend) -> ValidationReport {
+pub fn validate(
+    ctx: &RepoContext,
+    git: &dyn GitBackend,
+    symlink_policy: SymlinkPolicy,
+) -> ValidationReport {
     let mut report = ValidationReport::default();
 
     // Discover and validate .gitignore files
@@ -22,6 +27,7 @@ pub fn validate(ctx: &RepoContext, git: &dyn GitBackend) -> ValidationReport {
         ".gitignore",
         ctx.core_ignore_case,
         ValidationSeverity::Error,
+        symlink_policy,
         &mut report,
     );
 
@@ -31,6 +37,7 @@ pub fn validate(ctx: &RepoContext, git: &dyn GitBackend) -> ValidationReport {
         ".worktreeinclude",
         ctx.core_ignore_case,
         ValidationSeverity::Error,
+        symlink_policy,
         &mut report,
     );
 
@@ -68,6 +75,7 @@ fn discover_and_validate(
     filename: &str,
     case_insensitive: bool,
     severity: ValidationSeverity,
+    symlink_policy: SymlinkPolicy,
     report: &mut ValidationReport,
 ) {
     let walker = walkdir(root);
@@ -91,18 +99,31 @@ fn discover_and_validate(
 
         let path = entry.path();
 
-        // Check for symlinked .worktreeinclude files (hard error per spec).
         // walkdir does not follow symlinks by default, so symlink entries
-        // have is_symlink()=true and is_file()=false. We must check before
-        // the is_file() gate to avoid skipping them.
+        // have is_symlink()=true and is_file()=false. Handle them explicitly
+        // before falling through to the regular-file validation path.
         if filename == ".worktreeinclude" && entry.file_type().is_symlink() {
-            report.issues.push(ValidationIssue {
-                severity: ValidationSeverity::Error,
-                file: path.to_path_buf(),
-                line: None,
-                message: "symlinked .worktreeinclude files are not allowed".to_string(),
-            });
-            continue;
+            match symlink_policy {
+                SymlinkPolicy::Error => {
+                    report.issues.push(ValidationIssue {
+                        severity: ValidationSeverity::Error,
+                        file: path.to_path_buf(),
+                        line: None,
+                        message: "symlinked .worktreeinclude files are not allowed".to_string(),
+                    });
+                    continue;
+                }
+                SymlinkPolicy::Ignore => {
+                    // Treat as if absent — neither validate nor report.
+                    continue;
+                }
+                SymlinkPolicy::Follow => {
+                    // Read through the symlink. fs::read_to_string follows
+                    // symlinks by default, so validate_ignore_file works.
+                    validate_ignore_file(path, root, case_insensitive, severity, report);
+                    continue;
+                }
+            }
         }
 
         if entry.file_type().is_file() {
@@ -345,7 +366,22 @@ mod tests {
         ) -> Result<Vec<IgnoreCheckRecord>> {
             unimplemented!()
         }
-        fn list_worktreeinclude_candidates(&self, _source_root: &Path) -> Result<Vec<RepoRelPath>> {
+        fn list_worktreeinclude_candidates(
+            &self,
+            _source_root: &Path,
+            _semantics: crate::config::WorktreeincludeSemantics,
+            _symlink_policy: crate::config::SymlinkPolicy,
+        ) -> Result<Vec<RepoRelPath>> {
+            unimplemented!()
+        }
+        fn list_ignored_untracked(&self, _source_root: &Path) -> Result<Vec<RepoRelPath>> {
+            unimplemented!()
+        }
+        fn worktreeinclude_exists_anywhere(
+            &self,
+            _source_root: &Path,
+            _symlink_policy: crate::config::SymlinkPolicy,
+        ) -> Result<bool> {
             unimplemented!()
         }
         fn read_bool_config(&self, _source_root: &Path, _key: &str) -> Result<bool> {
@@ -377,7 +413,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         let errors: Vec<_> = report
             .issues
             .iter()
@@ -393,7 +429,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         let errors: Vec<_> = report
             .issues
             .iter()
@@ -410,7 +446,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         assert!(!report.has_errors());
     }
 
@@ -424,7 +460,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         let errors: Vec<_> = report
             .issues
             .iter()
@@ -442,7 +478,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         assert!(!report.has_errors());
     }
 
@@ -455,7 +491,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(Some(global_file.to_string_lossy().into_owned()));
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         // Valid patterns should produce no warnings
         let warnings: Vec<_> = report
             .issues
@@ -474,7 +510,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(Some(global_file.to_string_lossy().into_owned()));
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         let warnings: Vec<_> = report
             .issues
             .iter()
@@ -496,7 +532,7 @@ mod tests {
 
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
 
         let errors: Vec<_> = report
             .issues
@@ -525,7 +561,7 @@ mod tests {
 
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
 
         let errors: Vec<_> = report
             .issues
@@ -555,7 +591,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         let warnings: Vec<_> = report
             .issues
             .iter()
@@ -584,7 +620,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         let warnings: Vec<_> = report
             .issues
             .iter()
@@ -611,7 +647,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         let warnings: Vec<_> = report
             .issues
             .iter()
@@ -632,7 +668,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         let warnings: Vec<_> = report
             .issues
             .iter()
@@ -657,7 +693,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         let warnings: Vec<_> = report
             .issues
             .iter()
@@ -678,7 +714,7 @@ mod tests {
         let ctx = make_ctx(&dir);
         let git = MockGit::new(None);
 
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         let warnings: Vec<_> = report
             .issues
             .iter()
@@ -699,7 +735,7 @@ mod tests {
         let git = MockGit::new(None);
 
         // No global excludes configured, no warnings expected
-        let report = validate(&ctx, &git);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
         let warnings: Vec<_> = report
             .issues
             .iter()
