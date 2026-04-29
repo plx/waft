@@ -14,7 +14,7 @@ use crate::worktreeinclude;
 pub struct ListArgs {}
 
 /// Run the `list` subcommand.
-pub fn run_list(cli: &Cli, _policy: &ResolvedPolicy, _args: &ListArgs) -> Result<()> {
+pub fn run_list(cli: &Cli, policy: &ResolvedPolicy, _args: &ListArgs) -> Result<()> {
     let git = default_git_backend();
 
     // Resolve context
@@ -48,8 +48,8 @@ pub fn run_list(cli: &Cli, _policy: &ResolvedPolicy, _args: &ListArgs) -> Result
         }
     }
 
-    // Enumerate worktreeinclude candidates
-    let candidates = git.list_worktreeinclude_candidates(&ctx.source_root)?;
+    // Enumerate candidates per the active policy.
+    let candidates = super::select_candidates(git.as_ref(), &ctx.source_root, policy)?;
 
     if candidates.is_empty() {
         return Ok(());

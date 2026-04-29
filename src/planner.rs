@@ -348,6 +348,12 @@ mod tests {
         fn list_worktreeinclude_candidates(&self, _source_root: &Path) -> Result<Vec<RepoRelPath>> {
             Ok(vec![])
         }
+        fn list_ignored_untracked(&self, _source_root: &Path) -> Result<Vec<RepoRelPath>> {
+            Ok(vec![])
+        }
+        fn worktreeinclude_exists_anywhere(&self, _source_root: &Path) -> Result<bool> {
+            Ok(false)
+        }
         fn read_bool_config(&self, _source_root: &Path, _key: &str) -> Result<bool> {
             Ok(false)
         }

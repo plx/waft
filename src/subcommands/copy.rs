@@ -21,10 +21,7 @@ pub struct CopyArgs {
 }
 
 /// Run the `copy` subcommand.
-///
-/// `_policy` is plumbed through but does not yet drive behavior; subsequent
-/// PRs wire individual knobs into selection and copy.
-pub fn run_copy(cli: &Cli, _policy: &ResolvedPolicy, args: &CopyArgs) -> Result<()> {
+pub fn run_copy(cli: &Cli, policy: &ResolvedPolicy, args: &CopyArgs) -> Result<()> {
     let git = default_git_backend();
     let fs = crate::fs::RealFs;
 
@@ -59,8 +56,8 @@ pub fn run_copy(cli: &Cli, _policy: &ResolvedPolicy, args: &CopyArgs) -> Result<
         }
     }
 
-    // Enumerate eligible files
-    let candidates = git.list_worktreeinclude_candidates(&ctx.source_root)?;
+    // Enumerate candidate files per the active policy.
+    let candidates = super::select_candidates(git.as_ref(), &ctx.source_root, policy)?;
     if candidates.is_empty() {
         if !cli.quiet {
             eprintln!("no eligible files found");
