@@ -49,9 +49,12 @@ waft validate
 !test.key
 ```
 
-Nested `.worktreeinclude` files work like nested `.gitignore` files:
-patterns are relative to the directory containing the file, and deeper
-files take precedence over shallower ones.
+By default (`claude` profile), only the repository's root-level
+`.worktreeinclude` is consulted. Pick `--compat-profile git` if you need
+nested `.worktreeinclude` files to compose like nested `.gitignore`
+files (patterns relative to their directory, deeper files winning over
+shallower ones), or `--compat-profile wt` for worktrunk parity. See
+"Compatibility profiles" below for the full matrix.
 
 ## Eligibility rule
 
@@ -59,8 +62,11 @@ A file is eligible for copying when **all** of these are true:
 
 1. It exists in the source worktree
 2. It is a regular file (not a symlink, directory, etc.)
-3. It matches a `.worktreeinclude` pattern
+3. It is selected by the active compat profile (matches a
+   `.worktreeinclude` pattern, or — under `wt` / `--when-missing-worktreeinclude all-ignored` — is git-ignored even without a rule file)
 4. It is Git-ignored (not tracked)
+5. It is not dropped by the active exclusion set
+   (`--builtin-exclude-set`, `--extra-exclude`)
 
 ## Commands
 
