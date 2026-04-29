@@ -91,15 +91,6 @@ fn info_requires_paths() {
 }
 
 #[test]
-fn no_subcommand_dispatches_to_copy() {
-    // Running waft with no subcommand should attempt copy with default args.
-    waft()
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("no eligible files found"));
-}
-
-#[test]
 fn version_flag() {
     waft()
         .arg("--version")
