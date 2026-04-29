@@ -499,12 +499,20 @@ impl GitBackend for GitGix {
             .boolean("core.ignoreCase")
             .unwrap_or(false);
 
+        // Submodules registered with `git submodule add` are stored in the
+        // index as entries with mode 160000 (gitlink). `git ls-files` skips
+        // these when walking the worktree, and so must we.
+        let gitlinks: HashSet<String> = index
+            .entries()
+            .iter()
+            .filter(|e| e.mode == gix::index::entry::Mode::COMMIT)
+            .map(|e| e.path(&index).to_str_lossy().into_owned())
+            .collect();
+
         let mut candidates = Vec::new();
         for entry in walkdir::WalkDir::new(source_root)
             .into_iter()
-            .filter_entry(|e| {
-                !(e.file_type().is_dir() && e.file_name().to_string_lossy() == ".git")
-            })
+            .filter_entry(|e| !is_nested_git_boundary(e, source_root, &gitlinks))
         {
             let entry = entry.map_err(|e| Error::Git {
                 message: format!("failed walking {}: {e}", source_root.display()),
@@ -559,6 +567,51 @@ impl GitBackend for GitGix {
             None => Ok(None),
         }
     }
+}
+
+/// Return true when `entry` is a directory that should not be descended into
+/// because it is either a `.git` directory or sits at the root of a nested
+/// Git checkout (registered submodule or nested clone).
+///
+/// Recursing into nested checkouts would copy untracked/ignored files out of
+/// those repositories — which `git ls-files --others --ignored` does not do
+/// without `--recurse-submodules`. Mirroring git's exact rules keeps the gix
+/// backend in parity with the CLI backend and satisfies the v1 spec rule of
+/// not recursing into submodules or nested Git repositories.
+///
+/// What gets skipped:
+/// - The repo's own `.git` directory.
+/// - Subdirectories with a `.git` *directory* (an independent nested clone).
+/// - Subdirectories registered as gitlinks (proper submodules).
+///
+/// What does *not* get skipped (matching CLI behavior):
+/// - The walk root itself, even though it has its own `.git`.
+/// - Subdirectories whose only Git marker is a bare `.git` *file* with no
+///   matching gitlink in the index. Git CLI treats these as ordinary
+///   directories, and so do we.
+fn is_nested_git_boundary(
+    entry: &walkdir::DirEntry,
+    source_root: &Path,
+    gitlinks: &HashSet<String>,
+) -> bool {
+    if !entry.file_type().is_dir() {
+        return false;
+    }
+    if entry.file_name() == ".git" {
+        return true;
+    }
+    if entry.depth() == 0 {
+        return false;
+    }
+    if entry.path().join(".git").is_dir() {
+        return true;
+    }
+    if let Ok(rel) = RepoRelPath::normalize(entry.path(), source_root)
+        && gitlinks.contains(rel.as_str())
+    {
+        return true;
+    }
+    false
 }
 
 /// Parse the output of `git worktree list --porcelain -z`.
@@ -839,5 +892,176 @@ mod tests {
     fn parse_check_ignore_empty() {
         let records = parse_check_ignore_output(b"").unwrap();
         assert!(records.is_empty());
+    }
+
+    // ---- nested-repo skip behavior for list_worktreeinclude_candidates ----
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("failed to spawn git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_repo(dir: &Path) {
+        run_git(dir, &["init"]);
+        run_git(dir, &["config", "user.email", "test@test.com"]);
+        run_git(dir, &["config", "user.name", "Test"]);
+    }
+
+    fn write_file(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, content).unwrap();
+    }
+
+    /// A subdirectory registered as a submodule (a gitlink entry in the
+    /// index, mode 160000) must not be enumerated as a candidate source.
+    /// `git ls-files --others --ignored` does not recurse into submodules
+    /// without `--recurse-submodules`, and the v1 spec forbids it outright.
+    #[test]
+    fn list_candidates_skips_submodule_registered_as_gitlink() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(root);
+
+        write_file(&root.join(".gitignore"), "*.env\n");
+        write_file(&root.join(".worktreeinclude"), "*.env\n");
+        write_file(&root.join("top.env"), "top\n");
+
+        // Build a minimal submodule-shaped layout: directory with a `.git`
+        // file plus an index gitlink entry pointing at it. We use
+        // `update-index --cacheinfo` to register the gitlink without needing
+        // a fully-initialized second repository.
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        write_file(&sub.join(".git"), "gitdir: ../.git/modules/sub\n");
+        write_file(&sub.join("inner.env"), "inner\n");
+
+        run_git(root, &["add", ".gitignore", ".worktreeinclude"]);
+        run_git(
+            root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000,1111111111111111111111111111111111111111,sub",
+            ],
+        );
+        run_git(root, &["commit", "-m", "setup"]);
+
+        let backend = GitGix::new();
+        let candidates = backend.list_worktreeinclude_candidates(root).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.as_str()).collect();
+
+        assert!(
+            names.contains(&"top.env"),
+            "expected top.env in candidates, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("sub/")),
+            "submodule contents must not be enumerated, got: {names:?}"
+        );
+    }
+
+    /// A bare `.git` *file* alone (no gitlink in the index, no `.gitmodules`)
+    /// is not a submodule from Git's perspective, and `git ls-files --others`
+    /// does recurse into such directories. Match that CLI behavior.
+    #[test]
+    fn list_candidates_recurses_into_unregistered_dot_git_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(root);
+
+        write_file(&root.join(".gitignore"), "*.env\n");
+        write_file(&root.join(".worktreeinclude"), "*.env\n");
+        write_file(&root.join("top.env"), "top\n");
+
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        write_file(&sub.join(".git"), "gitdir: /nonexistent\n");
+        write_file(&sub.join("inner.env"), "inner\n");
+
+        run_git(root, &["add", ".gitignore", ".worktreeinclude"]);
+        run_git(root, &["commit", "-m", "setup"]);
+
+        let backend = GitGix::new();
+        let candidates = backend.list_worktreeinclude_candidates(root).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.as_str()).collect();
+
+        assert!(
+            names.contains(&"sub/inner.env"),
+            "expected sub/inner.env to be enumerated (not a registered \
+             submodule), got: {names:?}"
+        );
+    }
+
+    /// A nested independent Git checkout (its own `.git` *directory*) must
+    /// also be skipped — same reasoning as submodules: contents belong to a
+    /// different repository and copying them would leak files.
+    #[test]
+    fn list_candidates_skips_nested_repo_with_dot_git_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(root);
+
+        write_file(&root.join(".gitignore"), "*.env\n");
+        write_file(&root.join(".worktreeinclude"), "*.env\n");
+        write_file(&root.join("top.env"), "top\n");
+
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        init_repo(&nested);
+        write_file(&nested.join("inner.env"), "inner\n");
+
+        run_git(root, &["add", ".gitignore", ".worktreeinclude"]);
+        run_git(root, &["commit", "-m", "setup"]);
+
+        let backend = GitGix::new();
+        let candidates = backend.list_worktreeinclude_candidates(root).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.as_str()).collect();
+
+        assert!(
+            names.contains(&"top.env"),
+            "expected top.env in candidates, got: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("nested/")),
+            "nested-repo contents must not be enumerated, got: {names:?}"
+        );
+    }
+
+    /// Sanity check: the skip logic does not over-fire on normal nested
+    /// directories (no `.git` marker inside).
+    #[test]
+    fn list_candidates_recurses_into_normal_subdirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        init_repo(root);
+
+        write_file(&root.join(".gitignore"), "*.env\n");
+        write_file(&root.join(".worktreeinclude"), "*.env\n");
+        write_file(&root.join("config/dev.env"), "dev\n");
+
+        run_git(root, &["add", ".gitignore", ".worktreeinclude"]);
+        run_git(root, &["commit", "-m", "setup"]);
+
+        let backend = GitGix::new();
+        let candidates = backend.list_worktreeinclude_candidates(root).unwrap();
+        let names: Vec<&str> = candidates.iter().map(|p| p.as_str()).collect();
+
+        assert!(
+            names.contains(&"config/dev.env"),
+            "expected config/dev.env in candidates, got: {names:?}"
+        );
     }
 }
