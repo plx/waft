@@ -66,12 +66,11 @@ fn info_requires_paths() {
 
 #[test]
 fn no_subcommand_dispatches_to_copy() {
-    // Running waft with no subcommand should attempt copy (which is not
-    // implemented yet and returns an error)
+    // Running waft with no subcommand should attempt copy with default args.
     waft()
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("copy"));
+        .success()
+        .stderr(predicate::str::contains("no eligible files found"));
 }
 
 #[test]

@@ -15,6 +15,22 @@ The plan is intentionally sequenced for safe delivery after rebasing on the just
 - Prefer introducing policy knobs first, then wiring behavior incrementally.
 - Preserve current behavior behind defaults until the final default switch PR.
 
+## Post-Rebase Backend Baseline
+
+The rebase landed on `dfb7361` (`Migrate Git backend from CLI to gix (#3)`). `src/git.rs` still owns the `GitBackend` trait, but `default_git_backend()` now selects `GitGix` unless `WAFT_GIT_BACKEND=cli` is set.
+
+Current trait surface after the migration:
+
+- `show_toplevel(...)`
+- `list_worktrees(...)`
+- `tracked_paths(...)`
+- `check_ignore(...)`
+- `list_worktreeinclude_candidates(...)`
+- `read_bool_config(...)`
+- `read_config(...)`
+
+Any new backend capability in this plan should be added at the trait boundary, implemented for both `GitGix` and `GitCli`, and covered by backend parity tests when command-visible. Temporary CLI fallback is acceptable only inside backend implementations, not in command/planner code.
+
 ## Global Gate (Run At End of Every PR)
 
 ```sh
@@ -22,12 +38,20 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo test --doc
+cargo test --test backend_parity
 ```
 
 For parity-sensitive PRs, also run:
 
 ```sh
 just check-worktrunk-parity-3way
+```
+
+If a behavior change could be caused by the backend rather than by mode policy, compare the manual harness under both backends:
+
+```sh
+just check-worktrunk-parity
+WAFT_GIT_BACKEND=cli just check-worktrunk-parity
 ```
 
 ## PR0: Rebase + Baseline Stabilization
@@ -44,7 +68,7 @@ Land on top of the `gix` migration and ensure current parity harness still runs.
 
 ### Expected Files
 
-- `src/git.rs` (or equivalent new backend module from migration)
+- `src/git.rs`
 - `tests/worktrunk_parity.rs` (only if API wiring changed)
 - `planning/WorktrunkParityReport.md` (refresh run timestamp/results if needed)
 
@@ -143,13 +167,18 @@ Ship first behavior knob: absent `.worktreeinclude` handling.
 
 ### Backend Notes (gix)
 
-Prefer backend methods that avoid shelling out:
+Prefer backend methods that avoid shelling out. Current post-rebase support already includes:
+
+- `list_worktreeinclude_candidates(...)`
+- `check_ignore(...)`
+- `tracked_paths(...)`
+
+Add narrower helper methods only when the existing trait would force duplicated command-layer scanning. Likely candidates:
 
 - `list_ignored_untracked(...)`
-- `list_worktreeinclude_candidates(...)`
 - `worktreeinclude_exists_anywhere(...)`
 
-If `gix` support is incomplete, isolate temporary fallback logic behind backend trait methods, not command code.
+If `gix` support is incomplete, isolate temporary fallback logic behind backend trait methods, not command code, and add/extend `tests/backend_parity.rs` before relying on it in mode tests.
 
 ### Expected Files
 
@@ -363,6 +392,7 @@ Add non-blocking periodic parity check against local `wt` and `claude` tools for
 
 - Keep all repository-scanning and ignore classification behind backend trait boundaries.
 - Avoid command-layer direct assumptions about backend internals.
+- Preserve `GitGix` as the default backend and `WAFT_GIT_BACKEND=cli` as the fallback comparison path.
 - If any parity mode temporarily requires non-gix fallback behavior, encapsulate it in backend adapters and mark with TODOs tied to issue IDs.
 
 ## Definition of Done (Feature Epic)

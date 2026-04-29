@@ -1,5 +1,14 @@
 # Parity Summary (waft vs wt vs claude)
 
+## Latest Refresh
+
+- Date: 2026-04-29
+- Base after rebase: `dfb7361` (`Migrate Git backend from CLI to gix (#3)`)
+- waft backend: default `gix` backend (`WAFT_GIT_BACKEND` unset)
+- worktrunk: `wt 0.44.0`
+- Claude Code: `2.1.119`
+- Result counts are unchanged from the pre-rebase summary.
+
 ## Re-run Commands
 
 - Run the full 3-way wrapper (Claude temp worktree smoke + parity harness):
@@ -18,6 +27,12 @@ just check-claude-worktree-smoke
 
 ```sh
 just check-worktrunk-parity
+```
+
+- Re-run the parity harness through the fallback Git CLI backend:
+
+```sh
+WAFT_GIT_BACKEND=cli just check-worktrunk-parity
 ```
 
 The harness writes the detailed matrix to:
@@ -41,7 +56,7 @@ The harness covers these scenarios:
 
 ## Current 3-Way Results
 
-From the latest run in this workspace:
+From the latest post-gix-rebase run in this workspace:
 
 - Scenarios: 8
 - All three agree: 2

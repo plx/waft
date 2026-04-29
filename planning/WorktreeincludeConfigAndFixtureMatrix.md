@@ -6,6 +6,13 @@
 - Behavior must be explicitly switchable to Git-like semantics and worktrunk-like semantics.
 - Divergences should be controlled by narrow, composable flags so targeted tests are easy.
 
+## Backend Assumptions (Post-gix Rebase)
+
+- The matrix defines user-visible behavior, not backend implementation details.
+- Tests should pass with the default `gix` backend and should remain comparable with `WAFT_GIT_BACKEND=cli`.
+- Backend-specific enumeration concerns, especially nested Git checkout/submodule pruning in F6, belong behind `GitBackend` and should be covered by backend parity tests.
+- The latest post-rebase harness run used `wt 0.44.0` and matched the existing `wt-0.39` fixture expectations. Keep the `wt-0.39` semantics label as the historical compatibility target unless a future parity run shows drift that warrants a new versioned label.
+
 ## Configuration File Schema (Draft)
 
 Primary config locations and merge order:
@@ -239,6 +246,10 @@ Expected outcomes:
 - `claude`: success, copied `{}`
 - `git`: success, copied `{}`
 - `wt`: success, copied `{}`
+
+Backend verification:
+
+- default `gix` and `WAFT_GIT_BACKEND=cli` must both avoid recursing into nested Git checkouts and registered submodules.
 
 ### Scenario F7: `tool-state-directory`
 
