@@ -16,18 +16,12 @@ fn resolve(layers: &[&ConfigLayer]) -> ResolvedPolicy {
 // --- Default behavior with no profile set ---
 
 #[test]
-fn no_profile_anywhere_falls_back_to_legacy_defaults() {
+fn no_profile_anywhere_uses_default_claude_preset() {
     let policy = ResolvedPolicy::default();
     assert_eq!(policy.profile, CompatProfile::Claude);
     assert_eq!(policy.when_missing, WhenMissingWorktreeinclude::Blank);
-    // Legacy default uses the Git engine to preserve pre-modes behavior;
-    // distinct from the claude preset's `claude-2026-04`. The semantics
-    // value flips when the default profile flips in the final PR.
-    assert_eq!(policy.semantics, WorktreeincludeSemantics::Git);
-    // Legacy default: pre-modes code rejected symlinks. Distinct from the
-    // claude preset's `follow`, which only takes effect when claude profile
-    // is explicitly chosen (until the final default flip).
-    assert_eq!(policy.symlink_policy, SymlinkPolicy::Error);
+    assert_eq!(policy.semantics, WorktreeincludeSemantics::Claude202604);
+    assert_eq!(policy.symlink_policy, SymlinkPolicy::Follow);
     assert_eq!(policy.builtin_exclude_set, BuiltinExcludeSet::None);
     assert!(policy.extra_excludes.is_empty());
 }

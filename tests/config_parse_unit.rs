@@ -13,18 +13,13 @@ use waft::config::{
 // --- Default policy ---
 
 #[test]
-fn default_policy_preserves_pre_modes_behavior() {
+fn default_policy_matches_claude_preset() {
     let p = ResolvedPolicy::default();
     assert_eq!(p.profile, CompatProfile::Claude);
+    // OOTB defaults match the matrix's claude preset.
     assert_eq!(p.when_missing, WhenMissingWorktreeinclude::Blank);
-    // Legacy default uses the Git engine to preserve pre-modes behavior.
-    // PR9 flips the default profile to Claude, which expands to the
-    // `claude-2026-04` semantics.
-    assert_eq!(p.semantics, WorktreeincludeSemantics::Git);
-    // Current code rejects symlinked .worktreeinclude files; PR1 keeps that
-    // observed behavior the default. The matrix-defined "follow" default
-    // lands with the final default flip.
-    assert_eq!(p.symlink_policy, SymlinkPolicy::Error);
+    assert_eq!(p.semantics, WorktreeincludeSemantics::Claude202604);
+    assert_eq!(p.symlink_policy, SymlinkPolicy::Follow);
     assert_eq!(p.builtin_exclude_set, BuiltinExcludeSet::None);
     assert!(p.extra_excludes.is_empty());
 }
@@ -360,12 +355,14 @@ fn empty_extra_exclude_env_yields_empty_list() {
 // --- Preset expansion smoke tests (full coverage in config_resolution_unit) ---
 
 #[test]
-fn preset_expands_unset_knobs_only_when_profile_chosen() {
-    // No profile anywhere: legacy defaults apply for all unset knobs.
+fn preset_expands_unset_knobs() {
+    // No profile anywhere: default profile (`claude`) preset applies.
     let no_profile = ConfigLayer::default();
     let policy = ResolvedPolicy::from_layers([&no_profile]);
-    assert_eq!(policy.symlink_policy, SymlinkPolicy::Error);
+    assert_eq!(policy.profile, CompatProfile::Claude);
+    assert_eq!(policy.symlink_policy, SymlinkPolicy::Follow);
     assert_eq!(policy.builtin_exclude_set, BuiltinExcludeSet::None);
+    assert_eq!(policy.semantics, WorktreeincludeSemantics::Claude202604);
 
     // Wt profile: preset expands all unset knobs.
     let wt = ConfigLayer {

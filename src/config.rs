@@ -273,55 +273,24 @@ impl Preset {
     }
 }
 
-/// Knob values used when no `compat.profile` is explicitly set anywhere.
-///
-/// These preserve the behavior that existed before the modes feature was
-/// introduced. The default profile flip in the final PR of this epic
-/// replaces these fallbacks with [`Preset::for_profile(Claude)`] by setting
-/// the default profile to `Claude`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LegacyDefaults {
-    profile: CompatProfile,
-    when_missing: WhenMissingWorktreeinclude,
-    semantics: WorktreeincludeSemantics,
-    symlink_policy: SymlinkPolicy,
-    builtin_exclude_set: BuiltinExcludeSet,
-}
-
-impl LegacyDefaults {
-    const fn current() -> Self {
-        Self {
-            // Profile label only; no preset expansion happens for the
-            // legacy default unless an explicit profile is provided in
-            // some layer.
-            profile: CompatProfile::Claude,
-            when_missing: WhenMissingWorktreeinclude::Blank,
-            // Pre-modes code implements Git per-directory semantics. Use
-            // the Git engine here so the default user's behavior does NOT
-            // change until the final default-profile flip; PR9 swaps the
-            // default profile to `Claude`, at which point Claude's preset
-            // semantics ([`WorktreeincludeSemantics::Claude202604`]) take
-            // effect.
-            semantics: WorktreeincludeSemantics::Git,
-            // Pre-modes code rejected symlinked .worktreeinclude files;
-            // keep that until the symlink policy is wired up and
-            // defaults are flipped.
-            symlink_policy: SymlinkPolicy::Error,
-            builtin_exclude_set: BuiltinExcludeSet::None,
-        }
-    }
-}
+/// Default compat profile applied when no layer sets `compat.profile`.
+const DEFAULT_PROFILE: CompatProfile = CompatProfile::Claude;
 
 impl Default for ResolvedPolicy {
-    /// Resolve to the legacy defaults (matches pre-modes behavior).
+    /// Resolve to the default profile's preset.
+    ///
+    /// `DEFAULT_PROFILE` is `claude`, so the OOTB experience matches
+    /// observed Claude Code behavior. Users who want the previous
+    /// per-directory Git semantics can set `--compat-profile git` (or
+    /// `compat.profile = "git"` in `.waft.toml`).
     fn default() -> Self {
-        let d = LegacyDefaults::current();
+        let preset = Preset::for_profile(DEFAULT_PROFILE);
         Self {
-            profile: d.profile,
-            when_missing: d.when_missing,
-            semantics: d.semantics,
-            symlink_policy: d.symlink_policy,
-            builtin_exclude_set: d.builtin_exclude_set,
+            profile: DEFAULT_PROFILE,
+            when_missing: preset.when_missing,
+            semantics: preset.semantics,
+            symlink_policy: preset.symlink_policy,
+            builtin_exclude_set: preset.builtin_exclude_set,
             extra_excludes: Vec::new(),
         }
     }
@@ -372,27 +341,17 @@ impl ResolvedPolicy {
                 .extend(layer.extra_excludes.iter().cloned());
         }
 
-        let preset = effective.profile.map(Preset::for_profile);
-        let legacy = LegacyDefaults::current();
+        let profile = effective.profile.unwrap_or(DEFAULT_PROFILE);
+        let preset = Preset::for_profile(profile);
 
         Self {
-            profile: effective.profile.unwrap_or(legacy.profile),
-            when_missing: effective
-                .when_missing
-                .or(preset.map(|p| p.when_missing))
-                .unwrap_or(legacy.when_missing),
-            semantics: effective
-                .semantics
-                .or(preset.map(|p| p.semantics))
-                .unwrap_or(legacy.semantics),
-            symlink_policy: effective
-                .symlink_policy
-                .or(preset.map(|p| p.symlink_policy))
-                .unwrap_or(legacy.symlink_policy),
+            profile,
+            when_missing: effective.when_missing.unwrap_or(preset.when_missing),
+            semantics: effective.semantics.unwrap_or(preset.semantics),
+            symlink_policy: effective.symlink_policy.unwrap_or(preset.symlink_policy),
             builtin_exclude_set: effective
                 .builtin_exclude_set
-                .or(preset.map(|p| p.builtin_exclude_set))
-                .unwrap_or(legacy.builtin_exclude_set),
+                .unwrap_or(preset.builtin_exclude_set),
             extra_excludes: effective.extra_excludes,
         }
     }
@@ -697,15 +656,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_resolved_policy_matches_baseline() {
+    fn default_resolved_policy_matches_claude_preset() {
         let policy = ResolvedPolicy::default();
         assert_eq!(policy.profile, CompatProfile::Claude);
         assert_eq!(policy.when_missing, WhenMissingWorktreeinclude::Blank);
-        // Legacy default uses the Git engine to preserve pre-modes
-        // behavior. PR9 flips the default profile to Claude, at which
-        // point the claude preset's `claude-2026-04` semantics take over.
-        assert_eq!(policy.semantics, WorktreeincludeSemantics::Git);
-        assert_eq!(policy.symlink_policy, SymlinkPolicy::Error);
+        assert_eq!(policy.semantics, WorktreeincludeSemantics::Claude202604);
+        assert_eq!(policy.symlink_policy, SymlinkPolicy::Follow);
         assert_eq!(policy.builtin_exclude_set, BuiltinExcludeSet::None);
         assert!(policy.extra_excludes.is_empty());
     }
