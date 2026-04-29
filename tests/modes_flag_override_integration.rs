@@ -276,6 +276,62 @@ fn f8_symlink_policy_ignore_selects_nothing_under_blank() {
     );
 }
 
+// --- Semantics override (F3) ---
+
+fn setup_f3() -> TempDir {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", "*.env\n");
+    write_file(repo.path(), ".worktreeinclude", "*.env\n");
+    write_file(repo.path(), "config/.worktreeinclude", "!*.env\n");
+    git(
+        repo.path(),
+        &[
+            "add",
+            ".gitignore",
+            ".worktreeinclude",
+            "config/.worktreeinclude",
+        ],
+    );
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), "root.env", "r\n");
+    write_file(repo.path(), "config/sub.env", "s\n");
+    repo
+}
+
+#[test]
+fn f3_claude_with_git_semantics_excludes_subdir() {
+    let repo = setup_f3();
+    let paths = list_paths(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-semantics",
+            "git",
+        ],
+    );
+    let expected: BTreeSet<String> = ["root.env".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}
+
+#[test]
+fn f3_git_with_claude_semantics_keeps_both() {
+    let repo = setup_f3();
+    let paths = list_paths(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "git",
+            "--worktreeinclude-semantics",
+            "claude-2026-04",
+        ],
+    );
+    let expected: BTreeSet<String> = ["root.env".to_string(), "config/sub.env".to_string()]
+        .into_iter()
+        .collect();
+    assert_eq!(paths, expected);
+}
+
 #[test]
 fn replace_extra_excludes_drops_inherited() {
     // Same fixture, but rely on a project .waft.toml setting an extra

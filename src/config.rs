@@ -296,7 +296,13 @@ impl LegacyDefaults {
             // some layer.
             profile: CompatProfile::Claude,
             when_missing: WhenMissingWorktreeinclude::Blank,
-            semantics: WorktreeincludeSemantics::Claude202604,
+            // Pre-modes code implements Git per-directory semantics. Use
+            // the Git engine here so the default user's behavior does NOT
+            // change until the final default-profile flip; PR9 swaps the
+            // default profile to `Claude`, at which point Claude's preset
+            // semantics ([`WorktreeincludeSemantics::Claude202604`]) take
+            // effect.
+            semantics: WorktreeincludeSemantics::Git,
             // Pre-modes code rejected symlinked .worktreeinclude files;
             // keep that until the symlink policy is wired up and
             // defaults are flipped.
@@ -695,7 +701,10 @@ mod tests {
         let policy = ResolvedPolicy::default();
         assert_eq!(policy.profile, CompatProfile::Claude);
         assert_eq!(policy.when_missing, WhenMissingWorktreeinclude::Blank);
-        assert_eq!(policy.semantics, WorktreeincludeSemantics::Claude202604);
+        // Legacy default uses the Git engine to preserve pre-modes
+        // behavior. PR9 flips the default profile to Claude, at which
+        // point the claude preset's `claude-2026-04` semantics take over.
+        assert_eq!(policy.semantics, WorktreeincludeSemantics::Git);
         assert_eq!(policy.symlink_policy, SymlinkPolicy::Error);
         assert_eq!(policy.builtin_exclude_set, BuiltinExcludeSet::None);
         assert!(policy.extra_excludes.is_empty());

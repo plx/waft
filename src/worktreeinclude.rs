@@ -252,6 +252,42 @@ fn glob_line_info(
     (0, original.to_string())
 }
 
+/// Evaluate `rel_path` using ONLY the repo-root `.worktreeinclude` file.
+///
+/// Used by the [`Claude202604Semantics`] engine: Claude observes the root
+/// rule file and ignores nested ones. Symlink policy is honored at the
+/// root file (`Ignore` skips a symlinked root file).
+///
+/// [`Claude202604Semantics`]: crate::worktreeinclude_engine::Claude202604Semantics
+pub fn evaluate_root_only(
+    repo_root: &Path,
+    rel_path: &str,
+    is_dir: bool,
+    case_insensitive: bool,
+    symlink_policy: SymlinkPolicy,
+) -> WorktreeincludeStatus {
+    let wti_path = repo_root.join(".worktreeinclude");
+    if !wti_path.is_file() {
+        return WorktreeincludeStatus::NoMatch;
+    }
+    if symlink_policy == SymlinkPolicy::Ignore && is_symlink(&wti_path) {
+        return WorktreeincludeStatus::NoMatch;
+    }
+
+    let content = match fs::read_to_string(&wti_path) {
+        Ok(c) => c,
+        Err(_) => return WorktreeincludeStatus::NoMatch,
+    };
+    let ctx = match build_file_match_context(&wti_path, repo_root, &content, case_insensitive) {
+        Some(c) => c,
+        None => return WorktreeincludeStatus::NoMatch,
+    };
+
+    let full_path: PathBuf = repo_root.join(rel_path).components().collect();
+    evaluate_against_context(&ctx, &full_path, rel_path, is_dir, repo_root)
+        .unwrap_or(WorktreeincludeStatus::NoMatch)
+}
+
 /// True if `path` itself is a symlink (without following).
 fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path)

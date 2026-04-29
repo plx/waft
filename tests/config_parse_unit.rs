@@ -17,7 +17,10 @@ fn default_policy_preserves_pre_modes_behavior() {
     let p = ResolvedPolicy::default();
     assert_eq!(p.profile, CompatProfile::Claude);
     assert_eq!(p.when_missing, WhenMissingWorktreeinclude::Blank);
-    assert_eq!(p.semantics, WorktreeincludeSemantics::Claude202604);
+    // Legacy default uses the Git engine to preserve pre-modes behavior.
+    // PR9 flips the default profile to Claude, which expands to the
+    // `claude-2026-04` semantics.
+    assert_eq!(p.semantics, WorktreeincludeSemantics::Git);
     // Current code rejects symlinked .worktreeinclude files; PR1 keeps that
     // observed behavior the default. The matrix-defined "follow" default
     // lands with the final default flip.

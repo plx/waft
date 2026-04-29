@@ -252,6 +252,22 @@ fn f1_git_profile_selects_env() {
     assert_eq!(paths, expected);
 }
 
+#[test]
+fn f1_claude_profile_selects_env() {
+    let repo = setup_f1();
+    let paths = list_paths(repo.path(), &["--compat-profile", "claude"]);
+    let expected: BTreeSet<String> = [".env".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}
+
+#[test]
+fn f1_wt_profile_selects_env() {
+    let repo = setup_f1();
+    let paths = list_paths(repo.path(), &["--compat-profile", "wt"]);
+    let expected: BTreeSet<String> = [".env".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}
+
 // --- F3: nested-worktreeinclude-override under git ---
 //
 // .gitignore: *.env
@@ -288,6 +304,16 @@ fn f3_git_profile_negation_excludes_subdir() {
     assert_eq!(paths, expected);
 }
 
+#[test]
+fn f3_claude_profile_keeps_both_files() {
+    let repo = setup_f3();
+    let paths = list_paths(repo.path(), &["--compat-profile", "claude"]);
+    let expected: BTreeSet<String> = ["root.env".to_string(), "config/sub.env".to_string()]
+        .into_iter()
+        .collect();
+    assert_eq!(paths, expected);
+}
+
 // --- F4: nested-anchored-pattern under git ---
 //
 // .gitignore: foo, config/foo
@@ -315,6 +341,15 @@ fn f4_git_profile_anchored_pattern_only_matches_subdir() {
     let paths = list_paths(repo.path(), &["--compat-profile", "git"]);
     let expected: BTreeSet<String> = ["config/foo".to_string()].into_iter().collect();
     assert_eq!(paths, expected);
+}
+
+#[test]
+fn f4_claude_profile_blank_no_root_file() {
+    // No root .worktreeinclude, claude ignores nested files.
+    // when_missing=blank → {}.
+    let repo = setup_f4();
+    let paths = list_paths(repo.path(), &["--compat-profile", "claude"]);
+    assert!(paths.is_empty(), "f4 claude should be empty; got {paths:?}");
 }
 
 // --- F5: cross-file-negation-caveat under git ---
@@ -350,6 +385,16 @@ fn setup_f5() -> TempDir {
 fn f5_git_profile_caveat_blocks_nested_negation() {
     let repo = setup_f5();
     let paths = list_paths(repo.path(), &["--compat-profile", "git"]);
+    let expected: BTreeSet<String> = ["secrets/private.key".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}
+
+#[test]
+fn f5_claude_profile_ignores_nested_negation() {
+    // Claude only consults the root .worktreeinclude (which selects
+    // secrets/), so the nested negation has no effect.
+    let repo = setup_f5();
+    let paths = list_paths(repo.path(), &["--compat-profile", "claude"]);
     let expected: BTreeSet<String> = ["secrets/private.key".to_string()].into_iter().collect();
     assert_eq!(paths, expected);
 }

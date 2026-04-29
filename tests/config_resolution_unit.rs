@@ -20,7 +20,10 @@ fn no_profile_anywhere_falls_back_to_legacy_defaults() {
     let policy = ResolvedPolicy::default();
     assert_eq!(policy.profile, CompatProfile::Claude);
     assert_eq!(policy.when_missing, WhenMissingWorktreeinclude::Blank);
-    assert_eq!(policy.semantics, WorktreeincludeSemantics::Claude202604);
+    // Legacy default uses the Git engine to preserve pre-modes behavior;
+    // distinct from the claude preset's `claude-2026-04`. The semantics
+    // value flips when the default profile flips in the final PR.
+    assert_eq!(policy.semantics, WorktreeincludeSemantics::Git);
     // Legacy default: pre-modes code rejected symlinks. Distinct from the
     // claude preset's `follow`, which only takes effect when claude profile
     // is explicitly chosen (until the final default flip).

@@ -62,7 +62,16 @@ impl WorktreeincludeSemanticsEngine for GitSemantics {
 
 /// Versioned snapshot of Claude Code's observed behavior (2026-04).
 ///
-/// PR6: thin delegate to [`GitSemantics`]. PR7 implements the divergence.
+/// Claude consults ONLY the repository's root-level `.worktreeinclude` file;
+/// nested `.worktreeinclude` files are silently ignored. This mirrors the
+/// matrix expectations:
+///
+/// - F3 (root `*.env`, `config/!*.env`): both root and nested env files
+///   are selected because the nested negation is never read.
+/// - F4 (only `config/.worktreeinclude`): no root file → no patterns →
+///   nothing selected (combined with `when_missing = blank`).
+/// - F5 (root `secrets/`, nested `!private.key`): nested negation
+///   ignored, so `secrets/private.key` stays selected.
 #[derive(Debug, Default)]
 pub struct Claude202604Semantics;
 
@@ -75,7 +84,7 @@ impl WorktreeincludeSemanticsEngine for Claude202604Semantics {
         case_insensitive: bool,
         symlink_policy: SymlinkPolicy,
     ) -> WorktreeincludeStatus {
-        GitSemantics.evaluate(
+        crate::worktreeinclude::evaluate_root_only(
             repo_root,
             rel_path,
             is_dir,
