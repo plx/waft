@@ -3,7 +3,7 @@ use clap::Args;
 use crate::cli::Cli;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
-use crate::git::{GitBackend, GitCli};
+use crate::git::default_git_backend;
 use crate::model::ValidationSeverity;
 use crate::validate;
 
@@ -21,12 +21,12 @@ pub struct CopyArgs {
 
 /// Run the `copy` subcommand.
 pub fn run_copy(cli: &Cli, args: &CopyArgs) -> Result<()> {
-    let git = GitCli::new();
+    let git = default_git_backend();
     let fs = crate::fs::RealFs;
 
     // Resolve context (copy requires a destination)
     let ctx = context::resolve_context(
-        &git,
+        git.as_ref(),
         cli.source.as_deref(),
         cli.dest.as_deref(),
         cli.directory.as_deref(),
@@ -34,7 +34,7 @@ pub fn run_copy(cli: &Cli, args: &CopyArgs) -> Result<()> {
     )?;
 
     // Validate
-    let report = validate::validate(&ctx, &git);
+    let report = validate::validate(&ctx, git.as_ref());
     if report.has_errors() {
         for issue in &report.issues {
             if matches!(issue.severity, ValidationSeverity::Error) {
@@ -83,7 +83,7 @@ pub fn run_copy(cli: &Cli, args: &CopyArgs) -> Result<()> {
         &ctx,
         report,
         eligible,
-        &git,
+        git.as_ref(),
         &fs,
         args.overwrite,
         args.dry_run,
