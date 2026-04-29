@@ -116,3 +116,55 @@ fn f2_wt_profile_all_ignored() {
         "wt profile should list every ignored untracked file for F2"
     );
 }
+
+// --- Scenario F7: tool-state-directory ---
+//
+// Setup:
+//   .gitignore: .conductor/
+//   .worktreeinclude: .conductor/**/*.key
+//   source files: .conductor/state/dev.key
+//
+// Expected:
+//   claude: {.conductor/state/dev.key}
+//   git: {.conductor/state/dev.key}
+//   wt: {} (filtered by tooling-v1 builtin set)
+
+fn setup_f7() -> TempDir {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".conductor/\n");
+    write_file(repo.path(), ".worktreeinclude", ".conductor/**/*.key\n");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".conductor/state/dev.key", "key-data\n");
+    repo
+}
+
+#[test]
+fn f7_claude_profile_keeps_conductor_key() {
+    let repo = setup_f7();
+    let paths = list_paths(repo.path(), &["--compat-profile", "claude"]);
+    let expected: BTreeSet<String> = [".conductor/state/dev.key".to_string()]
+        .into_iter()
+        .collect();
+    assert_eq!(paths, expected);
+}
+
+#[test]
+fn f7_git_profile_keeps_conductor_key() {
+    let repo = setup_f7();
+    let paths = list_paths(repo.path(), &["--compat-profile", "git"]);
+    let expected: BTreeSet<String> = [".conductor/state/dev.key".to_string()]
+        .into_iter()
+        .collect();
+    assert_eq!(paths, expected);
+}
+
+#[test]
+fn f7_wt_profile_drops_conductor_key() {
+    let repo = setup_f7();
+    let paths = list_paths(repo.path(), &["--compat-profile", "wt"]);
+    assert!(
+        paths.is_empty(),
+        "wt profile should drop .conductor/* via tooling-v1 builtin set; got {paths:?}"
+    );
+}

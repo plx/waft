@@ -49,7 +49,12 @@ fn write_file(dir: &Path, rel_path: &str, content: &str) {
 
 fn list_paths(source: &Path, extra_args: &[&str]) -> BTreeSet<String> {
     let mut cmd = waft();
-    cmd.args(["list", "--source"]).arg(source);
+    // Run from the source repo so project-level `.waft.toml` discovery
+    // (which walks upward from cwd) sees configs committed in the test
+    // fixture.
+    cmd.current_dir(source)
+        .args(["list", "--source"])
+        .arg(source);
     cmd.args(extra_args);
     let assert = cmd.assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
@@ -106,4 +111,127 @@ fn f2_wt_with_blank_override() {
         paths.is_empty(),
         "wt + --when-missing-worktreeinclude=blank should select nothing; got {paths:?}"
     );
+}
+
+// --- F7 builtin-set overrides ---
+
+fn setup_f7() -> TempDir {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".conductor/\n");
+    write_file(repo.path(), ".worktreeinclude", ".conductor/**/*.key\n");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".conductor/state/dev.key", "data\n");
+    repo
+}
+
+#[test]
+fn f7_claude_with_tooling_v1_drops_key() {
+    // Claude preset uses builtin_exclude_set=none; flip it on.
+    let repo = setup_f7();
+    let paths = list_paths(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--builtin-exclude-set",
+            "tooling-v1",
+        ],
+    );
+    assert!(
+        paths.is_empty(),
+        "claude + tooling-v1 should drop .conductor/*; got {paths:?}"
+    );
+}
+
+#[test]
+fn f7_wt_with_none_keeps_key() {
+    // Wt preset uses tooling-v1; flip it off.
+    let repo = setup_f7();
+    let paths = list_paths(
+        repo.path(),
+        &["--compat-profile", "wt", "--builtin-exclude-set", "none"],
+    );
+    let expected: BTreeSet<String> = [".conductor/state/dev.key".to_string()]
+        .into_iter()
+        .collect();
+    assert_eq!(paths, expected);
+}
+
+// --- Extra-excludes / replace-extra ---
+
+fn setup_simple_two_files() -> TempDir {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", "*.env\n*.log\n");
+    write_file(repo.path(), ".worktreeinclude", "*.env\n*.log\n");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), "keep.env", "k\n");
+    write_file(repo.path(), "drop.log", "d\n");
+    repo
+}
+
+#[test]
+fn extra_exclude_drops_matching_path() {
+    let repo = setup_simple_two_files();
+    let paths = list_paths(
+        repo.path(),
+        &["--compat-profile", "claude", "--extra-exclude", "*.log"],
+    );
+    let expected: BTreeSet<String> = ["keep.env".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+}
+
+#[test]
+fn extra_exclude_repeatable() {
+    let repo = setup_simple_two_files();
+    let paths = list_paths(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--extra-exclude",
+            "*.log",
+            "--extra-exclude",
+            "*.env",
+        ],
+    );
+    assert!(
+        paths.is_empty(),
+        "two --extra-exclude flags should drop both files; got {paths:?}"
+    );
+}
+
+#[test]
+fn replace_extra_excludes_drops_inherited() {
+    // Same fixture, but rely on a project .waft.toml setting an extra
+    // exclude that the CLI then replaces with a different one.
+    let repo = setup_simple_two_files();
+    write_file(
+        repo.path(),
+        ".waft.toml",
+        "[exclude]\nextra = [\"*.env\"]\n",
+    );
+    git(repo.path(), &["add", "-f", ".waft.toml"]);
+    git(repo.path(), &["commit", "-m", "add waft toml"]);
+
+    // Without override: project drops .env, .log remains.
+    let paths = list_paths(repo.path(), &["--compat-profile", "claude"]);
+    let expected: BTreeSet<String> = ["drop.log".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
+
+    // CLI --replace-extra-excludes with a different list: only the CLI
+    // exclude applies, project's `*.env` is dropped from inheritance.
+    let paths = list_paths(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--extra-exclude",
+            "*.log",
+            "--replace-extra-excludes",
+        ],
+    );
+    let expected: BTreeSet<String> = ["keep.env".to_string()].into_iter().collect();
+    assert_eq!(paths, expected);
 }

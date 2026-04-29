@@ -49,7 +49,9 @@ pub fn run_list(cli: &Cli, policy: &ResolvedPolicy, _args: &ListArgs) -> Result<
     }
 
     // Enumerate candidates per the active policy.
-    let candidates = super::select_candidates(git.as_ref(), &ctx.source_root, policy)?;
+    let mut candidates = super::select_candidates(git.as_ref(), &ctx.source_root, policy)?;
+    // Apply post-selection exclusion policy (builtin set + extra excludes).
+    crate::policy_filter::filter_paths(&mut candidates, policy, &ctx.source_root)?;
 
     if candidates.is_empty() {
         return Ok(());

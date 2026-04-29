@@ -57,7 +57,9 @@ pub fn run_copy(cli: &Cli, policy: &ResolvedPolicy, args: &CopyArgs) -> Result<(
     }
 
     // Enumerate candidate files per the active policy.
-    let candidates = super::select_candidates(git.as_ref(), &ctx.source_root, policy)?;
+    let mut candidates = super::select_candidates(git.as_ref(), &ctx.source_root, policy)?;
+    // Apply post-selection exclusion policy (builtin set + extra excludes).
+    crate::policy_filter::filter_paths(&mut candidates, policy, &ctx.source_root)?;
     if candidates.is_empty() {
         if !cli.quiet {
             eprintln!("no eligible files found");
