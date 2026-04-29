@@ -2,6 +2,7 @@ use clap::Args;
 use std::path::PathBuf;
 
 use crate::cli::Cli;
+use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
 use crate::git::default_git_backend;
@@ -18,7 +19,7 @@ pub struct InfoArgs {
 }
 
 /// Run the `info` subcommand.
-pub fn run_info(cli: &Cli, args: &InfoArgs) -> Result<()> {
+pub fn run_info(cli: &Cli, _policy: &ResolvedPolicy, args: &InfoArgs) -> Result<()> {
     let git = default_git_backend();
 
     let ctx = context::resolve_context(

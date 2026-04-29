@@ -73,6 +73,13 @@ pub enum Error {
         /// Destination worktree path.
         dest: PathBuf,
     },
+
+    /// Configuration parsing or validation failed.
+    #[error("config error: {message}")]
+    Config {
+        /// Description of the problem.
+        message: String,
+    },
 }
 
 /// Result type alias for waft operations.

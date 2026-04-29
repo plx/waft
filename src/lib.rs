@@ -33,6 +33,7 @@
 #![warn(rustdoc::broken_intra_doc_links)]
 
 pub mod cli;
+pub mod config;
 pub mod context;
 pub mod error;
 pub mod executor;

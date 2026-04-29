@@ -88,6 +88,24 @@ A file is eligible for copying when **all** of these are true:
 | `-n, --dry-run` | Show what would be done without copying |
 | `--overwrite` | Allow overwriting existing untracked files |
 
+## Compatibility & policy options
+
+These flags are global and route through a layered config (built-in defaults
+< `~/.config/waft/config.toml` < `.waft.toml` walked from repo root to cwd <
+`WAFT_*` env vars < CLI flags). The plumbing is in place; behavior wiring lands
+in subsequent releases.
+
+| Option | Description |
+|--------|-------------|
+| `--compat-profile <claude\|git\|wt>` | Coordinated preset selection |
+| `--when-missing-worktreeinclude <blank\|all-ignored>` | Behavior when no `.worktreeinclude` exists |
+| `--worktreeinclude-semantics <claude-2026-04\|git\|wt-0.39>` | Matcher semantics version |
+| `--worktreeinclude-symlink-policy <follow\|ignore\|error>` | How to handle symlinked rule files |
+| `--builtin-exclude-set <none\|tooling-v1>` | Curated tool-state exclusion set |
+| `--extra-exclude <GLOB>` | Repeatable additional excludes |
+| `--replace-extra-excludes` | Drop inherited `extra-exclude` values |
+| `--config <PATH>` | Use this file instead of the default user config |
+
 ## Safety guarantees
 
 - **Tracked files are never overwritten** in the destination worktree

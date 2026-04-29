@@ -9,8 +9,10 @@ license = "MIT"
 clap = { version = "4", features = ["derive"] }
 gix = "0.81"
 ignore = "0.4"
+serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 thiserror = "2"
+toml = "0.9"
 walkdir = "2"
 
 [dev-dependencies]

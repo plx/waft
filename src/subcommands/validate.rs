@@ -1,6 +1,7 @@
 use clap::Args;
 
 use crate::cli::Cli;
+use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
 use crate::git::default_git_backend;
@@ -12,7 +13,7 @@ use crate::validate;
 pub struct ValidateArgs {}
 
 /// Run the `validate` subcommand.
-pub fn run_validate(cli: &Cli, _args: &ValidateArgs) -> Result<()> {
+pub fn run_validate(cli: &Cli, _policy: &ResolvedPolicy, _args: &ValidateArgs) -> Result<()> {
     let git = default_git_backend();
 
     let ctx = context::resolve_context(

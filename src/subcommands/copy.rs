@@ -1,6 +1,7 @@
 use clap::Args;
 
 use crate::cli::Cli;
+use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
 use crate::git::default_git_backend;
@@ -20,7 +21,10 @@ pub struct CopyArgs {
 }
 
 /// Run the `copy` subcommand.
-pub fn run_copy(cli: &Cli, args: &CopyArgs) -> Result<()> {
+///
+/// `_policy` is plumbed through but does not yet drive behavior; subsequent
+/// PRs wire individual knobs into selection and copy.
+pub fn run_copy(cli: &Cli, _policy: &ResolvedPolicy, args: &CopyArgs) -> Result<()> {
     let git = default_git_backend();
     let fs = crate::fs::RealFs;
 

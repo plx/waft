@@ -1,6 +1,7 @@
 use clap::Args;
 
 use crate::cli::Cli;
+use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
 use crate::git::default_git_backend;
@@ -13,7 +14,7 @@ use crate::worktreeinclude;
 pub struct ListArgs {}
 
 /// Run the `list` subcommand.
-pub fn run_list(cli: &Cli, _args: &ListArgs) -> Result<()> {
+pub fn run_list(cli: &Cli, _policy: &ResolvedPolicy, _args: &ListArgs) -> Result<()> {
     let git = default_git_backend();
 
     // Resolve context
