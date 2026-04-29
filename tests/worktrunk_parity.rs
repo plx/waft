@@ -57,9 +57,7 @@ impl Scenario {
     fn description(self) -> &'static str {
         match self {
             Self::RootSimple => "Root .worktreeinclude selecting one ignored file.",
-            Self::NoWorktreeinclude => {
-                "No .worktreeinclude present; only .gitignore rules exist."
-            }
+            Self::NoWorktreeinclude => "No .worktreeinclude present; only .gitignore rules exist.",
             Self::NestedOverride => {
                 "Nested .worktreeinclude negates a shallow include for a subdirectory."
             }
@@ -76,9 +74,7 @@ impl Scenario {
                 "Tool-state directory (.conductor/) explicitly selected by .worktreeinclude."
             }
             #[cfg(unix)]
-            Self::SymlinkedWorktreeinclude => {
-                "Symlinked .worktreeinclude file at repo root."
-            }
+            Self::SymlinkedWorktreeinclude => "Symlinked .worktreeinclude file at repo root.",
         }
     }
 }
@@ -213,13 +209,7 @@ fn prepare_case(scenario: Scenario) -> PreparedCase {
 
     git(
         &main,
-        &[
-            "worktree",
-            "add",
-            linked.to_str().unwrap(),
-            "-b",
-            "feature",
-        ],
+        &["worktree", "add", linked.to_str().unwrap(), "-b", "feature"],
     );
 
     match scenario {
@@ -386,7 +376,10 @@ fn run_worktrunk(case: &PreparedCase, worktrunk_bin: &str) -> ToolRun {
             "feature",
             "--force",
         ])
-        .env("WORKTRUNK_SYSTEM_CONFIG_PATH", case.main.join("does-not-exist"))
+        .env(
+            "WORKTRUNK_SYSTEM_CONFIG_PATH",
+            case.main.join("does-not-exist"),
+        )
         .env("NO_COLOR", "1")
         .output()
         .unwrap();
@@ -471,18 +464,18 @@ fn run_claude(case: &PreparedCase, claude_bin: &str) -> ToolRun {
                     ])
                     .output();
 
-                if let Ok(cleanup_out) = cleanup {
-                    if !cleanup_out.status.success() {
-                        if !stderr.is_empty() {
-                            stderr.push('\n');
-                        }
-                        stderr.push_str(&format!(
-                            "warning: cleanup failed for {}\nstdout:\n{}\nstderr:\n{}",
-                            worktree_path.display(),
-                            String::from_utf8_lossy(&cleanup_out.stdout),
-                            String::from_utf8_lossy(&cleanup_out.stderr)
-                        ));
+                if let Ok(cleanup_out) = cleanup
+                    && !cleanup_out.status.success()
+                {
+                    if !stderr.is_empty() {
+                        stderr.push('\n');
                     }
+                    stderr.push_str(&format!(
+                        "warning: cleanup failed for {}\nstdout:\n{}\nstderr:\n{}",
+                        worktree_path.display(),
+                        String::from_utf8_lossy(&cleanup_out.stdout),
+                        String::from_utf8_lossy(&cleanup_out.stderr)
+                    ));
                 }
             }
             None => {
@@ -549,7 +542,7 @@ fn agreement_note(waft: &ToolRun, worktrunk: &ToolRun, claude: &ToolRun) -> Stri
     if pairs.is_empty() {
         "no pair agrees".to_string()
     } else {
-        format!("{}", pairs.join(", "))
+        pairs.join(", ")
     }
 }
 
@@ -585,9 +578,13 @@ fn build_report(results: &[ScenarioResult], worktrunk_bin: &str, claude_bin: &st
         "- Pairwise agree (waft=claude): {}\n",
         waft_claude_agree
     ));
-    report.push_str(&format!("- Pairwise agree (wt=claude): {}\n\n", wt_claude_agree));
+    report.push_str(&format!(
+        "- Pairwise agree (wt=claude): {}\n\n",
+        wt_claude_agree
+    ));
 
-    report.push_str("| Scenario | waft | wt | claude | waft=wt | waft=claude | wt=claude | Note |\n");
+    report
+        .push_str("| Scenario | waft | wt | claude | waft=wt | waft=claude | wt=claude | Note |\n");
     report.push_str("|---|---|---|---|---|---|---|---|\n");
 
     for result in results {
