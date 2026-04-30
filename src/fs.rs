@@ -91,51 +91,55 @@ impl FileSystem for RealFs {
             io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
         })?;
 
-        // Reserve a unique tmp name in the destination's directory. The
-        // empty placeholder file is removed before placing content so the
-        // OS-level reflink primitives (clonefile / FICLONE) can create a
-        // fresh inode at that path.
-        let tmp = tempfile::Builder::new()
+        let try_reflink = match strategy {
+            CopyStrategy::SimpleCopy => false,
+            CopyStrategy::CowCopy => true,
+            CopyStrategy::Auto => cfg!(target_os = "macos"),
+        };
+
+        if try_reflink && try_reflink_into(src, dst, parent)? {
+            return Ok(());
+        }
+
+        // Stream `src` through the temp file's open file descriptor and
+        // then atomically rename into place. Because we never reopen the
+        // tmp path between create and rename, an attacker with write
+        // access to `parent` cannot substitute a symlink to redirect the
+        // write to an attacker-chosen target.
+        let mut tmp = tempfile::Builder::new()
             .prefix(".waft-copy-")
             .tempfile_in(parent)?;
-        let tmp_path = tmp.into_temp_path();
-        fs::remove_file(&tmp_path)?;
-
-        match place_content(src, &tmp_path, strategy) {
-            Ok(()) => {
-                tmp_path.persist(dst).map_err(|e| e.error)?;
-                Ok(())
-            }
-            Err(e) => {
-                // tmp_path's Drop removes whatever (if anything) is at the
-                // path. If the placement step never created a file, the
-                // remove is a no-op; if it did, we leave nothing behind.
-                Err(e)
-            }
-        }
+        let mut src_file = fs::File::open(src)?;
+        io::copy(&mut src_file, tmp.as_file_mut())?;
+        tmp.into_temp_path().persist(dst).map_err(|e| e.error)?;
+        Ok(())
     }
 }
 
-/// Place `src`'s content at `tmp_path` according to `strategy`.
+/// Try to reflink `src` to `dst` via a freshly-named temp file, returning
+/// `Ok(true)` on success and `Ok(false)` if the underlying reflink call
+/// failed (so the caller should fall back to a streaming copy).
 ///
-/// On entry, no file should exist at `tmp_path` — both reflink and the
-/// fallback streaming copy create the file.
-fn place_content(src: &Path, tmp_path: &Path, strategy: CopyStrategy) -> io::Result<()> {
-    match strategy {
-        CopyStrategy::SimpleCopy => {
-            fs::copy(src, tmp_path)?;
-            Ok(())
+/// The reflink primitives (`clonefile` on macOS, `ioctl_ficlone` on Linux)
+/// require a non-existing destination, so we reserve a unique tmp name and
+/// remove the placeholder before invoking the primitive. Both backends use
+/// `O_EXCL` semantics: if an attacker races to substitute a symlink at the
+/// path during the brief window between the `remove_file` call and the
+/// reflink call, the reflink fails with `EEXIST` rather than write through
+/// the symlink. We treat that failure like any other reflink failure and
+/// let the caller fall back to the fd-streamed path, which uses a fresh
+/// temp name and never reopens by path.
+fn try_reflink_into(src: &Path, dst: &Path, parent: &Path) -> io::Result<bool> {
+    let tmp = tempfile::Builder::new()
+        .prefix(".waft-copy-")
+        .tempfile_in(parent)?;
+    let tmp_path = tmp.into_temp_path();
+    fs::remove_file(&tmp_path)?;
+    match reflink_copy::reflink(src, &tmp_path) {
+        Ok(()) => {
+            tmp_path.persist(dst).map_err(|e| e.error)?;
+            Ok(true)
         }
-        CopyStrategy::CowCopy => {
-            reflink_copy::reflink_or_copy(src, tmp_path).map(|_| ())
-        }
-        CopyStrategy::Auto => {
-            if cfg!(target_os = "macos") {
-                reflink_copy::reflink_or_copy(src, tmp_path).map(|_| ())
-            } else {
-                fs::copy(src, tmp_path)?;
-                Ok(())
-            }
-        }
+        Err(_) => Ok(false),
     }
 }
