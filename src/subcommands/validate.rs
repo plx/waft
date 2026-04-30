@@ -1,3 +1,5 @@
+//! `validate` subcommand — lint ignore and `.worktreeinclude` files.
+
 use clap::Args;
 
 use crate::cli::Cli;

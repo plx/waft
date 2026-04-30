@@ -1,13 +1,19 @@
-//! `.worktreeinclude` explanation engine.
+//! Per-directory `.worktreeinclude` matcher used by the `git` semantics
+//! engine and by the explanation paths in `info` / `list -v`.
 //!
-//! This module evaluates paths against `.worktreeinclude` files for
-//! explanation and validation purposes. It is **not** the authoritative
-//! selector — Git CLI is authoritative for actual candidate selection.
+//! This module evaluates paths against `.worktreeinclude` files using
+//! Git-style per-directory exclude semantics. It is **not** the
+//! authoritative selector for *which files actually get copied* — the Git
+//! backend's `check_ignore` is the final authority on git-ignored
+//! membership, and which engine in [`crate::worktreeinclude_engine`] is
+//! consulted depends on the active compat profile.
 //!
 //! The engine collects applicable `.worktreeinclude` files from the repo
 //! root to the queried path's parent, builds a matcher for each file
 //! rooted at its directory, and evaluates with last-match-wins semantics
-//! (shallow to deep, last match within each file).
+//! (shallow to deep, last match within each file). The `claude-2026-04`
+//! engine consumes [`evaluate_root_only`] instead, which inspects only the
+//! repository's root-level rule file.
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -8,24 +8,38 @@
 //!
 //! The tool follows a strict plan/execute design:
 //!
-//! 1. **Context resolution** ([`context`]) — determines source and destination
+//! 1. **Policy resolution** ([`config`]) — merges built-in defaults, user
+//!    config, project `.waft.toml` files, environment variables, and CLI
+//!    flags into a single [`config::ResolvedPolicy`].
+//! 2. **Context resolution** ([`context`]) — determines source and destination
 //!    worktrees from CLI args and Git state.
-//! 2. **Validation** ([`validate`]) — checks all `.gitignore`, `.worktreeinclude`,
+//! 3. **Validation** ([`validate`]) — checks all `.gitignore`, `.worktreeinclude`,
 //!    and exclude files for syntax errors.
-//! 3. **Candidate enumeration** — uses `git ls-files --exclude-per-directory` to
-//!    find `.worktreeinclude`-selected files, then `git check-ignore` to verify
-//!    they are actually Git-ignored.
-//! 4. **Planning** ([`planner`]) — classifies each destination path (missing,
+//! 4. **Candidate selection** (in [`subcommands`]) — dispatches on whether
+//!    any `.worktreeinclude` exists, runs the matcher engine chosen by
+//!    [`config::WorktreeincludeSemantics`] (see [`worktreeinclude_engine`]),
+//!    and verifies eligibility via the Git backend's `check_ignore`. The
+//!    post-selection filter ([`policy_filter`]) drops paths matched by the
+//!    active built-in or extra exclusion patterns.
+//! 5. **Planning** ([`planner`]) — classifies each destination path (missing,
 //!    up-to-date, conflict, etc.) and produces a [`model::CopyPlan`].
-//! 5. **Execution** ([`executor`]) — applies copy operations atomically via
+//! 6. **Execution** ([`executor`]) — applies copy operations atomically via
 //!    temp files, with symlink safety checks.
 //!
 //! # Key Design Decisions
 //!
-//! - Git CLI is authoritative for ignore membership and trackedness.
-//! - `.worktreeinclude` is an independent matcher with Git-style per-directory
-//!   semantics.
-//! - The `ignore` crate is used for parsing and explanation, not as the oracle.
+//! - The Git backend ([`git`]) is authoritative for ignore membership and
+//!   trackedness. Two interchangeable implementations are provided: `GitGix`
+//!   (default, in-process via the `gix` crate) and `GitCli` (selected via
+//!   `WAFT_GIT_BACKEND=cli`); backend parity tests pin them to the same
+//!   observable behavior.
+//! - `.worktreeinclude` is matched by a pluggable engine selected by the
+//!   active compat profile. The default `claude-2026-04` engine reads only
+//!   the repository's root-level rule file; the `git` engine reproduces
+//!   Git's per-directory exclude semantics; the `wt-0.39` engine implements
+//!   `worktrunk 0.39`'s subtractive literal-name negations.
+//! - The `ignore` crate is used for parsing and explanation, not as the
+//!   final authority on Git-ignored status.
 //! - Discovery never mutates the filesystem; only `copy` (without `--dry-run`)
 //!   writes files.
 

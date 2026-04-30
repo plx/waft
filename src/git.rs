@@ -1,8 +1,15 @@
-//! Git backend trait and CLI implementation.
+//! Git backend trait and its two implementations.
 //!
-//! This module is the **only** place in waft that shells out to `git`.
-//! All Git interactions go through the [`GitBackend`] trait, allowing
-//! the planner and other modules to be tested without real Git repos.
+//! All Git interactions go through the [`GitBackend`] trait, which lets the
+//! planner and other modules be tested without real Git repos. Two
+//! interchangeable implementations live here:
+//!
+//! - [`GitGix`] (default): in-process via the `gix` crate.
+//! - [`GitCli`]: shells out to the `git` binary. Selected by setting
+//!   `WAFT_GIT_BACKEND=cli`.
+//!
+//! Backend parity tests in `tests/backend_parity.rs` pin both implementations
+//! to the same observable behavior.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
