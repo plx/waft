@@ -271,6 +271,114 @@ fn copy_skips_tracked_destination_conflict() {
 }
 
 #[test]
+fn copy_with_simple_strategy_writes_correct_content() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "PAYLOAD=simple\n");
+
+    waft()
+        .args([
+            "--copy-strategy",
+            "simple-copy",
+            "copy",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "PAYLOAD=simple\n"
+    );
+}
+
+#[test]
+fn copy_with_cow_strategy_writes_correct_content() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "PAYLOAD=cow\n");
+
+    // reflink_or_copy ensures content lands even on filesystems that don't
+    // support cloning, so this test is a meaningful smoke check on every
+    // platform.
+    waft()
+        .args([
+            "--copy-strategy",
+            "cow-copy",
+            "copy",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "PAYLOAD=cow\n"
+    );
+}
+
+#[test]
+fn copy_strategy_via_env_var() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "PAYLOAD=env\n");
+
+    waft()
+        .env("WAFT_COPY_STRATEGY", "cow-copy")
+        .args([
+            "copy",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "PAYLOAD=env\n"
+    );
+}
+
+#[test]
+fn copy_overwrite_with_cow_replaces_destination() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "NEW\n");
+    write_file(&wt_path, ".env", "OLD\n");
+
+    // The temp+rename atomic-replace path must still work when the chosen
+    // strategy is reflink: cow-copy should overwrite an existing untracked
+    // destination just like simple-copy does.
+    waft()
+        .args([
+            "--copy-strategy",
+            "cow-copy",
+            "copy",
+            "--overwrite",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(fs::read_to_string(wt_path.join(".env")).unwrap(), "NEW\n");
+}
+
+#[test]
 fn copy_skips_tracked_destination_even_with_overwrite() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");

@@ -5,9 +5,9 @@
 //! at the layer-application level.
 
 use waft::config::{
-    BuiltinExcludeSet, CompatProfile, ConfigLayer, PolicyResolutionInputs, ResolvedPolicy,
-    SymlinkPolicy, WhenMissingWorktreeinclude, WorktreeincludeSemantics, layer_from_env_iter,
-    parse_toml,
+    BuiltinExcludeSet, CompatProfile, ConfigLayer, CopyStrategy, PolicyResolutionInputs,
+    ResolvedPolicy, SymlinkPolicy, WhenMissingWorktreeinclude, WorktreeincludeSemantics,
+    layer_from_env_iter, parse_toml,
 };
 
 // --- Default policy ---
@@ -22,6 +22,7 @@ fn default_policy_matches_claude_preset() {
     assert_eq!(p.symlink_policy, SymlinkPolicy::Follow);
     assert_eq!(p.builtin_exclude_set, BuiltinExcludeSet::None);
     assert!(p.extra_excludes.is_empty());
+    assert_eq!(p.copy_strategy, CopyStrategy::Auto);
 }
 
 // --- Enum parsing happy paths ---
@@ -89,6 +90,34 @@ fn parse_each_builtin_set() {
     }
 }
 
+#[test]
+fn parse_each_copy_strategy() {
+    for (s, expected) in [
+        ("auto", CopyStrategy::Auto),
+        ("simple-copy", CopyStrategy::SimpleCopy),
+        ("cow-copy", CopyStrategy::CowCopy),
+    ] {
+        let toml = format!("[copy]\nstrategy = \"{s}\"\n");
+        let layer = parse_toml("inline", &toml).unwrap();
+        assert_eq!(layer.copy_strategy, Some(expected));
+    }
+}
+
+#[test]
+fn parse_copy_strategy_aliases() {
+    // Convenience aliases people are likely to type.
+    for (s, expected) in [
+        ("default", CopyStrategy::Auto),
+        ("simple", CopyStrategy::SimpleCopy),
+        ("cow", CopyStrategy::CowCopy),
+        ("reflink", CopyStrategy::CowCopy),
+    ] {
+        let toml = format!("[copy]\nstrategy = \"{s}\"\n");
+        let layer = parse_toml("inline", &toml).unwrap();
+        assert_eq!(layer.copy_strategy, Some(expected), "alias {s}");
+    }
+}
+
 // --- Enum parsing rejections ---
 
 #[test]
@@ -127,6 +156,18 @@ fn invalid_symlink_policy_rejected() {
 fn invalid_builtin_set_rejected() {
     let err = parse_toml("inline", "[exclude]\nbuiltin_set = \"v0\"\n").unwrap_err();
     assert!(err.to_string().contains("v0"));
+}
+
+#[test]
+fn invalid_copy_strategy_rejected() {
+    let err = parse_toml("inline", "[copy]\nstrategy = \"warp\"\n").unwrap_err();
+    assert!(err.to_string().contains("warp"));
+}
+
+#[test]
+fn unknown_copy_key_rejected() {
+    let err = parse_toml("inline", "[copy]\nspeedup = true\n").unwrap_err();
+    assert!(err.to_string().contains("speedup"));
 }
 
 // --- TOML structural protection ---
@@ -308,6 +349,7 @@ fn env_layer_recognizes_all_known_vars() {
         ("WAFT_BUILTIN_EXCLUDE_SET".into(), "tooling-v1".into()),
         ("WAFT_EXTRA_EXCLUDE".into(), "x,y".into()),
         ("WAFT_REPLACE_EXTRA_EXCLUDES".into(), "1".into()),
+        ("WAFT_COPY_STRATEGY".into(), "cow-copy".into()),
     ];
     let layer = layer_from_env_iter(env).unwrap();
     assert_eq!(layer.profile, Some(CompatProfile::Wt));
@@ -323,6 +365,14 @@ fn env_layer_recognizes_all_known_vars() {
     );
     assert_eq!(layer.extra_excludes, vec!["x".to_string(), "y".to_string()]);
     assert_eq!(layer.replace_extra_excludes, Some(true));
+    assert_eq!(layer.copy_strategy, Some(CopyStrategy::CowCopy));
+}
+
+#[test]
+fn env_layer_invalid_copy_strategy_rejected() {
+    let env = vec![("WAFT_COPY_STRATEGY".into(), "warp".into())];
+    let err = layer_from_env_iter(env).unwrap_err();
+    assert!(err.to_string().contains("warp"));
 }
 
 #[test]
@@ -392,6 +442,32 @@ fn explicit_knob_beats_preset_regardless_of_layer() {
 }
 
 // --- Resolution wrapper ---
+
+#[test]
+fn copy_strategy_layer_precedence() {
+    // CLI > env > project > user; latest scalar wins.
+    let user = ConfigLayer {
+        copy_strategy: Some(CopyStrategy::SimpleCopy),
+        ..ConfigLayer::default()
+    };
+    let project = ConfigLayer {
+        copy_strategy: Some(CopyStrategy::CowCopy),
+        ..ConfigLayer::default()
+    };
+    let policy = ResolvedPolicy::from_layers([&user, &project]);
+    assert_eq!(policy.copy_strategy, CopyStrategy::CowCopy);
+}
+
+#[test]
+fn copy_strategy_unset_falls_back_to_default() {
+    // Resolving with no layer setting copy_strategy yields Auto.
+    let layer = ConfigLayer {
+        profile: Some(CompatProfile::Git),
+        ..ConfigLayer::default()
+    };
+    let policy = ResolvedPolicy::from_layers([&layer]);
+    assert_eq!(policy.copy_strategy, CopyStrategy::Auto);
+}
 
 #[test]
 fn resolve_via_inputs_applies_in_order() {

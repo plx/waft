@@ -4,6 +4,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::config::CopyStrategy;
+
 /// Abstraction over filesystem operations needed by the planner and executor.
 pub trait FileSystem {
     /// Check if a path exists.
@@ -28,11 +30,11 @@ pub trait FileSystem {
     /// Create all directories leading to `path`.
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
 
-    /// Write data to a temp file in the same directory, then rename atomically.
-    fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()>;
-
-    /// Copy file permissions from src to dst (best-effort).
-    fn copy_permissions(&self, src: &Path, dst: &Path) -> io::Result<()>;
+    /// Copy `src` to `dst` using the given [`CopyStrategy`], atomically
+    /// replacing any existing file at `dst`. The implementation streams via
+    /// a temp file in the same directory and renames into place so partial
+    /// writes are never observable.
+    fn copy_file(&self, src: &Path, dst: &Path, strategy: CopyStrategy) -> io::Result<()>;
 }
 
 /// Real filesystem implementation.
@@ -84,27 +86,56 @@ impl FileSystem for RealFs {
         fs::create_dir_all(path)
     }
 
-    fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        use std::io::Write;
-
-        let parent = path.parent().ok_or_else(|| {
+    fn copy_file(&self, src: &Path, dst: &Path, strategy: CopyStrategy) -> io::Result<()> {
+        let parent = dst.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
         })?;
 
-        // Create a temp file in the same directory
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-        tmp.write_all(data)?;
-        tmp.flush()?;
+        // Reserve a unique tmp name in the destination's directory. The
+        // empty placeholder file is removed before placing content so the
+        // OS-level reflink primitives (clonefile / FICLONE) can create a
+        // fresh inode at that path.
+        let tmp = tempfile::Builder::new()
+            .prefix(".waft-copy-")
+            .tempfile_in(parent)?;
+        let tmp_path = tmp.into_temp_path();
+        fs::remove_file(&tmp_path)?;
 
-        // Atomically rename into place
-        tmp.persist(path).map_err(|e| e.error)?;
-        Ok(())
+        match place_content(src, &tmp_path, strategy) {
+            Ok(()) => {
+                tmp_path.persist(dst).map_err(|e| e.error)?;
+                Ok(())
+            }
+            Err(e) => {
+                // tmp_path's Drop removes whatever (if anything) is at the
+                // path. If the placement step never created a file, the
+                // remove is a no-op; if it did, we leave nothing behind.
+                Err(e)
+            }
+        }
     }
+}
 
-    fn copy_permissions(&self, src: &Path, dst: &Path) -> io::Result<()> {
-        let metadata = fs::metadata(src)?;
-        let permissions = metadata.permissions();
-        fs::set_permissions(dst, permissions)?;
-        Ok(())
+/// Place `src`'s content at `tmp_path` according to `strategy`.
+///
+/// On entry, no file should exist at `tmp_path` — both reflink and the
+/// fallback streaming copy create the file.
+fn place_content(src: &Path, tmp_path: &Path, strategy: CopyStrategy) -> io::Result<()> {
+    match strategy {
+        CopyStrategy::SimpleCopy => {
+            fs::copy(src, tmp_path)?;
+            Ok(())
+        }
+        CopyStrategy::CowCopy => {
+            reflink_copy::reflink_or_copy(src, tmp_path).map(|_| ())
+        }
+        CopyStrategy::Auto => {
+            if cfg!(target_os = "macos") {
+                reflink_copy::reflink_or_copy(src, tmp_path).map(|_| ())
+            } else {
+                fs::copy(src, tmp_path)?;
+                Ok(())
+            }
+        }
     }
 }

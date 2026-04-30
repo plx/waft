@@ -1,9 +1,12 @@
-//! Copy plan execution with atomic writes.
+//! Copy plan execution.
 //!
-//! The executor consumes a `CopyPlan` and applies the `CopyOp`
-//! entries. It copies file contents via a temp file in the destination
-//! directory, then atomically renames into place.
+//! The executor consumes a `CopyPlan` and applies the `CopyOp` entries via
+//! the [`FileSystem::copy_file`] primitive: the chosen [`CopyStrategy`]
+//! determines whether the destination is produced by a streaming byte copy
+//! or a reflink (COW) clone, with atomic temp-file-and-rename semantics
+//! handled inside the filesystem layer.
 
+use crate::config::CopyStrategy;
 use crate::fs::FileSystem;
 use crate::model::{CopyOutcome, CopyPlan, CopyReport, CopyResult, PlannedEntry};
 
@@ -11,7 +14,7 @@ use crate::model::{CopyOutcome, CopyPlan, CopyReport, CopyResult, PlannedEntry};
 ///
 /// If `dry_run` is set on the plan, no filesystem mutations are performed
 /// and all copies are reported as successful.
-pub fn execute(plan: &CopyPlan, fs: &dyn FileSystem) -> CopyReport {
+pub fn execute(plan: &CopyPlan, fs: &dyn FileSystem, strategy: CopyStrategy) -> CopyReport {
     let mut results = Vec::new();
     let mut copied = 0usize;
     let mut failed = 0usize;
@@ -30,7 +33,7 @@ pub fn execute(plan: &CopyPlan, fs: &dyn FileSystem) -> CopyReport {
                     continue;
                 }
 
-                match execute_copy(op, fs) {
+                match execute_copy(op, fs, strategy) {
                     Ok(()) => {
                         copied += 1;
                         results.push(CopyResult {
@@ -66,7 +69,11 @@ pub fn execute(plan: &CopyPlan, fs: &dyn FileSystem) -> CopyReport {
 }
 
 /// Execute a single copy operation.
-fn execute_copy(op: &crate::model::CopyOp, fs: &dyn FileSystem) -> Result<(), String> {
+fn execute_copy(
+    op: &crate::model::CopyOp,
+    fs: &dyn FileSystem,
+    strategy: CopyStrategy,
+) -> Result<(), String> {
     // Never follow source symlinks
     if fs.is_symlink(&op.src_abs) {
         return Err(format!("{}: source is a symlink", op.rel_path));
@@ -86,17 +93,8 @@ fn execute_copy(op: &crate::model::CopyOp, fs: &dyn FileSystem) -> Result<(), St
             .map_err(|e| format!("{}: failed to create directory: {e}", op.rel_path))?;
     }
 
-    // Read source data
-    let data = fs
-        .read(&op.src_abs)
-        .map_err(|e| format!("{}: failed to read source: {e}", op.rel_path))?;
-
-    // Atomic write: temp file + rename
-    fs.atomic_write(&op.dst_abs, &data)
-        .map_err(|e| format!("{}: failed to write destination: {e}", op.rel_path))?;
-
-    // Preserve permissions (best-effort)
-    let _ = fs.copy_permissions(&op.src_abs, &op.dst_abs);
+    fs.copy_file(&op.src_abs, &op.dst_abs, strategy)
+        .map_err(|e| format!("{}: failed to copy: {e}", op.rel_path))?;
 
     Ok(())
 }

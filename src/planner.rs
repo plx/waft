@@ -296,14 +296,19 @@ mod tests {
             Ok(())
         }
 
-        fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-            self.files
-                .borrow_mut()
-                .insert(path.to_path_buf(), data.to_vec());
-            Ok(())
-        }
-
-        fn copy_permissions(&self, _src: &Path, _dst: &Path) -> io::Result<()> {
+        fn copy_file(
+            &self,
+            src: &Path,
+            dst: &Path,
+            _strategy: crate::config::CopyStrategy,
+        ) -> io::Result<()> {
+            let data = self
+                .files
+                .borrow()
+                .get(src)
+                .cloned()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "not found"))?;
+            self.files.borrow_mut().insert(dst.to_path_buf(), data);
             Ok(())
         }
     }

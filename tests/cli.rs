@@ -31,7 +31,18 @@ fn help_shows_compat_profile_flags() {
         .stdout(predicate::str::contains("--builtin-exclude-set"))
         .stdout(predicate::str::contains("--extra-exclude"))
         .stdout(predicate::str::contains("--replace-extra-excludes"))
+        .stdout(predicate::str::contains("--copy-strategy"))
         .stdout(predicate::str::contains("--config"));
+}
+
+#[test]
+fn invalid_copy_strategy_value_rejected() {
+    waft()
+        .args(["--copy-strategy", "warp"])
+        .arg("list")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("warp"));
 }
 
 #[test]

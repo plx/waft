@@ -4,9 +4,10 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use crate::config::{
-    BuiltinExcludeSet, CompatProfile, ConfigLayer, PolicyResolutionInputs, ResolvedPolicy,
-    SymlinkPolicy, WhenMissingWorktreeinclude, WorktreeincludeSemantics, discover_project_configs,
-    layer_from_env, load_project_layers, load_user_layer, user_config_path,
+    BuiltinExcludeSet, CompatProfile, ConfigLayer, CopyStrategy, PolicyResolutionInputs,
+    ResolvedPolicy, SymlinkPolicy, WhenMissingWorktreeinclude, WorktreeincludeSemantics,
+    discover_project_configs, layer_from_env, load_project_layers, load_user_layer,
+    user_config_path,
 };
 use crate::error::{Error, Result};
 use crate::subcommands::{
@@ -65,6 +66,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub replace_extra_excludes: bool,
 
+    /// File copy strategy (auto|simple-copy|cow-copy).
+    #[arg(long, global = true, value_name = "STRATEGY")]
+    pub copy_strategy: Option<CopyStrategy>,
+
     /// Path to an explicit config file (overrides user config discovery).
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<PathBuf>,
@@ -105,6 +110,7 @@ impl Cli {
             } else {
                 None
             },
+            copy_strategy: self.copy_strategy,
         }
     }
 
