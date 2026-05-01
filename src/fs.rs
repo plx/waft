@@ -4,6 +4,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::config::CopyStrategy;
+
 /// Abstraction over filesystem operations needed by the planner and executor.
 pub trait FileSystem {
     /// Check if a path exists.
@@ -28,11 +30,11 @@ pub trait FileSystem {
     /// Create all directories leading to `path`.
     fn create_dir_all(&self, path: &Path) -> io::Result<()>;
 
-    /// Write data to a temp file in the same directory, then rename atomically.
-    fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()>;
-
-    /// Copy file permissions from src to dst (best-effort).
-    fn copy_permissions(&self, src: &Path, dst: &Path) -> io::Result<()>;
+    /// Copy `src` to `dst` using the given [`CopyStrategy`], atomically
+    /// replacing any existing file at `dst`. The implementation streams via
+    /// a temp file in the same directory and renames into place so partial
+    /// writes are never observable.
+    fn copy_file(&self, src: &Path, dst: &Path, strategy: CopyStrategy) -> io::Result<()>;
 }
 
 /// Real filesystem implementation.
@@ -84,27 +86,60 @@ impl FileSystem for RealFs {
         fs::create_dir_all(path)
     }
 
-    fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        use std::io::Write;
-
-        let parent = path.parent().ok_or_else(|| {
+    fn copy_file(&self, src: &Path, dst: &Path, strategy: CopyStrategy) -> io::Result<()> {
+        let parent = dst.parent().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
         })?;
 
-        // Create a temp file in the same directory
-        let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-        tmp.write_all(data)?;
-        tmp.flush()?;
+        let try_reflink = match strategy {
+            CopyStrategy::SimpleCopy => false,
+            CopyStrategy::CowCopy => true,
+            CopyStrategy::Auto => cfg!(target_os = "macos"),
+        };
 
-        // Atomically rename into place
-        tmp.persist(path).map_err(|e| e.error)?;
+        if try_reflink && try_reflink_into(src, dst, parent)? {
+            return Ok(());
+        }
+
+        // Stream `src` through the temp file's open file descriptor and
+        // then atomically rename into place. Because we never reopen the
+        // tmp path between create and rename, an attacker with write
+        // access to `parent` cannot substitute a symlink to redirect the
+        // write to an attacker-chosen target.
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".waft-copy-")
+            .tempfile_in(parent)?;
+        let mut src_file = fs::File::open(src)?;
+        io::copy(&mut src_file, tmp.as_file_mut())?;
+        tmp.into_temp_path().persist(dst).map_err(|e| e.error)?;
         Ok(())
     }
+}
 
-    fn copy_permissions(&self, src: &Path, dst: &Path) -> io::Result<()> {
-        let metadata = fs::metadata(src)?;
-        let permissions = metadata.permissions();
-        fs::set_permissions(dst, permissions)?;
-        Ok(())
+/// Try to reflink `src` to `dst` via a freshly-named temp file, returning
+/// `Ok(true)` on success and `Ok(false)` if the underlying reflink call
+/// failed (so the caller should fall back to a streaming copy).
+///
+/// The reflink primitives (`clonefile` on macOS, `ioctl_ficlone` on Linux)
+/// require a non-existing destination, so we reserve a unique tmp name and
+/// remove the placeholder before invoking the primitive. Both backends use
+/// `O_EXCL` semantics: if an attacker races to substitute a symlink at the
+/// path during the brief window between the `remove_file` call and the
+/// reflink call, the reflink fails with `EEXIST` rather than write through
+/// the symlink. We treat that failure like any other reflink failure and
+/// let the caller fall back to the fd-streamed path, which uses a fresh
+/// temp name and never reopens by path.
+fn try_reflink_into(src: &Path, dst: &Path, parent: &Path) -> io::Result<bool> {
+    let tmp = tempfile::Builder::new()
+        .prefix(".waft-copy-")
+        .tempfile_in(parent)?;
+    let tmp_path = tmp.into_temp_path();
+    fs::remove_file(&tmp_path)?;
+    match reflink_copy::reflink(src, &tmp_path) {
+        Ok(()) => {
+            tmp_path.persist(dst).map_err(|e| e.error)?;
+            Ok(true)
+        }
+        Err(_) => Ok(false),
     }
 }

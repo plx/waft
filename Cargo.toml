@@ -9,6 +9,7 @@ license = "MIT"
 clap = { version = "4", features = ["derive"] }
 gix = "0.81"
 ignore = "0.4"
+reflink-copy = "0.1"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 thiserror = "2"

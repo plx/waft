@@ -194,6 +194,45 @@ impl BuiltinExcludeSet {
     }
 }
 
+/// Strategy for placing copied file content at the destination.
+///
+/// Reflink (a.k.a. copy-on-write) is supported on APFS (macOS), Btrfs/XFS
+/// (Linux), and ReFS (Windows Server). When supported, the new file shares
+/// on-disk extents with the source until either side is modified, making the
+/// copy near-instant and storage-cheap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
+#[clap(rename_all = "kebab-case")]
+pub enum CopyStrategy {
+    /// Use the platform default: attempt reflink on macOS, plain copy elsewhere.
+    Auto,
+    /// Always perform a plain byte-for-byte copy, even where reflinks are available.
+    SimpleCopy,
+    /// Attempt a reflink (COW) copy; fall back to a plain copy if unsupported.
+    CowCopy,
+}
+
+impl CopyStrategy {
+    /// Stable string identifier.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::SimpleCopy => "simple-copy",
+            Self::CowCopy => "cow-copy",
+        }
+    }
+
+    fn parse(s: &str) -> std::result::Result<Self, String> {
+        match s {
+            "auto" | "default" => Ok(Self::Auto),
+            "simple-copy" | "simple" => Ok(Self::SimpleCopy),
+            "cow-copy" | "cow" | "reflink" => Ok(Self::CowCopy),
+            other => Err(format!(
+                "unknown copy strategy {other:?}; expected auto|simple-copy|cow-copy"
+            )),
+        }
+    }
+}
+
 // --- Layered configuration ---
 
 /// One layer of configuration with all keys optional.
@@ -217,6 +256,8 @@ pub struct ConfigLayer {
     pub extra_excludes: Vec<String>,
     /// Whether this layer's `extra_excludes` should replace accumulated values.
     pub replace_extra_excludes: Option<bool>,
+    /// Strategy for placing file content at the destination during copy.
+    pub copy_strategy: Option<CopyStrategy>,
 }
 
 /// Fully resolved policy after merging all layers.
@@ -234,6 +275,8 @@ pub struct ResolvedPolicy {
     pub builtin_exclude_set: BuiltinExcludeSet,
     /// Extra exclude globs after layer merging.
     pub extra_excludes: Vec<String>,
+    /// Strategy for placing file content at the destination.
+    pub copy_strategy: CopyStrategy,
 }
 
 /// Knob values implied by a compat profile preset.
@@ -276,6 +319,9 @@ impl Preset {
 /// Default compat profile applied when no layer sets `compat.profile`.
 const DEFAULT_PROFILE: CompatProfile = CompatProfile::Claude;
 
+/// Default copy strategy applied when no layer sets `copy.strategy`.
+const DEFAULT_COPY_STRATEGY: CopyStrategy = CopyStrategy::Auto;
+
 impl Default for ResolvedPolicy {
     /// Resolve to the default profile's preset.
     ///
@@ -292,6 +338,7 @@ impl Default for ResolvedPolicy {
             symlink_policy: preset.symlink_policy,
             builtin_exclude_set: preset.builtin_exclude_set,
             extra_excludes: Vec::new(),
+            copy_strategy: DEFAULT_COPY_STRATEGY,
         }
     }
 }
@@ -333,6 +380,9 @@ impl ResolvedPolicy {
             if let Some(v) = layer.builtin_exclude_set {
                 effective.builtin_exclude_set = Some(v);
             }
+            if let Some(v) = layer.copy_strategy {
+                effective.copy_strategy = Some(v);
+            }
             if layer.replace_extra_excludes == Some(true) {
                 effective.extra_excludes.clear();
             }
@@ -353,6 +403,7 @@ impl ResolvedPolicy {
                 .builtin_exclude_set
                 .unwrap_or(preset.builtin_exclude_set),
             extra_excludes: effective.extra_excludes,
+            copy_strategy: effective.copy_strategy.unwrap_or(DEFAULT_COPY_STRATEGY),
         }
     }
 }
@@ -370,6 +421,8 @@ struct RawConfig {
     worktreeinclude: Option<RawWorktreeinclude>,
     #[serde(default)]
     exclude: Option<RawExclude>,
+    #[serde(default)]
+    copy: Option<RawCopy>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -399,6 +452,13 @@ struct RawExclude {
     extra: Option<Vec<String>>,
     #[serde(default)]
     replace_extra: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCopy {
+    #[serde(default)]
+    strategy: Option<String>,
 }
 
 /// Parse a TOML configuration string into a [`ConfigLayer`].
@@ -448,6 +508,12 @@ pub fn parse_toml(source: &str, content: &str) -> Result<ConfigLayer> {
             layer.extra_excludes = extra;
         }
         layer.replace_extra_excludes = excl.replace_extra;
+    }
+
+    if let Some(copy) = raw.copy
+        && let Some(s) = copy.strategy
+    {
+        layer.copy_strategy = Some(CopyStrategy::parse(&s).map_err(cfg_err)?);
     }
 
     Ok(layer)
@@ -522,6 +588,11 @@ where
                     Some(parse_env_bool(&v).map_err(|e| Error::Config {
                         message: format!("{ENV_SOURCE} (WAFT_REPLACE_EXTRA_EXCLUDES): {e}"),
                     })?);
+            }
+            "WAFT_COPY_STRATEGY" => {
+                layer.copy_strategy = Some(CopyStrategy::parse(&v).map_err(|e| Error::Config {
+                    message: format!("{ENV_SOURCE} (WAFT_COPY_STRATEGY): {e}"),
+                })?);
             }
             _ => {}
         }

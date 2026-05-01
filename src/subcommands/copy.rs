@@ -100,7 +100,7 @@ pub fn run_copy(cli: &Cli, policy: &ResolvedPolicy, args: &CopyArgs) -> Result<(
     }
 
     // Execute
-    let copy_report = crate::executor::execute(&plan, &fs);
+    let copy_report = crate::executor::execute(&plan, &fs, policy.copy_strategy);
     crate::executor::render_report(&copy_report, cli.quiet);
 
     if let Some((failed, total)) = crate::executor::report_has_failures(&copy_report) {
