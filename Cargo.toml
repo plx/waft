@@ -22,3 +22,8 @@ assert_cmd = "2"
 assert_fs = "1"
 predicates = "3"
 proptest = "1"
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[[bench]]
+name = "scaling"
+harness = false

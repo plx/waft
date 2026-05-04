@@ -16,6 +16,9 @@ check-doc-test:
 check-doc-build:
     cargo doc --no-deps
 
+bench-scaling:
+    cargo bench --bench scaling
+
 check-worktrunk-parity:
     cargo test --test worktrunk_parity -- --ignored --nocapture
 
