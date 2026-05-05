@@ -234,6 +234,10 @@ mod tests {
             Ok(HashSet::new())
         }
 
+        fn gitlinks(&self, _source_root: &Path) -> Result<HashSet<String>> {
+            Ok(HashSet::new())
+        }
+
         fn check_ignore(
             &self,
             _source_root: &Path,

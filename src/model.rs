@@ -87,6 +87,8 @@ pub struct CopyPlan {
 pub enum PlannedEntry {
     /// A file to be copied.
     Copy(CopyOp),
+    /// A directory subtree to be copied as one exact-manifest operation.
+    CopyDir(CopyDirOp),
     /// A file that needs no action.
     NoOp(NoOpEntry),
     /// A file that will be skipped.
@@ -98,6 +100,7 @@ impl PlannedEntry {
     pub fn rel_path(&self) -> &RepoRelPath {
         match self {
             PlannedEntry::Copy(op) => &op.rel_path,
+            PlannedEntry::CopyDir(op) => &op.rel_path,
             PlannedEntry::NoOp(entry) => &entry.rel_path,
             PlannedEntry::Skip(entry) => &entry.rel_path,
         }
@@ -113,6 +116,26 @@ pub struct CopyOp {
     pub src_abs: PathBuf,
     /// Absolute destination path.
     pub dst_abs: PathBuf,
+}
+
+/// Details for a directory that will be copied as one exact-manifest operation.
+#[derive(Debug)]
+pub struct CopyDirOp {
+    /// Repo-relative directory path.
+    pub rel_path: RepoRelPath,
+    /// Absolute source directory path.
+    pub src_abs: PathBuf,
+    /// Absolute destination directory path.
+    pub dst_abs: PathBuf,
+    /// Repo-relative files covered by this directory operation.
+    pub files: Vec<RepoRelPath>,
+}
+
+impl CopyDirOp {
+    /// Number of manifest files covered by this directory operation.
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
 }
 
 /// A file that needs no action.
@@ -268,8 +291,22 @@ pub struct InfoReport {
 pub struct CopyResult {
     /// The operation that was executed.
     pub rel_path: RepoRelPath,
+    /// Result display/counting kind.
+    pub kind: CopyResultKind,
     /// Whether the copy succeeded.
     pub outcome: CopyOutcome,
+}
+
+/// Shape of the copy result for reporting.
+#[derive(Debug)]
+pub enum CopyResultKind {
+    /// A single-file copy result.
+    File,
+    /// An aggregate directory copy result.
+    Directory {
+        /// Number of manifest files covered by the directory copy.
+        file_count: usize,
+    },
 }
 
 /// Outcome of a single copy attempt.

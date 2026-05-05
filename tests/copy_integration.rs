@@ -42,6 +42,19 @@ fn write_file(dir: &Path, rel_path: &str, content: &str) {
     fs::write(&path, content).unwrap();
 }
 
+fn run_copy(source: &Path, dest: &Path) -> process::Output {
+    waft()
+        .args([
+            "copy",
+            "--source",
+            source.to_str().unwrap(),
+            "--dest",
+            dest.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap()
+}
+
 /// Create a main repo with a linked worktree.
 /// Returns (main_dir, worktree_dir).
 fn setup_worktrees() -> (TempDir, TempDir) {
@@ -66,6 +79,21 @@ fn setup_worktrees() -> (TempDir, TempDir) {
             "linked-branch",
         ],
     );
+
+    (main_dir, wt_dir)
+}
+
+fn setup_with_safe_full_dir() -> (TempDir, TempDir) {
+    let (main_dir, wt_dir) = setup_worktrees();
+
+    write_file(main_dir.path(), ".gitignore", "cfg/\n.env\n");
+    write_file(main_dir.path(), ".worktreeinclude", "cfg/\n.env\n");
+    write_file(main_dir.path(), "cfg/a.conf", "a\n");
+    write_file(main_dir.path(), "cfg/b.conf", "b\n");
+    write_file(main_dir.path(), "cfg/nested/c.conf", "c\n");
+    write_file(main_dir.path(), ".env", "X=1\n");
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "safe full dir fixture"]);
 
     (main_dir, wt_dir)
 }
@@ -409,5 +437,231 @@ fn copy_skips_tracked_destination_even_with_overwrite() {
     assert_eq!(
         fs::read_to_string(wt_path.join(".env")).unwrap(),
         "DEST_TRACKED\n"
+    );
+}
+
+#[test]
+fn copy_uses_fast_path_for_safe_fresh_subtree() {
+    let (main_dir, wt_dir) = setup_with_safe_full_dir();
+    let wt_path = wt_dir.path().join("linked");
+
+    let output = run_copy(main_dir.path(), &wt_path);
+    assert!(
+        output.status.success(),
+        "copy failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(stderr.contains("copy-dir: cfg (3 files)"), "{stderr}");
+    assert!(!stderr.contains("copied: cfg/a.conf"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(wt_path.join("cfg/a.conf")).unwrap(),
+        "a\n"
+    );
+    assert_eq!(
+        fs::read_to_string(wt_path.join("cfg/nested/c.conf")).unwrap(),
+        "c\n"
+    );
+    assert_eq!(fs::read_to_string(wt_path.join(".env")).unwrap(), "X=1\n");
+}
+
+#[test]
+fn copy_falls_back_for_existing_dst_dir() {
+    let (main_dir, wt_dir) = setup_with_safe_full_dir();
+    let wt_path = wt_dir.path().join("linked");
+    fs::create_dir_all(wt_path.join("cfg")).unwrap();
+
+    let output = run_copy(main_dir.path(), &wt_path);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
+    assert!(stderr.contains("copied: cfg/a.conf"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(wt_path.join("cfg/b.conf")).unwrap(),
+        "b\n"
+    );
+}
+
+#[test]
+fn copy_idempotency_with_fast_path() {
+    let (main_dir, wt_dir) = setup_with_safe_full_dir();
+    let wt_path = wt_dir.path().join("linked");
+
+    let first = run_copy(main_dir.path(), &wt_path);
+    assert!(first.status.success());
+    assert!(String::from_utf8_lossy(&first.stderr).contains("copy-dir: cfg (3 files)"));
+
+    let second = run_copy(main_dir.path(), &wt_path);
+    assert!(second.status.success());
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
+    assert!(stderr.contains("4 up-to-date"), "{stderr}");
+}
+
+#[test]
+fn copy_fast_path_does_not_write_missing_tracked_dest_file() {
+    let (main_dir, wt_dir) = setup_with_safe_full_dir();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(&wt_path, "cfg/a.conf", "tracked\n");
+    git(&wt_path, &["add", "-f", "cfg/a.conf"]);
+    git(&wt_path, &["commit", "-m", "track dest cfg file"]);
+    fs::remove_file(wt_path.join("cfg/a.conf")).unwrap();
+
+    let output = run_copy(main_dir.path(), &wt_path);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
+    assert!(stderr.contains("skipped"), "{stderr}");
+    assert!(!wt_path.join("cfg/a.conf").exists());
+    assert_eq!(
+        fs::read_to_string(wt_path.join("cfg/b.conf")).unwrap(),
+        "b\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_fast_path_skips_subtree_with_symlink() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".gitignore", "cfg/\n");
+    write_file(main_dir.path(), ".worktreeinclude", "cfg/\n");
+    write_file(main_dir.path(), "cfg/a.conf", "a\n");
+    std::os::unix::fs::symlink("target", main_dir.path().join("cfg/link.env")).unwrap();
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "symlink fixture"]);
+
+    let output = run_copy(main_dir.path(), &wt_path);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
+    assert!(stderr.contains("skipped"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(wt_path.join("cfg/a.conf")).unwrap(),
+        "a\n"
+    );
+    assert!(!wt_path.join("cfg/link.env").exists());
+}
+
+#[test]
+fn copy_fast_path_does_not_clone_gitlink_contents() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".gitignore", "cfg/\nsafe/\n");
+    write_file(main_dir.path(), ".worktreeinclude", "cfg/\nsafe/\n");
+    write_file(main_dir.path(), "cfg/a.conf", "a\n");
+    write_file(main_dir.path(), "cfg/sub/inner.env", "inner\n");
+    write_file(main_dir.path(), "safe/a.conf", "safe\n");
+    write_file(
+        main_dir.path(),
+        "cfg/sub/.git",
+        "gitdir: ../../.git/modules/sub\n",
+    );
+    git(
+        main_dir.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,1111111111111111111111111111111111111111,cfg/sub",
+        ],
+    );
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "gitlink fixture"]);
+
+    let output = run_copy(main_dir.path(), &wt_path);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(stderr.contains("copy-dir: safe (1 files)"), "{stderr}");
+    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(wt_path.join("cfg/a.conf")).unwrap(),
+        "a\n"
+    );
+    assert!(!wt_path.join("cfg/sub/inner.env").exists());
+}
+
+#[test]
+fn copy_fast_path_does_not_clone_nested_repo_contents() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".gitignore", "cfg/\nsafe/\n");
+    write_file(main_dir.path(), ".worktreeinclude", "cfg/\nsafe/\n");
+    write_file(main_dir.path(), "cfg/a.conf", "a\n");
+    write_file(main_dir.path(), "cfg/nested/inner.env", "inner\n");
+    write_file(main_dir.path(), "safe/a.conf", "safe\n");
+    git(&main_dir.path().join("cfg/nested"), &["init"]);
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "nested repo fixture"]);
+
+    let output = run_copy(main_dir.path(), &wt_path);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(stderr.contains("copy-dir: safe (1 files)"), "{stderr}");
+    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(wt_path.join("cfg/a.conf")).unwrap(),
+        "a\n"
+    );
+    assert!(!wt_path.join("cfg/nested/inner.env").exists());
+}
+
+#[test]
+fn copy_fast_path_does_not_create_empty_dirs() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".gitignore", "cfg/\n");
+    write_file(main_dir.path(), ".worktreeinclude", "cfg/\n");
+    write_file(main_dir.path(), "cfg/a.conf", "a\n");
+    fs::create_dir_all(main_dir.path().join("cfg/empty")).unwrap();
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "empty dir fixture"]);
+
+    let output = run_copy(main_dir.path(), &wt_path);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(wt_path.join("cfg/a.conf")).unwrap(),
+        "a\n"
+    );
+    assert!(!wt_path.join("cfg/empty").exists());
+}
+
+#[test]
+fn copy_fast_path_handles_nested_dir_with_missing_parent() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".gitignore", "outer/\n");
+    write_file(main_dir.path(), ".worktreeinclude", "outer/cfg/\n");
+    write_file(main_dir.path(), "outer/cfg/a.conf", "a\n");
+    write_file(main_dir.path(), "outer/tracked.txt", "tracked\n");
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(
+        main_dir.path(),
+        &["commit", "-m", "nested fast path fixture"],
+    );
+
+    let output = run_copy(main_dir.path(), &wt_path);
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(stderr.contains("copy-dir: outer/cfg (1 files)"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(wt_path.join("outer/cfg/a.conf")).unwrap(),
+        "a\n"
     );
 }

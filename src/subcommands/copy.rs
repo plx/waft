@@ -83,11 +83,14 @@ pub fn run_copy(cli: &Cli, policy: &ResolvedPolicy, args: &CopyArgs) -> Result<(
         return Ok(());
     }
 
+    let gitlinks = git.gitlinks(&ctx.source_root)?;
+    let groups = crate::eligibility_groups::compute(&ctx.source_root, eligible, &gitlinks)?;
+
     // Build plan
     let plan = crate::planner::plan(
         &ctx,
         report,
-        eligible,
+        groups,
         git.as_ref(),
         &fs,
         args.overwrite,
