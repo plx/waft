@@ -160,30 +160,45 @@ impl FileSystem for RealFs {
 
         let normalized_manifest = normalize_manifest(expected_files)?;
         let preflight = preflight_dir_exact(src, &normalized_manifest)?;
+
+        // First try `clonefile` if the source is exact and the strategy
+        // permits. `clonefile` requires a non-existing destination, so we
+        // allocate a unique tempdir and remove the placeholder before the
+        // call. That briefly exposes the name to a symlink race; on any
+        // failure (including a racing symlink causing EEXIST) we abandon
+        // that name entirely and fall through to the streaming path with
+        // a freshly-allocated tempdir, so the fallback never writes into
+        // a path an attacker may have substituted.
+        if preflight.exact && should_try_dir_clone(strategy) {
+            let clone_dir = tempfile::Builder::new()
+                .prefix(".waft-copy-dir-")
+                .tempdir_in(parent)?;
+            let clone_path = clone_dir.keep();
+            fs::remove_dir(&clone_path)?;
+            match crate::sys::clonefile::clonefile_dir(src, &clone_path) {
+                Ok(()) => {
+                    if let Err(e) = fs::rename(&clone_path, dst) {
+                        let _ = remove_dir_all_if_exists(&clone_path);
+                        return Err(e);
+                    }
+                    return Ok(());
+                }
+                Err(_) => {
+                    let _ = remove_dir_all_if_exists(&clone_path);
+                }
+            }
+        }
+
+        // Streaming fallback. The tempdir is created atomically (mkdtemp)
+        // and we never remove it before writing, so we own this path
+        // end-to-end and no symlink race window exists.
         let temp_dir = tempfile::Builder::new()
             .prefix(".waft-copy-dir-")
             .tempdir_in(parent)?;
         let temp_path = temp_dir.keep();
 
         let result = (|| {
-            let mut cloned = false;
-            if preflight.exact && should_try_dir_clone(strategy) {
-                fs::remove_dir(&temp_path)?;
-                match crate::sys::clonefile::clonefile_dir(src, &temp_path) {
-                    Ok(()) => cloned = true,
-                    Err(_) => {
-                        remove_dir_all_if_exists(&temp_path)?;
-                    }
-                }
-            }
-
-            if !cloned {
-                if !temp_path.exists() {
-                    fs::create_dir(&temp_path)?;
-                }
-                self.copy_manifest_to_temp(src, &temp_path, &normalized_manifest, strategy)?;
-            }
-
+            self.copy_manifest_to_temp(src, &temp_path, &normalized_manifest, strategy)?;
             fs::rename(&temp_path, dst)?;
             Ok(())
         })();
