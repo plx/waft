@@ -67,6 +67,9 @@ pub trait GitBackend {
         paths: &[RepoRelPath],
     ) -> Result<HashSet<RepoRelPath>>;
 
+    /// Return registered submodule paths from the index (mode 160000 gitlinks).
+    fn gitlinks(&self, source_root: &Path) -> Result<HashSet<String>>;
+
     /// Batch-check ignore status for the given paths.
     fn check_ignore(
         &self,
@@ -286,6 +289,10 @@ impl GitBackend for GitCli {
             result.insert(RepoRelPath::from_normalized(s.into_owned()));
         }
         Ok(result)
+    }
+
+    fn gitlinks(&self, source_root: &Path) -> Result<HashSet<String>> {
+        read_gitlinks_via_cli(self, source_root)
     }
 
     fn check_ignore(
@@ -523,6 +530,23 @@ impl GitBackend for GitGix {
         }
 
         Ok(tracked)
+    }
+
+    fn gitlinks(&self, source_root: &Path) -> Result<HashSet<String>> {
+        let repo = self.discover_repo(source_root)?;
+        let index = repo.index_or_empty().map_err(|e| Error::Git {
+            message: format!(
+                "gix failed to read index for {}: {e}",
+                source_root.display()
+            ),
+        })?;
+
+        Ok(index
+            .entries()
+            .iter()
+            .filter(|e| e.mode == gix::index::entry::Mode::COMMIT)
+            .map(|e| e.path(&index).to_str_lossy().into_owned())
+            .collect())
     }
 
     fn check_ignore(
@@ -940,52 +964,7 @@ fn is_nested_git_boundary(
     if !entry.file_type().is_dir() {
         return false;
     }
-    if entry.file_name() == ".git" {
-        return true;
-    }
-    if entry.depth() == 0 {
-        return false;
-    }
-    let dot_git = entry.path().join(".git");
-    if dot_git.is_dir() {
-        return true;
-    }
-    // A `.git` *file* with `gitdir: <path>` whose target exists indicates
-    // a linked worktree of the parent repo. `git ls-files` does not
-    // recurse into linked worktrees, and copying their contents would
-    // duplicate state from another worktree's untracked files. Skip.
-    if dot_git.is_file()
-        && let Some(target) = read_dot_git_pointer(&dot_git)
-        && target.exists()
-    {
-        return true;
-    }
-    if let Ok(rel) = RepoRelPath::normalize(entry.path(), source_root)
-        && gitlinks.contains(rel.as_str())
-    {
-        return true;
-    }
-    false
-}
-
-/// Parse the `gitdir: <path>` line from a `.git` pointer file, returning
-/// the absolute target. Returns `None` for malformed or unreadable files.
-fn read_dot_git_pointer(path: &Path) -> Option<PathBuf> {
-    let content = std::fs::read_to_string(path).ok()?;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("gitdir:") {
-            let target = rest.trim();
-            if target.is_empty() {
-                return None;
-            }
-            let candidate = PathBuf::from(target);
-            if candidate.is_absolute() {
-                return Some(candidate);
-            }
-            return path.parent().map(|p| p.join(candidate));
-        }
-    }
-    None
+    crate::walk::is_git_boundary_dir(entry.path(), entry.depth(), source_root, gitlinks)
 }
 
 /// Parse the output of `git worktree list --porcelain -z`.

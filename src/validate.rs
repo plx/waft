@@ -359,6 +359,11 @@ mod tests {
         ) -> Result<HashSet<RepoRelPath>> {
             unimplemented!()
         }
+
+        fn gitlinks(&self, _source_root: &Path) -> Result<HashSet<String>> {
+            unimplemented!()
+        }
+
         fn check_ignore(
             &self,
             _source_root: &Path,

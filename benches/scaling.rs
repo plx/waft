@@ -9,6 +9,7 @@ use std::time::Duration;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use tempfile::TempDir;
 use waft::config::{CopyStrategy, SymlinkPolicy, WorktreeincludeSemantics};
+use waft::eligibility_groups::EligibilityGroups;
 use waft::error::Result as WaftResult;
 use waft::fs::FileSystem;
 use waft::git::{GitBackend, GitGix, IgnoreCheckRecord, WorktreeRecord};
@@ -200,6 +201,10 @@ impl GitBackend for NoConfigGit {
         unreachable!("validation benchmark only reads config")
     }
 
+    fn gitlinks(&self, _source_root: &Path) -> WaftResult<HashSet<String>> {
+        unreachable!("validation benchmark only reads config")
+    }
+
     fn check_ignore(
         &self,
         _source_root: &Path,
@@ -283,6 +288,66 @@ impl PlannerFixture {
     }
 }
 
+struct CopyDirFixture {
+    _tmp: TempDir,
+    ctx: RepoContext,
+    eligible: Vec<RepoRelPath>,
+    fs: BenchFs,
+    git: EmptyTrackedGit,
+}
+
+impl CopyDirFixture {
+    fn safe_tree(files: usize) -> Self {
+        Self::new(files, false)
+    }
+
+    fn blocker_tree(files: usize) -> Self {
+        Self::new(files, true)
+    }
+
+    fn new(files: usize, with_blocker: bool) -> Self {
+        let tmp = TempDir::new().unwrap();
+        let source_root = tmp.path().join("source");
+        let dest_root = tmp.path().join("dest");
+        fs::create_dir_all(&source_root).unwrap();
+        fs::create_dir_all(&dest_root).unwrap();
+
+        let mut source_files = HashSet::new();
+        let mut eligible = Vec::with_capacity(files);
+        for i in 0..files {
+            let rel = format!("cfg/file_{i:05}.env");
+            let abs = source_root.join(&rel);
+            write_file(&abs, "value\n");
+            let path = repo_rel(&source_root, &rel);
+            source_files.insert(path.to_path(&source_root));
+            eligible.push(path);
+        }
+        if with_blocker {
+            write_file(&source_root.join("cfg/sentinel.txt"), "tracked\n");
+        }
+
+        let ctx = RepoContext {
+            source_root: source_root.clone(),
+            dest_root: Some(dest_root),
+            main_worktree: source_root,
+            known_worktrees: Vec::new(),
+            core_ignore_case: false,
+        };
+
+        Self {
+            _tmp: tmp,
+            ctx,
+            eligible,
+            fs: BenchFs {
+                source_files,
+                dest_files: HashSet::new(),
+                symlink_dirs: HashSet::new(),
+            },
+            git: EmptyTrackedGit,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct BenchFs {
     source_files: HashSet<PathBuf>,
@@ -336,6 +401,16 @@ impl FileSystem for BenchFs {
     fn copy_file(&self, _src: &Path, _dst: &Path, _strategy: CopyStrategy) -> io::Result<()> {
         Ok(())
     }
+
+    fn copy_dir_exact(
+        &self,
+        _src: &Path,
+        _dst: &Path,
+        _expected_files: &[PathBuf],
+        _strategy: CopyStrategy,
+    ) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -355,6 +430,10 @@ impl GitBackend for EmptyTrackedGit {
         _source_root: &Path,
         _paths: &[RepoRelPath],
     ) -> WaftResult<HashSet<RepoRelPath>> {
+        Ok(HashSet::new())
+    }
+
+    fn gitlinks(&self, _source_root: &Path) -> WaftResult<HashSet<String>> {
         Ok(HashSet::new())
     }
 
@@ -568,7 +647,7 @@ fn bench_planner(c: &mut Criterion) {
                     let plan = waft::planner::plan(
                         black_box(&fixture.ctx),
                         ValidationReport::default(),
-                        black_box(eligible),
+                        EligibilityGroups::from_files(black_box(eligible)),
                         &fixture.git,
                         &fixture.fs,
                         false,
@@ -593,7 +672,7 @@ fn bench_planner(c: &mut Criterion) {
                     let plan = waft::planner::plan(
                         black_box(&fixture.ctx),
                         ValidationReport::default(),
-                        black_box(eligible),
+                        EligibilityGroups::from_files(black_box(eligible)),
                         &fixture.git,
                         &fixture.fs,
                         false,
@@ -609,6 +688,46 @@ fn bench_planner(c: &mut Criterion) {
     deep.finish();
 }
 
+fn bench_copy_dir_fast_path(c: &mut Criterion) {
+    let fixtures = vec![
+        ("fast-path", CopyDirFixture::safe_tree(2_048)),
+        ("fallback", CopyDirFixture::blocker_tree(2_048)),
+    ];
+
+    let mut group = c.benchmark_group("copy_plan_execute_directory_fast_path");
+    for (case, fixture) in &fixtures {
+        group.throughput(Throughput::Elements(fixture.eligible.len() as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(case), fixture, |b, fixture| {
+            b.iter_batched(
+                || fixture.eligible.clone(),
+                |eligible| {
+                    let groups = waft::eligibility_groups::compute(
+                        black_box(&fixture.ctx.source_root),
+                        black_box(eligible),
+                        black_box(&HashSet::new()),
+                    )
+                    .unwrap();
+                    let plan = waft::planner::plan(
+                        black_box(&fixture.ctx),
+                        ValidationReport::default(),
+                        black_box(groups),
+                        &fixture.git,
+                        &fixture.fs,
+                        false,
+                        false,
+                    )
+                    .unwrap();
+                    let report =
+                        waft::executor::execute(&plan, &fixture.fs, CopyStrategy::SimpleCopy);
+                    black_box((plan.entries.len(), report.copied))
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = criterion_config();
@@ -617,6 +736,7 @@ criterion_group! {
         bench_worktreeinclude_depth,
         bench_candidate_enumeration,
         bench_validation,
-        bench_planner
+        bench_planner,
+        bench_copy_dir_fast_path
 }
 criterion_main!(benches);

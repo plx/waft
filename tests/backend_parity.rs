@@ -2,6 +2,7 @@ use std::path::Path;
 use std::process::{self, Output};
 
 use tempfile::TempDir;
+use waft::git::{GitBackend, GitCli, GitGix};
 
 fn git(dir: &Path, args: &[&str]) {
     let output = process::Command::new("git")
@@ -149,6 +150,27 @@ fn list_skips_nested_git_checkouts_for_both_backends() {
         gix_out, cli_out,
         "list output mismatch between gix and cli backends"
     );
+}
+
+#[test]
+fn gitlinks_parity() {
+    let repo = make_repo();
+    std::fs::create_dir_all(repo.path().join("sub")).unwrap();
+    git(
+        repo.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,1111111111111111111111111111111111111111,sub",
+        ],
+    );
+
+    let gix = GitGix::new().gitlinks(repo.path()).unwrap();
+    let cli = GitCli::new().gitlinks(repo.path()).unwrap();
+
+    assert_eq!(gix, cli);
+    assert!(gix.contains("sub"));
 }
 
 /// Both backends must agree on the all-ignored fallback when no

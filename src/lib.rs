@@ -49,6 +49,7 @@
 pub mod cli;
 pub mod config;
 pub mod context;
+pub mod eligibility_groups;
 pub mod error;
 pub mod executor;
 pub mod fs;
@@ -59,6 +60,8 @@ pub mod planner;
 pub mod policy_filter;
 /// Subcommand argument types and command handlers.
 pub mod subcommands;
+mod sys;
 pub mod validate;
+mod walk;
 pub mod worktreeinclude;
 pub mod worktreeinclude_engine;
