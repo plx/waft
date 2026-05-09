@@ -1,6 +1,17 @@
 build-release:
     cargo build --release
 
+# Wire the tracked hooks/ directory into this clone (per-clone setup;
+# re-run after `git clone` or in any new linked worktree that needs it).
+install-hooks:
+    git config core.hooksPath hooks
+    @echo "core.hooksPath set to hooks/"
+
+# End-to-end self-test: builds the release binary, then drives a scratch
+# git repo through `waft copy` and the post-checkout hook.
+check-self-test: build-release
+    bash scripts/self-test.sh
+
 check-format:
     cargo fmt --check
 
