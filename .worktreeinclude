@@ -1,0 +1,11 @@
+# .worktreeinclude — files waft should copy from the main worktree into
+# linked worktrees. Same syntax as .gitignore. See README.md.
+#
+# Keep this list small and intentional: every match is a file we want
+# carried across when a contributor runs `git worktree add` (and the
+# post-checkout hook fires waft). Files outside this list stay behind.
+
+# Local environment overrides (per-developer secrets, direnv config).
+.env
+.env.*
+.envrc

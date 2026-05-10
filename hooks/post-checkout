@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# post-checkout — when a linked worktree is created via `git worktree add`,
+# run waft from the new worktree to copy in any .worktreeinclude-selected
+# ignored files from the main worktree.
+#
+# Wired via `git config core.hooksPath hooks` (see `just install-hooks`).
+# Vanilla git: no hook manager required.
+
+set -eu
+
+prev_head="${1:-}"
+new_head="${2:-}"
+branch_flag="${3:-0}"
+
+# Only react to branch checkouts (1), not file checkouts (0).
+[ "${branch_flag}" = "1" ] || exit 0
+
+# No-op when nothing changed (e.g. `git checkout` of the current branch).
+[ "${prev_head}" != "${new_head}" ] || exit 0
+
+# Only act inside a linked worktree. In the main worktree, $GIT_DIR equals
+# $GIT_COMMON_DIR; in a linked worktree they differ ($GIT_DIR points at
+# .git/worktrees/<name>).
+git_dir="$(git rev-parse --git-dir)"
+common_dir="$(git rev-parse --git-common-dir)"
+git_dir_abs="$(cd "${git_dir}" && pwd)"
+common_dir_abs="$(cd "${common_dir}" && pwd)"
+[ "${git_dir_abs}" != "${common_dir_abs}" ] || exit 0
+
+# Resolve the waft binary: explicit override wins, then PATH lookup.
+waft_bin="${WAFT:-}"
+if [ -z "${waft_bin}" ]; then
+  if command -v waft >/dev/null 2>&1; then
+    waft_bin="waft"
+  else
+    echo "post-checkout: waft not found on PATH; skipping worktree copy." >&2
+    echo "  install waft or set WAFT=<path-to-binary> to enable." >&2
+    exit 0
+  fi
+fi
+
+exec "${waft_bin}"
