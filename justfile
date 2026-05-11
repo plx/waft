@@ -27,6 +27,26 @@ check-doc-test:
 check-doc-build:
     cargo doc --no-deps
 
+# Regenerate THIRD_PARTY_LICENSES.md from the current Cargo.lock.
+# Run this whenever you add, remove, or update a dependency.
+regen-licenses:
+    cargo about generate -c about.toml -o THIRD_PARTY_LICENSES.md about.hbs
+
+# Fail if THIRD_PARTY_LICENSES.md is out of date relative to Cargo.lock.
+# Mirrors the `licenses` CI job; run locally to debug drift.
+check-licenses:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
+    cargo about generate -c about.toml -o "$tmp" about.hbs
+    if ! diff -u THIRD_PARTY_LICENSES.md "$tmp"; then
+      echo "" >&2
+      echo "THIRD_PARTY_LICENSES.md is out of date." >&2
+      echo "Run 'just regen-licenses' and commit the result." >&2
+      exit 1
+    fi
+
 bench-scaling:
     cargo bench --bench scaling
 
