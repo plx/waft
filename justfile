@@ -35,14 +35,16 @@ regen-licenses:
 # Fail if THIRD_PARTY_LICENSES.md is out of date relative to Cargo.lock.
 # Mirrors the `licenses` CI job; run locally to debug drift.
 check-licenses:
-    @set -euo pipefail; \
-    tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT; \
-    cargo about generate -c about.toml -o "$tmp" about.hbs; \
-    if ! diff -u THIRD_PARTY_LICENSES.md "$tmp"; then \
-      echo "" >&2; \
-      echo "THIRD_PARTY_LICENSES.md is out of date." >&2; \
-      echo "Run 'just regen-licenses' and commit the result." >&2; \
-      exit 1; \
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' EXIT
+    cargo about generate -c about.toml -o "$tmp" about.hbs
+    if ! diff -u THIRD_PARTY_LICENSES.md "$tmp"; then
+      echo "" >&2
+      echo "THIRD_PARTY_LICENSES.md is out of date." >&2
+      echo "Run 'just regen-licenses' and commit the result." >&2
+      exit 1
     fi
 
 bench-scaling:
