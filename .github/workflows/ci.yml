@@ -46,10 +46,25 @@ jobs:
       - name: just check-doc-build
         run: just check-doc-build
 
+  licenses:
+    name: licenses
+    runs-on: ubuntu-latest
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@just
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - uses: Swatinem/rust-cache@v2
+      - name: just check-licenses
+        run: just check-licenses
+
   tests:
     name: ${{ matrix.os }} / tests
     runs-on: ${{ matrix.os }}
-    needs: [fmt, clippy, doc-build]
+    needs: [fmt, clippy, doc-build, licenses]
     strategy:
       fail-fast: false
       matrix:
@@ -67,7 +82,7 @@ jobs:
   self-test:
     name: ${{ matrix.os }} / self-test
     runs-on: ${{ matrix.os }}
-    needs: [fmt, clippy, doc-build]
+    needs: [fmt, clippy, doc-build, licenses]
     strategy:
       fail-fast: false
       matrix:

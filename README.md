@@ -170,4 +170,6 @@ just check-test
 
 ## License
 
-MIT
+MIT (see [LICENSE](LICENSE)). Third-party crate notices are tracked in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md); regenerate with
+`just regen-licenses` after dependency changes (CI enforces this).
