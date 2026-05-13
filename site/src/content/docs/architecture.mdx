@@ -1,0 +1,47 @@
+---
+title: Architecture
+description: How waft plans and executes safe worktree file copies.
+---
+
+`waft` is built around a few invariant design decisions.
+
+## Git is authoritative
+
+`waft` does not reimplement Git's ignore logic for final ignored/tracked
+decisions. Those checks go through the `GitBackend` trait.
+
+- `GitGix` is the default in-process backend built on the `gix` crate.
+- `GitCli` shells out to Git and is selected with `WAFT_GIT_BACKEND=cli`.
+
+Backend parity tests keep both implementations aligned.
+
+## `.worktreeinclude` matching is pluggable
+
+`.worktreeinclude` files use `.gitignore` syntax, but selection is handled by
+`worktreeinclude_engine`. Current engines are:
+
+- `claude-2026-04`, the default root-rule-file behavior.
+- `git`, Git-style per-directory exclude semantics.
+- `wt-0.39`, worktrunk-compatible subtractive behavior.
+
+## Commands plan before executing
+
+All commands follow a read-only planning pipeline before writes are possible.
+
+1. Parse CLI arguments.
+2. Resolve layered policy.
+3. Resolve source and destination worktree context.
+4. Validate ignore files.
+5. Select candidate files.
+6. Apply policy filters.
+7. Confirm ignored status through Git.
+8. Build a copy plan.
+9. Execute only for `copy` without `--dry-run`.
+
+`list`, `info`, and `validate` never enter the execute phase.
+
+## Testing strategy
+
+The test suite combines unit tests, integration tests against real Git repos,
+profile coverage tests, backend parity tests, and differential/property tests
+against a Git oracle for `git` semantics.

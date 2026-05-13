@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>waft Docs Composites Component Reference</title>
+    <link rel="stylesheet" href="../brand/tokens.css">
+    <link rel="stylesheet" href="css/core-actions.components.css">
+    <link rel="stylesheet" href="css/docs-composites.components.css">
+    <style>
+      body {
+        margin: 0;
+        background: var(--color-semantic-background-canvas);
+        color: var(--color-semantic-text-primary);
+        font-family: var(--typography-families-body);
+      }
+
+      .reference-shell {
+        max-width: 1040px;
+        margin-inline: auto;
+        padding: 48px 24px;
+      }
+
+      .reference-stack {
+        display: grid;
+        gap: 24px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="reference-shell">
+      <div class="reference-stack">
+        <article class="component-command component-command--dark">
+          <div class="component-command__header">
+            <span>quick start</span>
+            <button class="component-button component-button--copy component-button--sm component-command__copy" type="button" data-copy-target="#command-lines">Copy</button>
+          </div>
+          <div class="component-command__body" id="command-lines">
+            <div class="component-command__line"><span class="component-command__prompt">$</span> waft copy --dry-run</div>
+            <div class="component-command__line component-command__output">→ would copy 3 files (2.1 KB)</div>
+            <div class="component-command__line"><span class="component-command__prompt">$</span> waft list</div>
+          </div>
+        </article>
+
+        <section class="component-doc-card-grid" aria-label="Documentation cards">
+          <article class="component-doc-card component-doc-card--profile">
+            <p class="component-doc-card__eyebrow">Profile</p>
+            <h2 class="component-doc-card__title">Claude default</h2>
+            <div class="component-doc-card__body">
+              <p>Root `.worktreeinclude` only, matching the out-of-the-box Claude Code behavior.</p>
+            </div>
+            <footer class="component-doc-card__footer">
+              <span class="component-badge component-badge--sync">default</span>
+              <a class="component-link" href="#">Compare</a>
+            </footer>
+          </article>
+          <article class="component-doc-card">
+            <p class="component-doc-card__eyebrow">Format</p>
+            <h2 class="component-doc-card__title">Gitignore syntax</h2>
+            <div class="component-doc-card__body">
+              <p>Use familiar ignore-style patterns, including negations for files that should stay put.</p>
+            </div>
+            <footer class="component-doc-card__footer">
+              <span class="component-badge component-badge--air">wafted</span>
+              <a class="component-link" href="#">Read</a>
+            </footer>
+          </article>
+          <article class="component-doc-card component-doc-card--safety">
+            <p class="component-doc-card__eyebrow">Safety</p>
+            <h2 class="component-doc-card__title">No tracked overwrites</h2>
+            <div class="component-doc-card__body">
+              <p>Destination files are classified before copy execution, and tracked files are protected.</p>
+            </div>
+            <footer class="component-doc-card__footer">
+              <span class="component-badge component-badge--error">guarded</span>
+              <a class="component-link" href="#">Details</a>
+            </footer>
+          </article>
+        </section>
+
+        <ol class="component-step-list">
+          <li class="component-step">
+            <span class="component-step__marker">1</span>
+            <div class="component-step__content">
+              <strong>Create `.worktreeinclude`</strong>
+              <p>Add the ignored files you want copied between linked worktrees.</p>
+            </div>
+          </li>
+          <li class="component-step">
+            <span class="component-step__marker">2</span>
+            <div class="component-step__content">
+              <strong>Preview the plan</strong>
+              <p>Run `waft copy --dry-run` before moving bytes.</p>
+            </div>
+          </li>
+          <li class="component-step">
+            <span class="component-step__marker">3</span>
+            <div class="component-step__content">
+              <strong>Copy safely</strong>
+              <p>Let waft atomically write selected ignored files into the destination.</p>
+            </div>
+          </li>
+        </ol>
+      </div>
+    </main>
+    <script src="js/core-actions.components.js"></script>
+    <script src="js/docs-composites.components.js"></script>
+  </body>
+</html>

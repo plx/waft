@@ -1,0 +1,49 @@
+---
+title: .worktreeinclude
+description: The include file format used by waft.
+---
+
+`.worktreeinclude` uses familiar `.gitignore` syntax to select ignored files
+that `waft` should copy between worktrees.
+
+```text
+# Include environment files
+.env
+*.env.local
+
+# Include all secret keys recursively
+**/*.key
+
+# But not test keys
+!test.key
+```
+
+## Eligibility
+
+A file is eligible for copying only when all of these are true:
+
+1. It exists in the source worktree.
+2. It is a regular file, not a symlink, directory, or special file.
+3. It is selected by the active compatibility profile.
+4. Git confirms it is ignored and untracked.
+5. It is not dropped by the active exclusion set.
+
+## Profile-dependent matching
+
+By default, the `claude` profile only consults the root-level
+`.worktreeinclude`.
+
+Use `--compat-profile git` when you want nested `.worktreeinclude` files to
+compose like nested `.gitignore` files. Use `--compat-profile wt` when you want
+worktrunk-compatible all-ignored behavior.
+
+## Validation
+
+Run:
+
+```sh
+waft validate
+```
+
+Validation parses ignore files before copy execution. Copy planning remains
+read-only until the command enters the execute phase.

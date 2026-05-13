@@ -1,0 +1,298 @@
+---
+import "../styles/waft.css";
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, "");
+const path = (href: string) => `${base}${href}`;
+---
+
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>waft | worktree-aware file tool</title>
+    <meta
+      name="description"
+      content="waft copies .worktreeinclude-selected ignored files between Git worktrees."
+    />
+  </head>
+  <body class="waft-page">
+    <script is:inline>
+      const storedTheme = localStorage.getItem("waft-theme");
+      const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.dataset.theme = storedTheme || (prefersDark ? "dark" : "light");
+    </script>
+
+    <nav class="site-nav" aria-label="Primary">
+      <a class="site-nav__brand" href="#top">waft</a>
+      <div class="site-nav__links">
+        <a href="#overview" aria-current="page">Overview</a>
+        <a href="#usage">Usage</a>
+        <a href="#format">Include Format</a>
+        <a href="#safety">Safety</a>
+        <a href="#profiles">Profiles</a>
+        <a href={path("/usage/")}>Docs</a>
+      </div>
+      <div class="site-nav__actions">
+        <button class="theme-toggle" type="button" aria-label="Toggle dark mode" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 7.5A9 9 0 1 1 12 3Z"></path></svg>
+        </button>
+        <a class="button button--secondary source-button" href="https://github.com/plx/waft">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.9a3.4 3.4 0 0 0-1-2.6c3.1-.3 6.4-1.5 6.4-6.8A5.2 5.2 0 0 0 20 5.1 4.8 4.8 0 0 0 19.9 1S18.7.7 16 2.5a13.4 13.4 0 0 0-7 0C6.3.7 5.1 1 5.1 1A4.8 4.8 0 0 0 5 5.1a5.2 5.2 0 0 0-1.4 3.6c0 5.3 3.3 6.5 6.4 6.8a3.4 3.4 0 0 0-1 2.6V22"></path></svg>
+          GitHub
+        </a>
+        <button class="menu-button" type="button" aria-controls="mobile-nav" aria-expanded="false" aria-label="Open menu">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+        </button>
+      </div>
+      <div class="site-nav__panel" id="mobile-nav">
+        <a href="#overview" aria-current="page">Overview</a>
+        <a href="#usage">Usage</a>
+        <a href="#format">Include Format</a>
+        <a href="#safety">Safety</a>
+        <a href="#profiles">Profiles</a>
+        <a href={path("/usage/")}>Docs</a>
+      </div>
+    </nav>
+
+    <main id="top">
+      <section class="hero" id="overview">
+        <div class="hero__inner">
+          <div class="hero__copy">
+            <p class="eyebrow">worktree-aware file tool</p>
+            <h1>waft</h1>
+            <p class="hero__lead">copies the files Git ignores.</p>
+            <p class="hero__text">
+              Copy <code>.worktreeinclude</code>-selected ignored files between Git worktrees.
+            </p>
+            <p class="hero__aside">A tiny <span>current</span> for the files Git leaves behind.</p>
+
+            <article class="command command--dark" aria-label="Example waft command">
+              <div class="command__header">
+                <span>copy from main to feature</span>
+                <button class="copy-button" type="button" data-copy-target="hero-command-lines">Copy</button>
+              </div>
+              <div class="command__body" id="hero-command-lines">
+                <div><span class="prompt">$</span> waft copy --source ../waft-main --dest .</div>
+                <div>Scanned workspace: /path/to/repo</div>
+                <div>Using profile: claude</div>
+                <div>Matched 3 files from .worktreeinclude</div>
+                <div class="output">Copied 3 files (2.1 KB)</div>
+              </div>
+            </article>
+
+            <div class="benefit-strip" aria-label="Key benefits">
+              <span><span class="dot dot--sync"></span>Fast and safe by default</span>
+              <span><span class="air-mark" aria-hidden="true"></span>Air-tight ignore respect</span>
+              <span><span class="dot dot--air"></span>Worktree state in sync</span>
+            </div>
+          </div>
+
+          <div class="hero__visual">
+            <div class="waft-art" aria-hidden="true">
+              <svg viewBox="0 0 520 360">
+                <path class="air air--teal" d="M82 64c42-22 78 12 120-10M106 91c32-15 64 8 96-6M318 270c42-28 82 10 124-16M340 296c28-14 58 6 92-8" />
+                <path class="air air--amber" d="M336 110c38-22 68 8 104-10M356 135c28-12 52 4 80-7" />
+                <g class="file-card" transform="translate(120 126)">
+                  <path d="M0 0h72l34 34v112H0z"></path>
+                  <path d="M72 0v34h34"></path>
+                  <path d="M24 70h58M24 92h42M24 114h50"></path>
+                  <text x="53" y="170">main</text>
+                </g>
+                <path class="transfer" d="M246 202h92"></path>
+                <path class="transfer-head" d="m332 190 14 12-14 12"></path>
+                <g class="file-card" transform="translate(362 126)">
+                  <path d="M0 0h72l34 34v112H0z"></path>
+                  <path d="M72 0v34h34"></path>
+                  <path d="M24 70h58M24 92h42M24 114h50"></path>
+                  <text x="46" y="170">feature</text>
+                </g>
+              </svg>
+            </div>
+
+            <aside class="transfer-panel" aria-label="Files waft can copy">
+              <h2>What moves?</h2>
+              <p>Ignored, untracked files selected by your include rules.</p>
+              <div class="transfer-list">
+                <span>.env.local</span>
+                <span>target/.cache/</span>
+                <span>.idea/</span>
+                <span>logs/</span>
+              </div>
+              <div class="transfer-rule">
+                <strong>Never:</strong>
+                <span>tracked files, symlink traversals, or surprise overwrites.</span>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="docs-band" id="usage">
+        <div class="docs-grid">
+          <article class="docs-panel">
+            <div class="section-title"><span>01</span><h2>Quick start</h2></div>
+            <ol class="step-list">
+              <li><span>1</span><p>Add a <code>.worktreeinclude</code> file to your repo.</p></li>
+              <li><span>2</span><p>Choose a profile, or accept the default.</p></li>
+              <li><span>3</span><p>Preview what would be copied.</p></li>
+              <li><span>4</span><p>Run the copy command.</p></li>
+              <li><span>5</span><p>Files appear in your other worktree.</p></li>
+            </ol>
+            <pre class="mini-command"><code>$ waft copy --source ../waft-main --dest . \
+    --compat-profile claude --dry-run
+
+# Preview matched files</code></pre>
+            <pre class="mini-command"><code>$ waft copy --source ../waft-main --dest .
+Copied 3 files (2.1 KB)</code></pre>
+            <a class="text-link" href={path("/usage/")}>See full usage -></a>
+          </article>
+
+          <article class="docs-panel" id="format">
+            <div class="section-title"><span>02</span><h2>.worktreeinclude format</h2></div>
+            <p>A simple, gitignore-like file with a few extras for safety.</p>
+            <pre class="format-block"><code># Copy local dev files between worktrees
+.env.local
+target/.cache/
+.idea/
+
+# Don't copy secrets
+!secrets.env
+
+# Negate a previous pattern
+!*.env.example
+
+# Trailing slashes match directories
+logs/</code></pre>
+            <a class="button button--secondary" href={path("/worktreeinclude/")}>See full format reference</a>
+          </article>
+
+          <article class="docs-panel" id="safety">
+            <div class="section-title"><span>03</span><h2>Safety guarantees</h2></div>
+            <div class="safety-list">
+              <div class="safety-item"><span>A</span><div><strong>Preview first</strong><p>Use <code>--dry-run</code> to see exactly what will be copied.</p></div></div>
+              <div class="safety-item"><span>B</span><div><strong>Path validation</strong><p>All paths are validated and kept inside the repo.</p></div></div>
+              <div class="safety-item"><span>C</span><div><strong>Never copies tracked files</strong><p>waft respects <code>.gitignore</code> and will not copy Git-tracked files.</p></div></div>
+              <div class="safety-item"><span>D</span><div><strong>Clear overwrite behavior</strong><p>Existing files are preserved by default. Use <code>--overwrite</code> to replace.</p></div></div>
+            </div>
+            <a class="text-link" href={path("/safety/")}>Read the safety model -></a>
+          </article>
+        </div>
+      </section>
+
+      <section class="profiles-section" id="profiles">
+        <div class="section-inner">
+          <div class="profiles-heading">
+            <div class="section-title"><span>04</span><h2>Compatibility profiles</h2></div>
+            <p>Built-in defaults tuned for common toolchains.</p>
+            <a class="button button--secondary" href={path("/profiles/")}>See all profiles</a>
+          </div>
+
+          <div class="card-grid">
+            <article class="doc-card doc-card--profile">
+              <p class="card-eyebrow">Default</p>
+              <h3>claude</h3>
+              <p>Optimized for Claude Code and similar AI agents. Keeps sessions, caches, and local context in sync.</p>
+              <div class="tag-list"><span>.claude/</span><span>.env.local</span><span>History</span><span>Cache</span></div>
+              <footer><code>$ waft copy --compat-profile claude</code><a href={path("/profiles/#claude")}>-></a></footer>
+            </article>
+            <article class="doc-card doc-card--profile">
+              <p class="card-eyebrow">Git-centric</p>
+              <h3>git</h3>
+              <p>Generic developer tools and Git helpers. Works across editors and CLI tools.</p>
+              <div class="tag-list"><span>.gitconfig.local</span><span>lazygit/</span><span>tigrc</span><span>gh/</span></div>
+              <footer><code>$ waft copy --compat-profile git</code><a href={path("/profiles/#git")}>-></a></footer>
+            </article>
+            <article class="doc-card">
+              <p class="card-eyebrow">Worktree-first</p>
+              <h3>wt</h3>
+              <p>Focus on worktree-local build and run artifacts. Useful when compiled languages leave state behind.</p>
+              <div class="tag-list"><span>target/</span><span>build/</span><span>out/</span><span>.cache/</span></div>
+              <footer><code>$ waft copy --compat-profile wt</code><a href={path("/profiles/#wt")}>-></a></footer>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="terminal-footer">
+      <div class="terminal-footer__inner">
+        <div class="footer-blurb">
+          <h2>waft <span>is a small Rust CLI for keeping ignored worktree state in sync.</span></h2>
+          <p>It copies the files Git ignores, nothing more, nothing less.</p>
+          <p>MIT License / Rust 1.70+</p>
+        </div>
+        <div class="footer-links">
+          <div><h3>Docs</h3><a href={path("/usage/")}>Usage</a><a href={path("/worktreeinclude/")}>Include Format</a><a href={path("/safety/")}>Safety Model</a></div>
+          <div><h3>Resources</h3><a href="https://github.com/plx/waft">GitHub</a><a href={path("/architecture/")}>Architecture</a><a href={path("/configuration/")}>Configuration</a></div>
+          <div><h3>Community</h3><a href="https://github.com/plx/waft">Source</a><a href="https://crates.io/">Crates.io</a></div>
+        </div>
+        <article class="command command--dark footer-command">
+          <div class="command__header">
+            <span>doctor</span>
+            <button class="copy-button" type="button" data-copy-target="doctor-command">Copy</button>
+          </div>
+          <div class="command__body" id="doctor-command">
+            <div><span class="prompt">$</span> waft doctor</div>
+            <div>Found 3 profiles</div>
+            <div>- claude (active)</div>
+            <div>- git</div>
+            <div>- wt</div>
+            <div class="output">All good.</div>
+          </div>
+        </article>
+      </div>
+      <div class="footer-current">
+        <span>Air currents move what matters.</span>
+        <span class="current-line" aria-hidden="true"></span>
+        <span>Keep your worktrees fresh.</span>
+        <a href="#top">Back to top</a>
+      </div>
+    </footer>
+
+    <script>
+      const root = document.documentElement;
+      const nav = document.querySelector<HTMLElement>(".site-nav");
+      const menu = document.querySelector<HTMLButtonElement>(".menu-button");
+      const themeToggle = document.querySelector<HTMLButtonElement>(".theme-toggle");
+
+      function syncThemeButton() {
+        themeToggle?.setAttribute("aria-pressed", String(root.dataset.theme === "dark"));
+      }
+
+      syncThemeButton();
+
+      menu?.addEventListener("click", () => {
+        const isOpen = nav?.dataset.open === "true";
+        nav?.setAttribute("data-open", String(!isOpen));
+        menu.setAttribute("aria-expanded", String(!isOpen));
+      });
+
+      themeToggle?.addEventListener("click", () => {
+        const next = root.dataset.theme === "dark" ? "light" : "dark";
+        root.dataset.theme = next;
+        localStorage.setItem("waft-theme", next);
+        syncThemeButton();
+      });
+
+      document.querySelectorAll<HTMLButtonElement>("[data-copy-target]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const targetId = button.getAttribute("data-copy-target");
+          if (!targetId) return;
+
+          const target = document.getElementById(targetId);
+          const original = button.textContent || "Copy";
+          try {
+            await navigator.clipboard?.writeText(target?.textContent?.trim() || "");
+            button.textContent = "Copied";
+          } catch {
+            button.textContent = "Copy";
+          }
+          window.setTimeout(() => {
+            button.textContent = original;
+          }, 1200);
+        });
+      });
+    </script>
+  </body>
+</html>
