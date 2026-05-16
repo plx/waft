@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>waft Navigation Layout Component Reference</title>
+    <link rel="stylesheet" href="../brand/tokens.css">
+    <link rel="stylesheet" href="css/core-actions.components.css">
+    <link rel="stylesheet" href="css/navigation-layout.components.css">
+    <style>
+      body {
+        min-height: 100vh;
+        margin: 0;
+        background: var(--color-semantic-background-canvas);
+        color: var(--color-semantic-text-primary);
+        font-family: var(--typography-families-body);
+      }
+
+      .reference-spacer {
+        height: 28px;
+      }
+
+      .reference-panel {
+        border: 1px dashed var(--color-semantic-border-default);
+        border-radius: var(--radius-md);
+        padding: 20px;
+        background: var(--color-semantic-background-surface);
+      }
+    </style>
+  </head>
+  <body>
+    <nav class="component-site-nav" aria-label="Primary">
+      <a class="component-site-nav__brand" href="#">waft</a>
+      <div class="component-site-nav__links">
+        <a class="component-site-nav__link" href="#" aria-current="page">Overview</a>
+        <a class="component-site-nav__link" href="#">Quick start</a>
+        <a class="component-site-nav__link" href="#">Safety</a>
+      </div>
+      <div class="component-site-nav__actions">
+        <button class="component-theme-toggle" type="button" aria-label="Toggle theme" aria-pressed="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 7.5A9 9 0 1 1 12 3Z"/></svg>
+        </button>
+        <button class="component-site-nav__menu-button" type="button" aria-controls="nav-panel-closed" aria-expanded="false" aria-label="Open menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+      </div>
+      <div class="component-site-nav__panel" id="nav-panel-closed">
+        <a class="component-site-nav__link" href="#" aria-current="page">Overview</a>
+        <a class="component-site-nav__link" href="#">Quick start</a>
+        <a class="component-site-nav__link" href="#">Safety</a>
+      </div>
+    </nav>
+
+    <div class="reference-spacer"></div>
+
+    <nav class="component-site-nav" aria-label="Open mobile example" data-open="true">
+      <a class="component-site-nav__brand" href="#">waft</a>
+      <div class="component-site-nav__links">
+        <a class="component-site-nav__link" href="#" aria-current="page">Overview</a>
+        <a class="component-site-nav__link" href="#">Quick start</a>
+      </div>
+      <div class="component-site-nav__actions">
+        <button class="component-theme-toggle" type="button" aria-label="Toggle theme" aria-pressed="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 7.5A9 9 0 1 1 12 3Z"/></svg>
+        </button>
+        <button class="component-site-nav__menu-button" type="button" aria-controls="nav-panel-open" aria-expanded="true" aria-label="Close menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+      </div>
+      <div class="component-site-nav__panel" id="nav-panel-open">
+        <a class="component-site-nav__link" href="#" aria-current="page">Overview</a>
+        <a class="component-site-nav__link" href="#">Quick start</a>
+        <a class="component-site-nav__link" href="#">Format</a>
+        <a class="component-site-nav__link" href="#">Profiles</a>
+        <a class="component-site-nav__link" href="#">Safety</a>
+      </div>
+    </nav>
+
+    <section class="component-section">
+      <div class="component-section__inner">
+        <div class="reference-panel">
+          <h1>Section shell</h1>
+          <p>Compact vertical rhythm with a constrained inner width and no document-level overflow.</p>
+          <a class="component-button component-button--primary" href="#">Primary action</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="component-section component-section--subtle">
+      <div class="component-section__inner">
+        <div class="reference-panel">
+          <h2>Subtle section band</h2>
+          <p>Used for documentation examples or profile comparison sections.</p>
+        </div>
+      </div>
+    </section>
+
+    <footer class="component-footer">
+      <div class="component-footer__inner">
+        <span>MIT licensed utility for Git worktrees.</span>
+        <div class="component-footer__links">
+          <a class="component-footer__link" href="#">Docs</a>
+          <a class="component-footer__link" href="#">Source</a>
+          <a class="component-footer__link" href="#">Crates</a>
+        </div>
+      </div>
+    </footer>
+    <script src="js/navigation-layout.components.js"></script>
+  </body>
+</html>

@@ -1,0 +1,572 @@
+{
+  "meta": {
+    "system_name": "waft Landing Page",
+    "platform": "web",
+    "version": "1.0.0",
+    "status": "approved",
+    "source_mode": "greenfield",
+    "created_at": "2026-05-10T17:12:44Z",
+    "last_updated_at": "2026-05-10T17:12:44Z",
+    "notes": "Derived from inspected Maquette brand board v1. The board uses neutral CLI-doc labels and does not define a logo or wordmark."
+  },
+  "brief": {
+    "product_summary": "A small Rust CLI that copies .worktreeinclude-selected ignored files between Git worktrees.",
+    "audience": "Software developers who already understand Git worktrees, .gitignore syntax, CLI tooling, and local development configuration.",
+    "tone": [
+      "clean",
+      "developer-focused",
+      "precise",
+      "dryly humorous",
+      "trustworthy"
+    ],
+    "keywords": [
+      "worktrees",
+      "ignored files",
+      "CLI",
+      "copy",
+      "dry-run",
+      "safety"
+    ],
+    "constraints": [
+      "No generated logo, wordmark, mascot, app icon, badge, seal, monogram, or trademark-like brand mark in the brand kit.",
+      "Support light and dark modes.",
+      "Use the odor/air-current joke sparingly so the page remains useful documentation.",
+      "Keep hierarchy compact enough that quick-start documentation is visible early."
+    ],
+    "accessibility": {
+      "contrast_target": "AA",
+      "reduced_motion_support": true,
+      "focus_visibility": "high-contrast",
+      "min_hit_target_px": 40,
+      "notes": "Interactive controls need visible focus rings, readable states in light and dark mode, and no reliance on color alone."
+    }
+  },
+  "references": [
+    {
+      "kind": "brand-board",
+      "path": ".maquette/brand/brand-board-v1.png",
+      "role": "primary",
+      "notes": "Approved by the user on 2026-05-10."
+    }
+  ],
+  "tokens": {
+    "color": {
+      "palette": {
+        "brand": {
+          "100": "#DFF5F1",
+          "300": "#8FD7CC",
+          "500": "#16A085",
+          "700": "#0F6E61",
+          "900": "#073B36"
+        },
+        "neutral": {
+          "50": "#FAF8F3",
+          "100": "#F3F5F7",
+          "200": "#E2E5E9",
+          "300": "#C8CDD3",
+          "500": "#6B7280",
+          "700": "#2C333A",
+          "900": "#1F2328"
+        },
+        "accent": {
+          "100": "#FFF8C9",
+          "300": "#EFE06A",
+          "500": "#D6C24A",
+          "700": "#8F7D18",
+          "900": "#463C09"
+        },
+        "success": {
+          "100": "#DFF5F1",
+          "500": "#16A085",
+          "700": "#0F6E61"
+        },
+        "warning": {
+          "100": "#FFF8C9",
+          "500": "#D6C24A",
+          "700": "#8F7D18"
+        },
+        "danger": {
+          "100": "#FCE4E4",
+          "500": "#D64545",
+          "700": "#A22D2D"
+        },
+        "info": {
+          "100": "#E4F4F7",
+          "500": "#4A9CAB",
+          "700": "#2E6973"
+        }
+      },
+      "semantic": {
+        "background": {
+          "canvas": "#FAF8F3",
+          "surface": "#FFFFFF",
+          "subtle": "#F3F5F7",
+          "elevated": "#FFFFFF",
+          "inverse": "#1F2328",
+          "inverse_surface": "#2C333A",
+          "code": "#151A1F",
+          "dark_canvas": "#11161B",
+          "dark_surface": "#1A2026"
+        },
+        "text": {
+          "primary": "#1F2328",
+          "secondary": "#3D4650",
+          "muted": "#6B7280",
+          "inverse": "#F8FAFC",
+          "link": "#0F6E61",
+          "link_hover": "#16A085",
+          "code": "#D6FFF4",
+          "danger": "#A22D2D"
+        },
+        "border": {
+          "subtle": "#E2E5E9",
+          "default": "#C8CDD3",
+          "strong": "#98A0AA",
+          "inverse": "rgba(248,250,252,0.18)"
+        },
+        "action": {
+          "primary_bg": "#16A085",
+          "primary_text": "#FFFFFF",
+          "secondary_bg": "#FFFFFF",
+          "secondary_text": "#0F6E61",
+          "accent_bg": "#D6C24A",
+          "accent_text": "#1F2328",
+          "ghost_bg": "transparent",
+          "ghost_text": "#1F2328",
+          "danger_bg": "#D64545",
+          "danger_text": "#FFFFFF"
+        },
+        "feedback": {
+          "success_bg": "#DFF5F1",
+          "success_text": "#0F6E61",
+          "warning_bg": "#FFF8C9",
+          "warning_text": "#8F7D18",
+          "danger_bg": "#FCE4E4",
+          "danger_text": "#A22D2D",
+          "info_bg": "#E4F4F7",
+          "info_text": "#2E6973"
+        },
+        "state_overlay": {
+          "hover": "rgba(22,160,133,0.08)",
+          "active": "rgba(22,160,133,0.14)",
+          "selected": "rgba(22,160,133,0.12)",
+          "disabled": "rgba(31,35,40,0.14)"
+        },
+        "focus_ring": {
+          "default": "rgba(22,160,133,0.46)",
+          "danger": "rgba(214,69,69,0.38)"
+        }
+      }
+    },
+    "typography": {
+      "families": {
+        "body": "\"Inter\", system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+        "heading": "\"Inter\", system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+        "mono": "\"JetBrains Mono\", \"SFMono-Regular\", Consolas, \"Liberation Mono\", ui-monospace, monospace"
+      },
+      "weights": {
+        "regular": 400,
+        "medium": 500,
+        "semibold": 600,
+        "bold": 700
+      },
+      "scale": {
+        "xs": {
+          "font_size": "0.75rem",
+          "line_height": 1.45,
+          "letter_spacing": "0em"
+        },
+        "sm": {
+          "font_size": "0.875rem",
+          "line_height": 1.45,
+          "letter_spacing": "0em"
+        },
+        "md": {
+          "font_size": "1rem",
+          "line_height": 1.5,
+          "letter_spacing": "0em"
+        },
+        "lg": {
+          "font_size": "1.125rem",
+          "line_height": 1.5,
+          "letter_spacing": "0em"
+        },
+        "xl": {
+          "font_size": "1.25rem",
+          "line_height": 1.35,
+          "letter_spacing": "0em",
+          "font_weight": 600
+        },
+        "2xl": {
+          "font_size": "1.5rem",
+          "line_height": 1.3,
+          "letter_spacing": "0em",
+          "font_weight": 600
+        },
+        "3xl": {
+          "font_size": "2rem",
+          "line_height": 1.2,
+          "letter_spacing": "0em",
+          "font_weight": 700
+        },
+        "4xl": {
+          "font_size": "3rem",
+          "line_height": 1.08,
+          "letter_spacing": "0em",
+          "font_weight": 700
+        }
+      },
+      "usage": {
+        "body": "md",
+        "label": "sm",
+        "code": "sm",
+        "h1": "4xl",
+        "h2": "3xl",
+        "h3": "2xl",
+        "h4": "xl",
+        "h5": "lg",
+        "h6": "md"
+      },
+      "font_strategy": {
+        "heading_personality": "Large, quiet, system-sans developer documentation headings: strong but not poster-like.",
+        "body_personality": "Neutral UI prose with high readability for docs and code-adjacent explanation.",
+        "preferred_heading_fonts": "Inter, system-ui, or Source Sans 3",
+        "preferred_body_fonts": "Inter, system-ui, or Source Sans 3",
+        "css_fallback_stacks": "heading/body = \"Inter\", system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif | mono = \"JetBrains Mono\", \"SFMono-Regular\", Consolas, \"Liberation Mono\", ui-monospace, monospace",
+        "fallback_rationale": "The board names Inter for prose and JetBrains Mono for code. System fallbacks keep the static page self-contained when external font loading is unavailable.",
+        "avoid_fonts": "Do not use Impact or novelty odor-themed type."
+      }
+    },
+    "space": {
+      "base": "4px",
+      "scale": {
+        "0": "0px",
+        "1": "4px",
+        "2": "8px",
+        "3": "12px",
+        "4": "16px",
+        "5": "20px",
+        "6": "24px",
+        "8": "32px",
+        "10": "40px",
+        "12": "48px",
+        "14": "56px",
+        "16": "64px",
+        "20": "80px",
+        "24": "96px"
+      }
+    },
+    "radius": {
+      "none": "0px",
+      "xs": "2px",
+      "sm": "4px",
+      "md": "8px",
+      "lg": "12px",
+      "xl": "16px",
+      "pill": "999px"
+    },
+    "border": {
+      "width": {
+        "thin": "1px",
+        "medium": "2px"
+      },
+      "style": "solid",
+      "focus_ring": {
+        "width": "2px",
+        "offset": "2px",
+        "radius_strategy": "component+4px"
+      }
+    },
+    "shadow": {
+      "xs": "0 1px 2px rgba(16,24,40,0.06)",
+      "sm": "0 2px 8px rgba(16,24,40,0.08)",
+      "md": "0 4px 12px rgba(16,24,40,0.08)",
+      "focus": "0 0 0 4px rgba(22,160,133,0.18)"
+    },
+    "motion": {
+      "duration": {
+        "fast": "120ms",
+        "normal": "180ms",
+        "slow": "260ms"
+      },
+      "easing": {
+        "standard": "cubic-bezier(0.2,0,0,1)",
+        "exit": "cubic-bezier(0.4,0,1,1)"
+      },
+      "reduced_motion": {
+        "enabled": true,
+        "strategy": "disable decorative air-current motion and preserve instant state changes"
+      }
+    },
+    "layout": {
+      "content_width": {
+        "narrow": "42rem",
+        "standard": "72rem",
+        "wide": "86rem"
+      },
+      "grid": {
+        "columns": 12,
+        "gutter": "24px",
+        "margin_inline": "24px"
+      },
+      "breakpoints": {
+        "sm": "40rem",
+        "md": "48rem",
+        "lg": "64rem",
+        "xl": "80rem"
+      }
+    },
+    "opacity": {
+      "disabled": 0.5,
+      "subdued": 0.72,
+      "overlay": 0.64
+    }
+  },
+  "components_required": [
+    {
+      "name": "button",
+      "category": "form",
+      "priority": "core",
+      "must_implement": true,
+      "variants": [
+        "primary",
+        "secondary",
+        "ghost",
+        "copy"
+      ],
+      "sizes": [
+        "sm",
+        "md"
+      ],
+      "states": [
+        "default",
+        "hover",
+        "focus-visible",
+        "active",
+        "disabled"
+      ],
+      "anatomy": [
+        "container",
+        "label",
+        "leading-icon",
+        "trailing-icon"
+      ],
+      "recipe": {
+        "height": {
+          "sm": "36px",
+          "md": "44px"
+        },
+        "padding_inline": {
+          "sm": "12px",
+          "md": "16px"
+        },
+        "radius": "var(--radius-md)",
+        "border_width": "var(--border-width-thin)",
+        "shadow": "var(--shadow-xs)",
+        "transition": "background-color var(--motion-duration-fast) var(--motion-easing-standard), border-color var(--motion-duration-fast) var(--motion-easing-standard), box-shadow var(--motion-duration-fast) var(--motion-easing-standard)",
+        "background": {
+          "default": "var(--color-semantic-action-primary-bg)",
+          "hover": "color-mix(in srgb, var(--color-semantic-action-primary-bg) 92%, black 8%)",
+          "active": "color-mix(in srgb, var(--color-semantic-action-primary-bg) 86%, black 14%)",
+          "disabled": "var(--color-semantic-state-overlay-disabled)"
+        },
+        "text": {
+          "default": "var(--color-semantic-action-primary-text)",
+          "disabled": "var(--color-semantic-text-muted)"
+        },
+        "border": {
+          "default": "transparent",
+          "focus-visible": "var(--color-semantic-focus-ring-default)"
+        },
+        "notes": "Buttons are compact, icon-capable, and documentation-oriented rather than marketing-heavy."
+      },
+      "notes": "Used for install/source/docs actions and copy-command controls."
+    },
+    {
+      "name": "responsive-navigation",
+      "category": "navigation",
+      "priority": "core",
+      "must_implement": true,
+      "variants": [
+        "desktop-inline",
+        "tablet-collapsed",
+        "mobile-expanded"
+      ],
+      "sizes": [
+        "md"
+      ],
+      "states": [
+        "default",
+        "hover",
+        "focus-visible",
+        "active",
+        "open"
+      ],
+      "anatomy": [
+        "shell",
+        "text-brand",
+        "links",
+        "theme-toggle",
+        "menu-button",
+        "mobile-panel"
+      ],
+      "recipe": {
+        "height": {
+          "md": "64px"
+        },
+        "padding_inline": {
+          "md": "24px"
+        },
+        "radius": "var(--radius-md)",
+        "border_width": "var(--border-width-thin)",
+        "shadow": "none",
+        "transition": "background-color var(--motion-duration-fast) var(--motion-easing-standard), border-color var(--motion-duration-fast) var(--motion-easing-standard)",
+        "background": {
+          "default": "color-mix(in srgb, var(--color-semantic-background-canvas) 88%, transparent)",
+          "open": "var(--color-semantic-background-surface)"
+        },
+        "text": {
+          "default": "var(--color-semantic-text-primary)",
+          "muted": "var(--color-semantic-text-muted)"
+        },
+        "border": {
+          "default": "var(--color-semantic-border-subtle)",
+          "focus-visible": "var(--color-semantic-focus-ring-default)"
+        },
+        "notes": "Desktop links stay inline; tablet and mobile use an accessible menu button and stacked panel."
+      },
+      "notes": "The page has global navigation, so responsive nav coverage is required before page implementation."
+    },
+    {
+      "name": "command-block",
+      "category": "data-display",
+      "priority": "core",
+      "must_implement": true,
+      "variants": [
+        "single",
+        "sequence",
+        "dry-run",
+        "dark"
+      ],
+      "sizes": [
+        "md"
+      ],
+      "states": [
+        "default",
+        "hover",
+        "focus-visible",
+        "selected"
+      ],
+      "anatomy": [
+        "shell",
+        "prompt",
+        "command",
+        "output",
+        "copy-action",
+        "caption"
+      ],
+      "recipe": {
+        "height": {
+          "md": "auto"
+        },
+        "padding_inline": {
+          "md": "16px"
+        },
+        "radius": "var(--radius-md)",
+        "border_width": "var(--border-width-thin)",
+        "shadow": "var(--shadow-sm)",
+        "transition": "border-color var(--motion-duration-fast) var(--motion-easing-standard), box-shadow var(--motion-duration-fast) var(--motion-easing-standard)",
+        "background": {
+          "default": "var(--color-semantic-background-code)",
+          "surface": "var(--color-semantic-background-inverse)"
+        },
+        "text": {
+          "default": "var(--color-semantic-text-code)",
+          "muted": "rgba(214,255,244,0.66)",
+          "success": "var(--color-palette-brand-300)"
+        },
+        "border": {
+          "default": "var(--color-semantic-border-inverse)",
+          "focus-visible": "var(--color-semantic-focus-ring-default)"
+        },
+        "notes": "Command blocks are first-class docs components with copy affordances and wrapped output on small screens."
+      },
+      "notes": "Critical for quick start and .worktreeinclude examples."
+    },
+    {
+      "name": "content-card",
+      "category": "layout",
+      "priority": "core",
+      "must_implement": true,
+      "variants": [
+        "feature",
+        "safety",
+        "profile",
+        "step"
+      ],
+      "sizes": [
+        "md"
+      ],
+      "states": [
+        "default",
+        "hover",
+        "focus-visible"
+      ],
+      "anatomy": [
+        "eyebrow",
+        "heading",
+        "body",
+        "icon",
+        "footer"
+      ],
+      "recipe": {
+        "height": {
+          "md": "100%"
+        },
+        "padding_inline": {
+          "md": "20px"
+        },
+        "radius": "var(--radius-md)",
+        "border_width": "var(--border-width-thin)",
+        "shadow": "var(--shadow-xs)",
+        "transition": "border-color var(--motion-duration-fast) var(--motion-easing-standard), box-shadow var(--motion-duration-fast) var(--motion-easing-standard)",
+        "background": {
+          "default": "var(--color-semantic-background-surface)",
+          "subtle": "var(--color-semantic-background-subtle)"
+        },
+        "text": {
+          "default": "var(--color-semantic-text-primary)",
+          "muted": "var(--color-semantic-text-muted)"
+        },
+        "border": {
+          "default": "var(--color-semantic-border-subtle)",
+          "hover": "var(--color-semantic-border-default)"
+        },
+        "notes": "Cards stay compact, square-cornered enough for developer docs, and equal-height when repeated."
+      },
+      "notes": "Used for feature, safety, and compatibility profile sections."
+    }
+  ],
+  "board": {
+    "must_show": [
+      "Palette swatches with background, surface, text, muted, border, sync accent, air note, and error roles",
+      "Typography direction using Inter/system UI for prose and JetBrains Mono/ui-monospace for CLI examples",
+      "4px spacing rhythm with compact documentation hierarchy",
+      "2px, 4px, and 8px radius guidance",
+      "Subtle 1px borders, low elevation, and calm surfaces",
+      "Default, hover, focus, selected, disabled, and error interaction principles",
+      "Light and dark surface samples",
+      "Subtle air-current and dotted transfer motifs"
+    ],
+    "spec_panel_sections": [
+      "Palette",
+      "Typography",
+      "Spacing Rhythm",
+      "Radius Scale",
+      "Borders, Elevation & Surfaces",
+      "Interaction Principles",
+      "Light & Dark Mode Surfaces"
+    ],
+    "notes": "The board is approved as visual-system direction only. It intentionally avoids a logo or detailed component inventory."
+  }
+}

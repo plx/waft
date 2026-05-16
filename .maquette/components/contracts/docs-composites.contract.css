@@ -1,0 +1,128 @@
+/* Transcribed from component-sheet-docs-composites-css-contract-v2.png.
+   v1 was rejected. Values are normalized to approved waft brand tokens. */
+
+.component-command {
+  position: relative;
+  display: grid;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  font-family: var(--typography-families-mono);
+  font-size: 14px;
+  line-height: 1.55;
+  /* wrap lines; prevent horizontal page overflow */
+}
+
+.component-command--dark {
+  background: var(--color-semantic-background-code);
+  color: var(--color-semantic-text-inverse);
+  border: var(--border-width-thin) var(--border-style) var(--color-semantic-border-inverse);
+}
+
+.component-command__header {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.component-command__body {
+  padding: 12px;
+  display: grid;
+  gap: var(--space-scale-1);
+}
+
+.component-command__line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.component-command__prompt {
+  color: var(--color-semantic-action-primary-bg);
+}
+
+.component-command__output {
+  color: var(--color-palette-accent-500);
+}
+
+.component-command__copy {
+  position: absolute;
+  inset-block-start: 6px;
+  inset-inline-end: 6px;
+  /* copy control sits in header corner */
+}
+
+.component-doc-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding: var(--space-scale-4);
+  border: var(--border-width-thin) var(--border-style) var(--color-semantic-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-semantic-background-surface);
+  color: var(--color-semantic-text-primary);
+  box-shadow: var(--shadow-xs);
+  /* hover/focus: teal ring; border darkens */
+}
+
+.component-doc-card__eyebrow {
+  color: var(--color-semantic-action-primary-bg);
+  font-size: 11px;
+}
+
+.component-doc-card__title {
+  margin-block: 6px 8px;
+  color: var(--color-semantic-text-primary);
+}
+
+.component-doc-card__body {
+  color: var(--color-semantic-text-secondary);
+  min-width: 0;
+}
+
+.component-doc-card__footer {
+  margin-top: auto;
+  padding-top: 12px;
+  display: flex;
+  gap: var(--space-scale-2);
+  /* action row pinned to bottom */
+}
+
+.component-doc-card--safety {
+  border-color: var(--color-semantic-feedback-danger-text);
+}
+
+.component-doc-card--profile {
+  border-color: var(--color-semantic-action-primary-bg);
+}
+
+.component-doc-card-grid {
+  display: grid;
+  align-items: stretch;
+  gap: 12px;
+  /* responsive: repeat(auto-fit,minmax(220px,1fr)) */
+  /* equal-height cards; no horizontal overflow */
+}
+
+.component-step-list {
+  display: grid;
+  gap: 12px;
+}
+
+.component-step {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  column-gap: 12px;
+}
+
+.component-step__marker {
+  inline-size: 24px;
+  block-size: 24px;
+  border: var(--border-width-thin) var(--border-style) var(--color-semantic-action-primary-bg);
+  color: var(--color-semantic-action-primary-bg);
+  /* connector line aligns through marker center */
+}
+
+.component-step__content {
+  min-width: 0;
+  color: var(--color-semantic-text-primary);
+}

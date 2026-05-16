@@ -1,0 +1,64 @@
+---
+title: Usage
+description: Copy ignored files selected by .worktreeinclude between Git worktrees.
+---
+
+`waft` copies `.worktreeinclude`-selected ignored files between Git worktrees.
+It is intended for local configuration, caches, and tool state that Git should
+not track but that developers often need in more than one linked worktree.
+
+## Quick start
+
+```sh
+# In a linked worktree, copy from the main worktree automatically.
+waft
+
+# Explicit source and destination.
+waft copy --source /path/to/main --dest /path/to/linked
+
+# See what would be copied without writing files.
+waft copy --dry-run
+
+# List eligible files.
+waft list
+
+# Inspect specific files.
+waft info .env
+
+# Validate ignore files.
+waft validate
+```
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `waft` / `waft copy` | Copy eligible files. This is the default command. |
+| `waft list` | List eligible files without copying. |
+| `waft info <PATH>...` | Show detailed status for specific files. |
+| `waft validate` | Check ignore files for syntax errors. |
+
+## Global options
+
+| Option | Description |
+| --- | --- |
+| `--source <PATH>` | Source, usually the main worktree path. |
+| `--dest <PATH>` | Destination, usually the linked worktree path. |
+| `-C <PATH>` | Operate as if started in `PATH`. |
+| `-q, --quiet` | Suppress non-error output. |
+| `-v, --verbose` | Increase output verbosity. |
+
+## Copy options
+
+| Option | Description |
+| --- | --- |
+| `-n, --dry-run` | Show what would be done without copying. |
+| `--overwrite` | Allow overwriting existing untracked destination files. |
+
+## Typical flow
+
+1. Add `.worktreeinclude` to the source repo.
+2. Run `waft copy --dry-run`.
+3. Inspect the plan.
+4. Run `waft copy`.
+5. Use `waft info <path>` when a file is missing or skipped.

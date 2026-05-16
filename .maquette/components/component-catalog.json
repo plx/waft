@@ -1,0 +1,542 @@
+{
+  "meta": {
+    "system_name": "waft Landing Page Components",
+    "version": "1.0.0",
+    "based_on_design_system_version": "1.0.0",
+    "status": "approved",
+    "notes": "Reusable component library for the waft Maquette landing page. Browser QA is blocked by unavailable project-local optional dependencies; manual and linked-asset review completed."
+  },
+  "tech": {
+    "html_strategy": "semantic HTML with reusable component classes and slots",
+    "css_strategy": "CSS custom properties from brand tokens plus component CSS files",
+    "js_strategy": "vanilla JS for copy controls, nav menu state, and theme-toggle state"
+  },
+  "assets": {
+    "tokens_css_path": "brand/tokens.css",
+    "sheet_inventory_path": "components/sheet-inventory.md",
+    "sheet_implementation_log_path": "components/sheet-implementation-log.md",
+    "sheet_implementation_batches": [
+      {
+        "category": "core-primitives",
+        "sheet_path": "components/component-sheet-core-actions-css-contract-v1.png",
+        "contract_path": "components/contracts/core-actions.contract.css",
+        "replica_artifact_paths": [
+          "components/core-actions.replica.html"
+        ],
+        "component_artifact_paths": [
+          "components/css/core-actions.components.css",
+          "components/js/core-actions.components.js"
+        ],
+        "catalog_snapshot_path": "components/core-actions.component-catalog.json",
+        "review_path": "components/core-actions.review.md",
+        "review_artifact_paths": [
+          "components/core-actions.review.md",
+          "components/core-actions.replica.html"
+        ],
+        "review_mode": "manual",
+        "blocked_screenshot_reason": "Project-local Playwright, ajv, and ajv-formats are unavailable and network install is blocked in this session.",
+        "reusable_components_added": [
+          "button",
+          "icon-button",
+          "link",
+          "badge",
+          "callout"
+        ],
+        "rubric_scores": {
+          "coverage": 5,
+          "visual_match": 4,
+          "anatomy_match": 5,
+          "responsive_match": 4,
+          "implementation_quality": 4
+        },
+        "corrections_made": [
+          "Mapped poster raw colors and sizing to approved brand tokens."
+        ],
+        "simplifications": [],
+        "deferred_items": [],
+        "completed_before_next_sheet": true,
+        "status": "implemented"
+      },
+      {
+        "category": "navigation-layout",
+        "sheet_path": "components/component-sheet-navigation-layout-css-contract-v1.png",
+        "contract_path": "components/contracts/navigation-layout.contract.css",
+        "replica_artifact_paths": [
+          "components/navigation-layout.replica.html"
+        ],
+        "component_artifact_paths": [
+          "components/css/navigation-layout.components.css",
+          "components/js/navigation-layout.components.js"
+        ],
+        "catalog_snapshot_path": "components/navigation-layout.component-catalog.json",
+        "review_path": "components/navigation-layout.review.md",
+        "review_artifact_paths": [
+          "components/navigation-layout.review.md",
+          "components/navigation-layout.replica.html"
+        ],
+        "review_mode": "manual",
+        "blocked_screenshot_reason": "Project-local Playwright, ajv, and ajv-formats are unavailable and network install is blocked in this session.",
+        "reusable_components_added": [
+          "responsive-navigation",
+          "theme-toggle",
+          "section-shell",
+          "footer"
+        ],
+        "rubric_scores": {
+          "coverage": 5,
+          "visual_match": 4,
+          "anatomy_match": 5,
+          "responsive_match": 4,
+          "implementation_quality": 4
+        },
+        "corrections_made": [
+          "Implemented closed and open navigation examples in the batch reference.",
+          "Added independent panel scrolling for opened mobile navigation."
+        ],
+        "simplifications": [],
+        "deferred_items": [],
+        "completed_before_next_sheet": true,
+        "status": "implemented"
+      },
+      {
+        "category": "cards-composites",
+        "sheet_path": "components/component-sheet-docs-composites-css-contract-v2.png",
+        "contract_path": "components/contracts/docs-composites.contract.css",
+        "replica_artifact_paths": [
+          "components/docs-composites.replica.html"
+        ],
+        "component_artifact_paths": [
+          "components/css/docs-composites.components.css",
+          "components/js/docs-composites.components.js"
+        ],
+        "catalog_snapshot_path": "components/docs-composites.component-catalog.json",
+        "review_path": "components/docs-composites.review.md",
+        "review_artifact_paths": [
+          "components/docs-composites.review.md",
+          "components/docs-composites.replica.html"
+        ],
+        "review_mode": "manual",
+        "blocked_screenshot_reason": "Project-local Playwright, ajv, and ajv-formats are unavailable and network install is blocked in this session.",
+        "reusable_components_added": [
+          "command-block",
+          "doc-card",
+          "doc-card-grid",
+          "step-list"
+        ],
+        "rubric_scores": {
+          "coverage": 5,
+          "visual_match": 4,
+          "anatomy_match": 5,
+          "responsive_match": 4,
+          "implementation_quality": 4
+        },
+        "corrections_made": [
+          "Rejected v1 poster and regenerated v2 through the image-generation path.",
+          "Mapped sparse poster values to approved token variables."
+        ],
+        "simplifications": [],
+        "deferred_items": [],
+        "completed_before_next_sheet": true,
+        "status": "implemented"
+      }
+    ],
+    "replica_gallery_html_path": "components/replica-gallery.html",
+    "component_reference_html_path": "components/replica-gallery.html",
+    "gallery_html_path": "components/replica-gallery.html",
+    "component_sheet_path": "components/component-sheet-core-actions-css-contract-v1.png",
+    "component_sheet_paths": [
+      "components/component-sheet-core-actions-css-contract-v1.png",
+      "components/component-sheet-navigation-layout-css-contract-v1.png",
+      "components/component-sheet-docs-composites-css-contract-v2.png"
+    ],
+    "component_contract_paths": [
+      "components/contracts/core-actions.contract.css",
+      "components/contracts/navigation-layout.contract.css",
+      "components/contracts/docs-composites.contract.css"
+    ],
+    "nav_open_screenshot_paths": [],
+    "gallery_review_artifact_paths": [
+      "components/core-actions.review.md",
+      "components/navigation-layout.review.md",
+      "components/docs-composites.review.md",
+      "components/replica-gallery.html"
+    ],
+    "replica_fidelity_review": {
+      "reference_sheet_paths": [
+        "components/component-sheet-core-actions-css-contract-v1.png",
+        "components/component-sheet-navigation-layout-css-contract-v1.png",
+        "components/component-sheet-docs-composites-css-contract-v2.png"
+      ],
+      "gallery_review_artifact_paths": [
+        "components/replica-gallery.html",
+        "components/sheet-implementation-log.md"
+      ],
+      "review_mode": "manual",
+      "blocked_screenshot_reason": "Project-local Playwright, ajv, and ajv-formats are unavailable and network install is blocked in this session.",
+      "rubric_scores": {
+        "coverage": 5,
+        "visual_match": 4,
+        "anatomy_match": 5,
+        "responsive_match": 4,
+        "implementation_quality": 4
+      },
+      "coverage_summary": "The componentized references cover core actions, responsive navigation, theme toggle, section/footer layout, command blocks, equal-height documentation cards, safety/profile variants, and step lists needed for the landing page.",
+      "failed_categories": [],
+      "corrections_made": [
+        "Rejected noncompliant docs-composites v1 poster and regenerated v2.",
+        "Mapped generated poster raw values to approved brand tokens.",
+        "Added independently scrollable open mobile nav panel.",
+        "Pinned repeated card action rows with flex column layout."
+      ],
+      "simplifications": [],
+      "status": "matches"
+    },
+    "reusable_component_review": {
+      "status": "ready",
+      "api_summary": "Reusable classes expose component slots, states, responsive navigation behavior, copy controls, equal-height card anatomy, and footer/section layout for page implementation.",
+      "ready_for_pages": true,
+      "usage_examples_path": "components/replica-gallery.html",
+      "gaps": [
+        "Automated browser screenshots and schema validation remain blocked until project-local optional QA dependencies can be installed."
+      ]
+    },
+    "sheet_fidelity_review": {
+      "reference_sheet_paths": [
+        "components/component-sheet-core-actions-css-contract-v1.png",
+        "components/component-sheet-navigation-layout-css-contract-v1.png",
+        "components/component-sheet-docs-composites-css-contract-v2.png"
+      ],
+      "review_mode": "manual",
+      "blocked_screenshot_reason": "Project-local Playwright, ajv, and ajv-formats are unavailable and network install is blocked in this session.",
+      "coverage_summary": "Compatibility summary for older Maquette consumers; see replica_fidelity_review for the detailed rubric.",
+      "simplifications": [],
+      "status": "matches"
+    },
+    "review_notes_path": "components/approved.md"
+  },
+  "components": [
+    {
+      "name": "button",
+      "source_required_component": "button",
+      "files": [
+        "components/css/components.css",
+        "components/js/components.js",
+        "components/replica-gallery.html"
+      ],
+      "selectors": [
+        ".component-button",
+        ".component-button__icon",
+        ".component-button--primary",
+        ".component-button--secondary",
+        ".component-button--ghost",
+        ".component-button--copy",
+        ".component-button--sm",
+        ".component-button--md"
+      ],
+      "implemented_variants": [
+        "primary",
+        "secondary",
+        "ghost",
+        "copy"
+      ],
+      "implemented_sizes": [
+        "sm",
+        "md"
+      ],
+      "implemented_states": [
+        "default",
+        "hover",
+        "focus-visible",
+        "active",
+        "disabled"
+      ],
+      "api": {
+        "slots": [
+          "label",
+          "leading-icon",
+          "trailing-icon"
+        ],
+        "required_attributes": [
+          "type for button elements",
+          "href for link-style actions"
+        ],
+        "js_behavior": "Optional data-copy-text buttons copy command text and temporarily announce Copied.",
+        "usage_examples": [
+          "<button class=\"component-button component-button--primary component-button--md\">Install</button>",
+          "<button class=\"component-button component-button--copy component-button--sm\" data-copy-text=\"waft copy --dry-run\">Copy</button>"
+        ]
+      },
+      "accessibility_notes": [
+        "Icon-only action siblings need accessible names.",
+        "Focus-visible state uses the approved teal ring."
+      ],
+      "visual_review": {
+        "reference_image_paths": [
+          "components/component-sheet-core-actions-css-contract-v1.png"
+        ],
+        "similarity_notes": "Matches the core-actions poster in manual review.",
+        "qa_notes": [
+          "Automated screenshot QA blocked."
+        ]
+      },
+      "status": "approved"
+    },
+    {
+      "name": "responsive-navigation",
+      "source_required_component": "responsive-navigation",
+      "files": [
+        "components/css/components.css",
+        "components/js/components.js",
+        "components/replica-gallery.html"
+      ],
+      "selectors": [
+        ".component-site-nav",
+        ".component-site-nav__brand",
+        ".component-site-nav__links",
+        ".component-site-nav__link",
+        ".component-site-nav__actions",
+        ".component-site-nav__menu-button",
+        ".component-site-nav__panel",
+        ".component-site-nav[data-open=\"true\"] .component-site-nav__panel",
+        ".component-site-nav__link[aria-current=\"page\"]",
+        ".component-theme-toggle",
+        ".component-theme-toggle svg"
+      ],
+      "implemented_variants": [
+        "desktop-inline",
+        "tablet-collapsed",
+        "mobile-collapsed",
+        "mobile-expanded",
+        "active",
+        "focus-visible"
+      ],
+      "implemented_sizes": [
+        "md"
+      ],
+      "implemented_states": [
+        "default",
+        "hover",
+        "focus-visible",
+        "active",
+        "open"
+      ],
+      "api": {
+        "slots": [
+          "brand",
+          "links",
+          "actions",
+          "menu-button",
+          "panel"
+        ],
+        "required_attributes": [
+          "aria-label on nav",
+          "aria-controls and aria-expanded on menu button",
+          "aria-current for current page"
+        ],
+        "js_behavior": "Menu button toggles data-open and aria-expanded; theme toggle mirrors aria-pressed.",
+        "usage_examples": [
+          "<nav class=\"component-site-nav\" aria-label=\"Primary\">...</nav>"
+        ]
+      },
+      "accessibility_notes": [
+        "Mobile menu panel is independently scrollable.",
+        "Primary navigation does not require horizontal page scrolling."
+      ],
+      "layout_behavior": {
+        "responsive_notes": "Desktop links are inline; below 760px, links collapse behind an accessible menu button."
+      },
+      "visual_review": {
+        "reference_image_paths": [
+          "components/component-sheet-navigation-layout-css-contract-v1.png"
+        ],
+        "similarity_notes": "Manual review confirms contract coverage.",
+        "qa_notes": [
+          "Measured responsive QA blocked."
+        ]
+      },
+      "status": "approved"
+    },
+    {
+      "name": "command-block",
+      "source_required_component": "command-block",
+      "files": [
+        "components/css/components.css",
+        "components/js/components.js",
+        "components/replica-gallery.html"
+      ],
+      "selectors": [
+        ".component-command",
+        ".component-command__header",
+        ".component-command__body",
+        ".component-command__line",
+        ".component-command__prompt",
+        ".component-command__output",
+        ".component-command__copy",
+        ".component-command--dark"
+      ],
+      "implemented_variants": [
+        "dark",
+        "copyable"
+      ],
+      "implemented_sizes": [
+        "md"
+      ],
+      "implemented_states": [
+        "default",
+        "focus-visible"
+      ],
+      "api": {
+        "slots": [
+          "header",
+          "body",
+          "line",
+          "prompt",
+          "output",
+          "copy"
+        ],
+        "js_behavior": "Copy buttons with data-copy-target copy command block text.",
+        "usage_examples": [
+          "<article class=\"component-command component-command--dark\">...</article>"
+        ]
+      },
+      "accessibility_notes": [
+        "Command lines wrap to prevent horizontal overflow.",
+        "Copy control is a real button."
+      ],
+      "visual_review": {
+        "reference_image_paths": [
+          "components/component-sheet-docs-composites-css-contract-v2.png"
+        ],
+        "similarity_notes": "Manual review confirms contract coverage.",
+        "qa_notes": [
+          "Automated browser QA blocked."
+        ]
+      },
+      "status": "approved"
+    },
+    {
+      "name": "doc-card-grid-step-list",
+      "source_required_component": "content-card",
+      "files": [
+        "components/css/components.css",
+        "components/replica-gallery.html"
+      ],
+      "selectors": [
+        ".component-doc-card",
+        ".component-doc-card__eyebrow",
+        ".component-doc-card__title",
+        ".component-doc-card__body",
+        ".component-doc-card__footer",
+        ".component-doc-card--safety",
+        ".component-doc-card--profile",
+        ".component-doc-card-grid",
+        ".component-step-list",
+        ".component-step",
+        ".component-step__marker",
+        ".component-step__content"
+      ],
+      "implemented_variants": [
+        "default-card",
+        "safety-card",
+        "profile-card",
+        "equal-height-grid",
+        "numbered-steps"
+      ],
+      "implemented_sizes": [
+        "md"
+      ],
+      "implemented_states": [
+        "default",
+        "hover",
+        "focus-visible"
+      ],
+      "api": {
+        "slots": [
+          "eyebrow",
+          "title",
+          "body",
+          "footer",
+          "step-marker",
+          "step-content"
+        ],
+        "usage_examples": [
+          "<section class=\"component-doc-card-grid\">...</section>",
+          "<ol class=\"component-step-list\">...</ol>"
+        ]
+      },
+      "accessibility_notes": [
+        "Step list uses ordered-list semantics.",
+        "Card footers should contain accessible links or buttons."
+      ],
+      "layout_behavior": {
+        "equal_height_grid": "Grid items stretch and cards use flex columns.",
+        "body_layout": "Cards are flex columns with body content wrapping.",
+        "action_row_alignment": "Footer uses margin-top:auto to pin action rows.",
+        "responsive_notes": "Grid uses minmax(min(220px,100%),1fr)."
+      },
+      "visual_review": {
+        "reference_image_paths": [
+          "components/component-sheet-docs-composites-css-contract-v2.png"
+        ],
+        "similarity_notes": "Manual review confirms contract coverage and bottom-pinned footers.",
+        "qa_notes": [
+          "No screenshot QA available."
+        ]
+      },
+      "status": "approved"
+    },
+    {
+      "name": "section-footer-layout",
+      "source_required_component": "content-card",
+      "files": [
+        "components/css/components.css",
+        "components/replica-gallery.html"
+      ],
+      "selectors": [
+        ".component-section",
+        ".component-section__inner",
+        ".component-section--subtle",
+        ".component-footer",
+        ".component-footer__inner",
+        ".component-footer__links",
+        ".component-footer__link"
+      ],
+      "implemented_variants": [
+        "standard-section",
+        "subtle-section",
+        "compact-footer"
+      ],
+      "implemented_sizes": [
+        "md"
+      ],
+      "implemented_states": [
+        "default",
+        "hover",
+        "focus-visible"
+      ],
+      "api": {
+        "slots": [
+          "inner",
+          "footer-links",
+          "footer-link"
+        ],
+        "usage_examples": [
+          "<section class=\"component-section\"><div class=\"component-section__inner\">...</div></section>"
+        ]
+      },
+      "accessibility_notes": [
+        "Footer links preserve hit area and focus rings."
+      ],
+      "visual_review": {
+        "reference_image_paths": [
+          "components/component-sheet-navigation-layout-css-contract-v1.png"
+        ],
+        "similarity_notes": "Manual review confirms compact section and footer anatomy.",
+        "qa_notes": [
+          "No screenshot QA available."
+        ]
+      },
+      "status": "approved"
+    }
+  ]
+}
