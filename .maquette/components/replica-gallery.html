@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>waft Component Gallery</title>
+    <link rel="stylesheet" href="../brand/tokens.css">
+    <link rel="stylesheet" href="css/components.css">
+    <style>
+      body {
+        margin: 0;
+        background: var(--color-semantic-background-canvas);
+        color: var(--color-semantic-text-primary);
+        font-family: var(--typography-families-body);
+      }
+
+      .gallery-shell {
+        max-width: 1120px;
+        margin-inline: auto;
+        padding: 48px 24px;
+      }
+
+      .gallery-stack {
+        display: grid;
+        gap: 28px;
+      }
+
+      .gallery-cluster {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .gallery-heading {
+        margin: 0;
+        font-size: var(--typography-scale-3xl-font-size);
+        line-height: var(--typography-scale-3xl-line-height);
+      }
+
+      .gallery-section {
+        display: grid;
+        gap: 12px;
+      }
+
+      .gallery-section h2 {
+        margin: 0;
+        color: var(--color-semantic-text-muted);
+        font-size: var(--typography-scale-sm-font-size);
+        text-transform: uppercase;
+      }
+    </style>
+  </head>
+  <body>
+    <nav class="component-site-nav" aria-label="Primary">
+      <a class="component-site-nav__brand" href="#">waft</a>
+      <div class="component-site-nav__links">
+        <a class="component-site-nav__link" href="#" aria-current="page">Components</a>
+        <a class="component-site-nav__link" href="#">Commands</a>
+        <a class="component-site-nav__link" href="#">Cards</a>
+      </div>
+      <div class="component-site-nav__actions">
+        <button class="component-theme-toggle" type="button" aria-label="Toggle theme" aria-pressed="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 7.5A9 9 0 1 1 12 3Z"/></svg>
+        </button>
+        <button class="component-site-nav__menu-button" type="button" aria-controls="gallery-nav-panel" aria-expanded="false" aria-label="Open menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+      </div>
+      <div class="component-site-nav__panel" id="gallery-nav-panel">
+        <a class="component-site-nav__link" href="#" aria-current="page">Components</a>
+        <a class="component-site-nav__link" href="#">Commands</a>
+        <a class="component-site-nav__link" href="#">Cards</a>
+      </div>
+    </nav>
+
+    <main class="gallery-shell">
+      <div class="gallery-stack">
+        <h1 class="gallery-heading">waft component gallery</h1>
+
+        <section class="gallery-section">
+          <h2>Actions</h2>
+          <div class="gallery-cluster">
+            <a class="component-button component-button--primary component-button--md" href="#">Install</a>
+            <button class="component-button component-button--secondary component-button--md" type="button">Read docs</button>
+            <button class="component-button component-button--ghost component-button--md" type="button">Source</button>
+            <button class="component-button component-button--copy component-button--sm" type="button" data-copy-text="waft copy --dry-run" data-label="Copy">Copy</button>
+            <button class="component-icon-button" type="button" aria-label="Open menu">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+            </button>
+            <span class="component-badge component-badge--sync">sync</span>
+            <span class="component-badge component-badge--air">air note</span>
+            <span class="component-badge component-badge--error">blocked</span>
+          </div>
+        </section>
+
+        <section class="gallery-section">
+          <h2>Command</h2>
+          <article class="component-command component-command--dark">
+            <div class="component-command__header">
+              <span>quick start</span>
+              <button class="component-button component-button--copy component-button--sm component-command__copy" type="button" data-copy-target="#gallery-command">Copy</button>
+            </div>
+            <div class="component-command__body" id="gallery-command">
+              <div class="component-command__line"><span class="component-command__prompt">$</span> waft copy --dry-run</div>
+              <div class="component-command__line component-command__output">→ would copy 3 files (2.1 KB)</div>
+            </div>
+          </article>
+        </section>
+
+        <section class="gallery-section">
+          <h2>Cards</h2>
+          <div class="component-doc-card-grid">
+            <article class="component-doc-card component-doc-card--profile">
+              <p class="component-doc-card__eyebrow">Profile</p>
+              <h3 class="component-doc-card__title">claude</h3>
+              <div class="component-doc-card__body"><p>Root-level `.worktreeinclude` semantics for the default path.</p></div>
+              <footer class="component-doc-card__footer"><span class="component-badge component-badge--sync">default</span></footer>
+            </article>
+            <article class="component-doc-card">
+              <p class="component-doc-card__eyebrow">Format</p>
+              <h3 class="component-doc-card__title">Gitignore syntax</h3>
+              <div class="component-doc-card__body"><p>Patterns feel familiar and stay focused on ignored files.</p></div>
+              <footer class="component-doc-card__footer"><a class="component-link" href="#">Read</a></footer>
+            </article>
+            <article class="component-doc-card component-doc-card--safety">
+              <p class="component-doc-card__eyebrow">Safety</p>
+              <h3 class="component-doc-card__title">Atomic writes</h3>
+              <div class="component-doc-card__body"><p>Writes go through temp files and rename into place.</p></div>
+              <footer class="component-doc-card__footer"><span class="component-badge component-badge--error">guarded</span></footer>
+            </article>
+          </div>
+        </section>
+
+        <section class="gallery-section">
+          <h2>Steps</h2>
+          <ol class="component-step-list">
+            <li class="component-step"><span class="component-step__marker">1</span><div class="component-step__content"><strong>Add rules</strong><p>Create `.worktreeinclude` with ignored files to copy.</p></div></li>
+            <li class="component-step"><span class="component-step__marker">2</span><div class="component-step__content"><strong>Dry run</strong><p>Preview the copy plan before writing.</p></div></li>
+            <li class="component-step"><span class="component-step__marker">3</span><div class="component-step__content"><strong>Waft away</strong><p>Copy selected ignored files into the linked worktree.</p></div></li>
+          </ol>
+        </section>
+
+        <section class="gallery-section">
+          <h2>Callouts</h2>
+          <div class="component-doc-card-grid">
+            <div class="component-callout component-callout--safety"><span class="component-callout__icon">!</span><div>Tracked files are never overwritten.</div></div>
+            <div class="component-callout component-callout--note"><span class="component-callout__icon">~</span><div>Keep the odor joke in the margins.</div></div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="component-footer">
+      <div class="component-footer__inner">
+        <span>Reusable components for the Maquette landing-page concept.</span>
+        <div class="component-footer__links">
+          <a class="component-footer__link" href="#">Docs</a>
+          <a class="component-footer__link" href="#">Source</a>
+        </div>
+      </div>
+    </footer>
+    <script src="js/components.js"></script>
+  </body>
+</html>

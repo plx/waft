@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>waft Core Actions Component Reference</title>
+    <link rel="stylesheet" href="../brand/tokens.css">
+    <link rel="stylesheet" href="css/core-actions.components.css">
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+
+      body {
+        margin: 0;
+        background: var(--color-semantic-background-canvas);
+        color: var(--color-semantic-text-primary);
+        font-family: var(--typography-families-body);
+      }
+
+      .reference-shell {
+        max-width: 980px;
+        margin: 0 auto;
+        padding: 48px 24px;
+      }
+
+      .reference-title {
+        margin: 0 0 8px;
+        font-size: var(--typography-scale-3xl-font-size);
+        line-height: var(--typography-scale-3xl-line-height);
+      }
+
+      .reference-note {
+        max-width: 620px;
+        margin: 0 0 28px;
+        color: var(--color-semantic-text-secondary);
+        line-height: 1.55;
+      }
+
+      .reference-grid {
+        display: grid;
+        gap: 16px;
+      }
+
+      .reference-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        padding: 16px;
+        border: 1px solid var(--color-semantic-border-subtle);
+        border-radius: var(--radius-md);
+        background: var(--color-semantic-background-surface);
+      }
+
+      .reference-row h2 {
+        flex: 0 0 100%;
+        margin: 0 0 4px;
+        color: var(--color-semantic-text-muted);
+        font-size: var(--typography-scale-sm-font-size);
+        font-weight: var(--typography-weights-semibold);
+        line-height: 1.2;
+      }
+
+      .reference-callouts {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="reference-shell">
+      <h1 class="reference-title">Core Actions</h1>
+      <p class="reference-note">Reusable action, badge, link, and callout primitives transcribed from the approved core-actions CSS-contract poster.</p>
+
+      <div class="reference-grid">
+        <section class="reference-row" aria-label="Buttons">
+          <h2>Buttons</h2>
+          <a class="component-button component-button--primary component-button--md" href="#">
+            <svg class="component-button__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+            Install
+          </a>
+          <button class="component-button component-button--secondary component-button--md" type="button">Read docs</button>
+          <button class="component-button component-button--ghost component-button--md" type="button">View source</button>
+          <button class="component-button component-button--copy component-button--sm" type="button" data-copy-text="waft copy --dry-run" data-label="Copy">Copy</button>
+          <button class="component-button component-button--secondary component-button--md" type="button" disabled>Disabled</button>
+        </section>
+
+        <section class="reference-row" aria-label="Icon buttons and links">
+          <h2>Icon Buttons & Links</h2>
+          <button class="component-icon-button" type="button" aria-label="Toggle theme">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 7.5A9 9 0 1 1 12 3Z"/></svg>
+          </button>
+          <button class="component-icon-button" type="button" aria-label="Open menu">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+          </button>
+          <a class="component-link" href="#">Compatibility profiles</a>
+          <a class="component-link" href="#">Safety guarantees</a>
+        </section>
+
+        <section class="reference-row" aria-label="Badges">
+          <h2>Badges</h2>
+          <span class="component-badge component-badge--sync">sync-ready</span>
+          <span class="component-badge component-badge--air">air note</span>
+          <span class="component-badge component-badge--error">blocked</span>
+        </section>
+
+        <section class="reference-callouts" aria-label="Callouts">
+          <div class="component-callout component-callout--safety">
+            <svg class="component-callout__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 9v4m0 4h.01M10.3 4.4 2.9 17.2A2 2 0 0 0 4.6 20h14.8a2 2 0 0 0 1.7-2.8L13.7 4.4a2 2 0 0 0-3.4 0Z"/></svg>
+            <div>Tracked files are never overwritten in the destination worktree.</div>
+          </div>
+          <div class="component-callout component-callout--note">
+            <svg class="component-callout__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 3v3m0 12v3M4.2 4.2l2.1 2.1m11.4 11.4 2.1 2.1M3 12h3m12 0h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>
+            <div>Air-current details should stay subtle and avoid becoming a mascot.</div>
+          </div>
+        </section>
+      </div>
+    </main>
+    <script src="js/core-actions.components.js"></script>
+  </body>
+</html>

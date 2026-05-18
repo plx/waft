@@ -1,0 +1,235 @@
+{
+  "meta": {
+    "page_name": "landing",
+    "page_type": "developer-documentation-landing-page",
+    "version": "1.0.0",
+    "status": "reviewed",
+    "based_on_component_catalog_version": "1.0.0",
+    "notes": "Static Maquette landing page for waft, implemented under .maquette/pages/landing without modifying root site files."
+  },
+  "references": [
+    {
+      "kind": "brand-board",
+      "path": "brand/brand-board-v1.png",
+      "notes": "Approved visual-system board."
+    },
+    {
+      "kind": "component-sheet",
+      "path": "components/component-sheet-core-actions-css-contract-v1.png",
+      "notes": "Core action contract."
+    },
+    {
+      "kind": "component-sheet",
+      "path": "components/component-sheet-navigation-layout-css-contract-v1.png",
+      "notes": "Navigation/layout contract."
+    },
+    {
+      "kind": "component-sheet",
+      "path": "components/component-sheet-docs-composites-css-contract-v2.png",
+      "notes": "Docs/composites contract."
+    },
+    {
+      "kind": "page-layout-contract",
+      "path": "pages/landing/page-layout-contract.md"
+    },
+    {
+      "kind": "page-concept",
+      "path": "pages/landing/concept.png"
+    }
+  ],
+  "viewports": [
+    {
+      "name": "desktop",
+      "width": 1440,
+      "height": 1200
+    },
+    {
+      "name": "tablet",
+      "width": 768,
+      "height": 1024
+    },
+    {
+      "name": "mobile",
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "sections": [
+    {
+      "id": "header-nav",
+      "purpose": "Provide persistent documentation navigation, theme toggle, source action, and mobile menu behavior.",
+      "order": 1,
+      "layout": {
+        "content_width": "wide",
+        "columns": 12,
+        "alignment": "space-between",
+        "notes": "Sticky nav with desktop inline links and tablet/mobile menu panel."
+      },
+      "uses_components": [
+        {
+          "name": "responsive-navigation",
+          "variant": "desktop-inline/mobile-expanded"
+        },
+        {
+          "name": "button",
+          "variant": "secondary"
+        }
+      ],
+      "introduces_new_composite": false,
+      "notes": "Text brand only; no generated logo is used."
+    },
+    {
+      "id": "hero",
+      "purpose": "Introduce waft, show the primary command surface, and explain navigation behavior.",
+      "order": 2,
+      "layout": {
+        "content_width": "wide",
+        "columns": 2,
+        "alignment": "left",
+        "notes": "Hero copy and command block pair with inline SVG file-transfer art and nav behavior rail."
+      },
+      "uses_components": [
+        {
+          "name": "command-block",
+          "variant": "dark-copyable"
+        },
+        {
+          "name": "button",
+          "variant": "copy"
+        },
+        {
+          "name": "badge-callout-link",
+          "variant": "benefit-chip"
+        }
+      ],
+      "introduces_new_composite": true,
+      "notes": "Introduces a page-local decorative file-transfer motif from inline SVG/CSS, not a reusable component or raster asset."
+    },
+    {
+      "id": "usage-format-safety",
+      "purpose": "Surface quick start, .worktreeinclude format, and safety guarantees in a compact three-column documentation band.",
+      "order": 3,
+      "layout": {
+        "content_width": "standard",
+        "columns": 3,
+        "alignment": "top",
+        "notes": "Columns collapse to a stack on tablet/mobile."
+      },
+      "uses_components": [
+        {
+          "name": "doc-card-grid-step-list",
+          "variant": "step-list"
+        },
+        {
+          "name": "command-block",
+          "variant": "code-like"
+        },
+        {
+          "name": "doc-card-grid-step-list",
+          "variant": "safety-cards"
+        }
+      ],
+      "introduces_new_composite": false,
+      "notes": "Uses page-local layout wrappers around existing component anatomy."
+    },
+    {
+      "id": "compatibility-profiles",
+      "purpose": "Compare claude, git, and wt profile modes in equal-height cards with aligned command footers.",
+      "order": 4,
+      "layout": {
+        "content_width": "standard",
+        "columns": 3,
+        "alignment": "stretch",
+        "notes": "Auto-fit profile card grid."
+      },
+      "uses_components": [
+        {
+          "name": "doc-card-grid-step-list",
+          "variant": "profile-card-grid"
+        },
+        {
+          "name": "badge-callout-link",
+          "variant": "links-and-tags"
+        }
+      ],
+      "introduces_new_composite": false,
+      "notes": "Card footers use component bottom-pinning behavior."
+    },
+    {
+      "id": "terminal-footer",
+      "purpose": "Close with product blurb, docs/resource/community links, diagnostic command block, and air-current strip.",
+      "order": 5,
+      "layout": {
+        "content_width": "wide",
+        "columns": 3,
+        "alignment": "top",
+        "notes": "Dark terminal-style footer stacks on mobile."
+      },
+      "uses_components": [
+        {
+          "name": "section-footer-layout",
+          "variant": "compact-footer"
+        },
+        {
+          "name": "command-block",
+          "variant": "dark-copyable"
+        },
+        {
+          "name": "badge-callout-link",
+          "variant": "links"
+        }
+      ],
+      "introduces_new_composite": true,
+      "notes": "Introduces page-local terminal footer composition using existing command/link primitives."
+    }
+  ],
+  "new_composites": [
+    {
+      "name": "file-transfer-motif",
+      "purpose": "Decorative inline SVG representation of ignored files wafting from main to feature.",
+      "notes": "Page-local and decorative; not a logo, mark, or reusable component."
+    },
+    {
+      "name": "terminal-footer-composition",
+      "purpose": "Combine footer link columns, brand blurb, command block, and air-current strip.",
+      "notes": "Built from existing footer, link, and command primitives."
+    }
+  ],
+  "acceptance_criteria": [
+    "All Maquette-owned page artifacts stay under .maquette/pages/landing.",
+    "Page reuses approved component CSS and JS before page-specific CSS.",
+    "Hero, usage, format, safety, profiles, and footer regions from the concept are represented.",
+    "Primary navigation has accessible desktop, collapsed mobile, and expanded mobile states.",
+    "Command lines and code examples wrap without forcing page-level horizontal overflow.",
+    "Profile cards use equal-height behavior and bottom-pinned command/action footers.",
+    "Footer remains a specific terminal-style composition rather than a generic link list.",
+    "No generated logo, mascot, app icon, seal, or brand mark is introduced.",
+    "Light and dark mode use approved token behavior."
+  ],
+  "quality_review": {
+    "font_rationale": "Page uses the approved Inter/system UI and JetBrains Mono/ui-monospace token stacks; no novelty or Impact-style fonts are used.",
+    "concept_region_inventory": "pages/landing/concept-region-inventory.md lists every visible concept region and implementation status.",
+    "page_layout_contract": "pages/landing/page-layout-contract.md records section density, footer structure, and responsive behavior before implementation.",
+    "asset_manifest": "pages/landing/asset-manifest.json records the concept screenshot and code-rendered decorative motif.",
+    "component_sheet_gallery_fidelity": "Page consumes the approved component catalog and CSS/JS files; component screenshot QA remains blocked.",
+    "repeated_card_alignment": "Profile cards use component doc-card grid and margin-top:auto footers for aligned command rows.",
+    "footer_fidelity": "Footer implements brand blurb, link columns, diagnostic command block, and bottom air-current strip from the concept.",
+    "mobile_drawer_scrollability": "Nav panel uses component max-block-size and overflow-y:auto behavior from the component library.",
+    "social_icon_strategy": "No social icon set is required by the final page; GitHub/source action uses an inline accessible icon.",
+    "notes": "Automated screenshot and measured responsive QA are blocked by unavailable optional project-local dependencies."
+  },
+  "assets": {
+    "concept_path": "pages/landing/concept.png",
+    "html_path": "pages/landing/page.html",
+    "css_path": "pages/landing/page.css",
+    "js_path": "pages/landing/page.js",
+    "screenshot_paths": [
+      "pages/landing/page.png"
+    ],
+    "nav_open_screenshot_paths": [],
+    "concept_region_inventory_path": "pages/landing/concept-region-inventory.md",
+    "page_layout_contract_path": "pages/landing/page-layout-contract.md",
+    "asset_manifest_path": "pages/landing/asset-manifest.json",
+    "review_notes_path": "pages/landing/review.md"
+  }
+}

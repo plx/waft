@@ -1,0 +1,36 @@
+---
+title: Safety
+description: The guarantees waft keeps while copying ignored worktree files.
+---
+
+`waft` is designed around a plan-then-execute pipeline. Discovery and
+classification happen before any filesystem mutation.
+
+## Guarantees
+
+- **Tracked files are never overwritten.** Destination trackedness is checked
+  before copy execution.
+- **Symlink traversal is blocked.** `waft` refuses to follow symlinks in source
+  files or write through symlinked destination parents.
+- **Atomic writes.** Files are written to a temporary path and then renamed into
+  place.
+- **Dry runs are mutation-free.** `waft copy --dry-run` reads and reports only.
+
+## Preview before writing
+
+```sh
+waft copy --dry-run
+```
+
+Use dry-run output to confirm which files would move and why.
+
+## Overwrite behavior
+
+Existing destination files are preserved by default. Use `--overwrite` only when
+you intentionally want untracked destination files replaced.
+
+```sh
+waft copy --overwrite
+```
+
+`--overwrite` does not change the rule that tracked files are protected.

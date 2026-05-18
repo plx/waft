@@ -1,0 +1,42 @@
+---
+title: Configuration
+description: Layered configuration and per-knob overrides.
+---
+
+`waft` resolves profile and policy settings from multiple layers. Later layers
+win for scalar values.
+
+1. Built-in defaults.
+2. User config: `~/.config/waft/config.toml`.
+3. Project configs: each `.waft.toml` from repo root down to the current
+   directory.
+4. Environment variables using the `WAFT_*` prefix.
+5. CLI flags.
+
+Explicit knob settings always beat preset values from a higher-precedence
+profile layer.
+
+## Example `.waft.toml`
+
+```toml
+version = 1
+
+[compat]
+profile = "git"
+
+[exclude]
+extra = ["*.bak"]
+```
+
+## Per-knob CLI flags
+
+| Option | Description |
+| --- | --- |
+| `--compat-profile <claude\|git\|wt>` | Coordinated preset selection. |
+| `--when-missing-worktreeinclude <blank\|all-ignored>` | Behavior when no `.worktreeinclude` exists. |
+| `--worktreeinclude-semantics <claude-2026-04\|git\|wt-0.39>` | Matcher semantics version. |
+| `--worktreeinclude-symlink-policy <follow\|ignore\|error>` | How to handle symlinked rule files. |
+| `--builtin-exclude-set <none\|tooling-v1>` | Curated tool-state exclusion set. |
+| `--extra-exclude <GLOB>` | Repeatable additional excludes. |
+| `--replace-extra-excludes` | Drop inherited `extra-exclude` values. |
+| `--config <PATH>` | Use this file instead of the default user config. |

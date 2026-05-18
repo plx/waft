@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>waft | Worktree-aware file tool</title>
+    <meta name="description" content="waft copies .worktreeinclude-selected ignored files between Git worktrees.">
+    <link rel="stylesheet" href="../../brand/tokens.css">
+    <link rel="stylesheet" href="../../components/css/components.css">
+    <link rel="stylesheet" href="page.css">
+  </head>
+  <body>
+    <nav class="component-site-nav page-nav" aria-label="Primary">
+      <a class="component-site-nav__brand" href="#top">waft</a>
+      <div class="component-site-nav__links">
+        <a class="component-site-nav__link" href="#overview" aria-current="page">Overview</a>
+        <a class="component-site-nav__link" href="#usage">Usage</a>
+        <a class="component-site-nav__link" href="#format">Include Format</a>
+        <a class="component-site-nav__link" href="#safety">Safety</a>
+        <a class="component-site-nav__link" href="#profiles">Profiles</a>
+      </div>
+      <div class="component-site-nav__actions">
+        <button class="component-theme-toggle" type="button" aria-label="Toggle dark mode" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 7.5A9 9 0 1 1 12 3Z"/></svg>
+        </button>
+        <a class="component-button component-button--secondary component-button--sm source-button" href="https://github.com/plx/waft" aria-label="View source on GitHub">
+          <svg class="component-button__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.9a3.4 3.4 0 0 0-1-2.6c3.1-.3 6.4-1.5 6.4-6.8A5.2 5.2 0 0 0 20 5.1 4.8 4.8 0 0 0 19.9 1S18.7.7 16 2.5a13.4 13.4 0 0 0-7 0C6.3.7 5.1 1 5.1 1A4.8 4.8 0 0 0 5 5.1a5.2 5.2 0 0 0-1.4 3.6c0 5.3 3.3 6.5 6.4 6.8a3.4 3.4 0 0 0-1 2.6V22"/></svg>
+          GitHub
+        </a>
+        <button class="component-site-nav__menu-button" type="button" aria-controls="primary-nav-panel" aria-expanded="false" aria-label="Open menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+      </div>
+      <div class="component-site-nav__panel" id="primary-nav-panel">
+        <a class="component-site-nav__link" href="#overview" aria-current="page">Overview</a>
+        <a class="component-site-nav__link" href="#usage">Usage</a>
+        <a class="component-site-nav__link" href="#format">Include Format</a>
+        <a class="component-site-nav__link" href="#safety">Safety</a>
+        <a class="component-site-nav__link" href="#profiles">Profiles</a>
+        <a class="component-site-nav__link" href="#install">Install</a>
+      </div>
+    </nav>
+
+    <main id="top">
+      <section class="hero" id="overview">
+        <div class="hero__inner">
+          <div class="hero__copy">
+            <p class="hero__kicker">worktree-aware file tool</p>
+            <h1>waft</h1>
+            <p class="hero__lead">copies the files Git ignores.</p>
+            <p class="hero__text">Copy `.worktreeinclude`-selected ignored files between Git worktrees.</p>
+            <p class="hero__aside">A tiny <span>draft</span> for the files Git leaves behind.</p>
+
+            <article class="component-command component-command--dark hero-command" id="install">
+              <div class="component-command__header">
+                <span>copy from main to feature</span>
+                <button class="component-button component-button--copy component-button--sm component-command__copy" type="button" data-copy-target="#hero-command-lines">Copy</button>
+              </div>
+              <div class="component-command__body" id="hero-command-lines">
+                <div class="component-command__line"><span class="component-command__prompt">$</span> waft copy --from main --to feature</div>
+                <div class="component-command__line">Scanned workspace: /path/to/repo</div>
+                <div class="component-command__line">Using profile: claude</div>
+                <div class="component-command__line">Matched 3 files from .worktreeinclude</div>
+                <div class="component-command__line component-command__output">Copied 3 files (2.1 KB)</div>
+              </div>
+            </article>
+
+            <div class="benefit-strip" aria-label="Key benefits">
+              <span><span class="dot dot--sync"></span>Fast and safe by default</span>
+              <span><span class="air-mark" aria-hidden="true"></span>Air-tight ignore respect</span>
+              <span><span class="dot dot--air"></span>Worktree state in sync</span>
+            </div>
+          </div>
+
+          <div class="hero__visual" aria-label="File transfer illustration and navigation behavior">
+            <div class="waft-art" aria-hidden="true">
+              <svg viewBox="0 0 520 360" role="img">
+                <path class="air air--teal" d="M82 64c42-22 78 12 120-10M106 91c32-15 64 8 96-6M318 270c42-28 82 10 124-16M340 296c28-14 58 6 92-8" fill="none"/>
+                <path class="air air--amber" d="M336 110c38-22 68 8 104-10M356 135c28-12 52 4 80-7" fill="none"/>
+                <g class="file-card" transform="translate(120 126)">
+                  <path d="M0 0h72l34 34v112H0z"/>
+                  <path d="M72 0v34h34"/>
+                  <path d="M24 70h58M24 92h42M24 114h50"/>
+                  <text x="53" y="170">main</text>
+                </g>
+                <path class="transfer" d="M246 202h92"/>
+                <path class="transfer-head" d="m332 190 14 12-14 12"/>
+                <g class="file-card" transform="translate(362 126)">
+                  <path d="M0 0h72l34 34v112H0z"/>
+                  <path d="M72 0v34h34"/>
+                  <path d="M24 70h58M24 92h42M24 114h50"/>
+                  <text x="46" y="170">feature</text>
+                </g>
+              </svg>
+            </div>
+
+            <aside class="nav-behavior" aria-label="Navigation behavior">
+              <h2>Navigation behavior</h2>
+              <div class="nav-example">
+                <p>Desktop</p>
+                <div class="nav-mini"><strong>waft</strong><span>Overview</span><span>Usage</span><span>Safety</span><span class="mini-icons">☼ ◐</span></div>
+              </div>
+              <div class="nav-example">
+                <p>Tablet / mobile collapsed</p>
+                <div class="nav-mini"><strong>waft</strong><span class="hamburger">☰</span></div>
+              </div>
+              <div class="nav-example">
+                <p>Tablet / mobile expanded</p>
+                <div class="nav-panel-mini">
+                  <strong>waft <span>×</span></strong>
+                  <a>Overview</a><a>Usage</a><a>Include Format</a><a>Safety</a><a>Profiles</a>
+                </div>
+              </div>
+              <p class="nav-note">No horizontal scrolling. All links reachable.</p>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section class="component-section docs-band" id="usage">
+        <div class="component-section__inner docs-grid">
+          <article class="docs-panel">
+            <div class="section-title">
+              <span class="title-icon">↗</span>
+              <h2>Quick start</h2>
+            </div>
+            <ol class="component-step-list">
+              <li class="component-step"><span class="component-step__marker">1</span><div class="component-step__content">Add a `.worktreeinclude` file to your repo.</div></li>
+              <li class="component-step"><span class="component-step__marker">2</span><div class="component-step__content">Choose a profile, or accept the default.</div></li>
+              <li class="component-step"><span class="component-step__marker">3</span><div class="component-step__content">Preview what would be copied.</div></li>
+              <li class="component-step"><span class="component-step__marker">4</span><div class="component-step__content">Run the copy command.</div></li>
+              <li class="component-step"><span class="component-step__marker">5</span><div class="component-step__content">Files appear in your other worktree.</div></li>
+            </ol>
+            <article class="mini-command">
+              <code>$ waft copy --from main --to feature --profile claude --dry-run</code>
+              <span># Preview matched files</span>
+            </article>
+            <article class="mini-command">
+              <code>$ waft copy --from main --to feature</code>
+              <span>Copied 3 files (2.1 KB)</span>
+            </article>
+            <a class="component-link section-link" href="#">See full usage →</a>
+          </article>
+
+          <article class="docs-panel" id="format">
+            <div class="section-title">
+              <span class="title-icon">▤</span>
+              <h2>.worktreeinclude format</h2>
+            </div>
+            <p>A simple, gitignore-like file with a few extras for safety.</p>
+            <pre class="format-block"><code># Copy local dev files between worktrees
+.env.local
+target/.cache/
+.idea/
+
+# Don't copy secrets
+!secrets.env
+
+# Negate a previous pattern
+!*.env.example
+
+# Trailing slashes match directories
+logs/</code></pre>
+            <a class="component-button component-button--secondary component-button--sm" href="#">See full format reference</a>
+          </article>
+
+          <article class="docs-panel" id="safety">
+            <div class="section-title">
+              <span class="title-icon">◇</span>
+              <h2>Safety guarantees</h2>
+            </div>
+            <div class="safety-list">
+              <div class="safety-item"><span>◎</span><div><strong>Preview first</strong><p>Use `--dry-run` to see exactly what will be copied.</p></div></div>
+              <div class="safety-item"><span>⌁</span><div><strong>Path validation</strong><p>All paths are validated and kept inside the repo.</p></div></div>
+              <div class="safety-item"><span>⊘</span><div><strong>Never copies tracked files</strong><p>waft respects `.gitignore` and will not copy Git-tracked files.</p></div></div>
+              <div class="safety-item"><span>△</span><div><strong>Clear overwrite behavior</strong><p>Existing files are preserved by default. Use `--overwrite` to replace.</p></div></div>
+            </div>
+            <a class="component-link section-link" href="#">Read the safety model →</a>
+          </article>
+        </div>
+      </section>
+
+      <section class="component-section profiles-section" id="profiles">
+        <div class="component-section__inner">
+          <div class="profiles-heading">
+            <div class="section-title">
+              <span class="title-icon">☷</span>
+              <h2>Compatibility profiles</h2>
+            </div>
+            <p>Built-in defaults tuned for common toolchains.</p>
+            <a class="component-button component-button--secondary component-button--sm" href="#">See all profiles</a>
+          </div>
+
+          <div class="component-doc-card-grid">
+            <article class="component-doc-card component-doc-card--profile">
+              <p class="component-doc-card__eyebrow">Default</p>
+              <h3 class="component-doc-card__title">claude</h3>
+              <div class="component-doc-card__body">
+                <p>Optimized for Claude Code and similar AI agents. Keeps sessions, caches, and local context in sync.</p>
+                <div class="tag-list"><span>.claude/</span><span>.env.local</span><span>History</span><span>Cache</span></div>
+              </div>
+              <footer class="component-doc-card__footer"><code>$ waft copy --profile claude</code><a class="component-link" href="#">→</a></footer>
+            </article>
+
+            <article class="component-doc-card component-doc-card--profile">
+              <p class="component-doc-card__eyebrow">Git-centric</p>
+              <h3 class="component-doc-card__title">git</h3>
+              <div class="component-doc-card__body">
+                <p>Generic developer tools and Git helpers. Works across editors and CLI tools.</p>
+                <div class="tag-list"><span>.gitconfig.local</span><span>lazygit/</span><span>tigrc</span><span>gh/</span></div>
+              </div>
+              <footer class="component-doc-card__footer"><code>$ waft copy --profile git</code><a class="component-link" href="#">→</a></footer>
+            </article>
+
+            <article class="component-doc-card">
+              <p class="component-doc-card__eyebrow">Worktree-first</p>
+              <h3 class="component-doc-card__title">wt</h3>
+              <div class="component-doc-card__body">
+                <p>Focus on worktree-local build and run artifacts. Useful when compiled languages leave state behind.</p>
+                <div class="tag-list"><span>target/</span><span>build/</span><span>out/</span><span>.cache/</span></div>
+              </div>
+              <footer class="component-doc-card__footer"><code>$ waft copy --profile wt</code><a class="component-link" href="#">→</a></footer>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="terminal-footer">
+      <div class="terminal-footer__inner">
+        <div class="footer-blurb">
+          <h2>waft <span>is a small Rust CLI for keeping ignored worktree state in sync.</span></h2>
+          <p>It copies the files Git ignores, nothing more, nothing less.</p>
+          <p class="footer-meta">MIT License · Rust 1.70+</p>
+        </div>
+        <div class="footer-links">
+          <div><h3>Docs</h3><a href="#overview">Overview</a><a href="#usage">Usage</a><a href="#format">Include Format</a><a href="#safety">Safety Model</a></div>
+          <div><h3>Resources</h3><a href="#">Install</a><a href="#">README</a><a href="#">Changelog</a></div>
+          <div><h3>Community</h3><a href="https://github.com/plx/waft">GitHub ↗</a><a href="#">Crates.io ↗</a><a href="#">Discussions ↗</a></div>
+        </div>
+        <article class="component-command component-command--dark footer-command">
+          <div class="component-command__header">
+            <span>doctor</span>
+            <button class="component-button component-button--copy component-button--sm component-command__copy" type="button" data-copy-target="#doctor-command">Copy</button>
+          </div>
+          <div class="component-command__body" id="doctor-command">
+            <div class="component-command__line"><span class="component-command__prompt">$</span> waft doctor</div>
+            <div class="component-command__line">Found 3 profiles</div>
+            <div class="component-command__line">• claude (active)</div>
+            <div class="component-command__line">• git</div>
+            <div class="component-command__line">• wt</div>
+            <div class="component-command__line component-command__output">All good.</div>
+          </div>
+        </article>
+      </div>
+      <div class="footer-current">
+        <span class="leaf" aria-hidden="true">♧</span>
+        <span>Air currents move what matters.</span>
+        <span class="current-line" aria-hidden="true"></span>
+        <span>Keep your worktrees fresh.</span>
+        <a href="#top">↑ Back to top</a>
+      </div>
+    </footer>
+
+    <script src="../../components/js/components.js"></script>
+    <script src="page.js"></script>
+  </body>
+</html>

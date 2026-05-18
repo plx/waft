@@ -1,0 +1,41 @@
+---
+title: Profiles
+description: Compatibility profiles for different worktree workflows.
+---
+
+`waft` ships with coordinated compatibility profiles. Each profile selects a
+bundle of matcher and safety behavior.
+
+| Profile | Missing `.worktreeinclude` | Matcher semantics | Symlinked rule files | Tool-state excludes |
+| --- | --- | --- | --- | --- |
+| `claude` | nothing selected | `claude-2026-04` | follow | none |
+| `git` | nothing selected | `git` | ignore | none |
+| `wt` | every git-ignored untracked file selected | `wt-0.39` | follow | `tooling-v1` |
+
+## `claude`
+
+The default profile. It matches Claude Code's out-of-the-box behavior by using
+the repository root `.worktreeinclude`.
+
+```sh
+waft copy --compat-profile claude
+```
+
+## `git`
+
+Use this profile when you want Git-style per-directory exclude semantics, where
+patterns are relative to the directory containing the file and deeper files can
+override shallower files.
+
+```sh
+waft copy --compat-profile git
+```
+
+## `wt`
+
+Use this profile for worktrunk parity. It starts from every git-ignored
+untracked file and removes paths matched by literal-name negations.
+
+```sh
+waft copy --compat-profile wt
+```

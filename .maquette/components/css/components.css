@@ -1,0 +1,20 @@
+@import url("./core-actions.components.css");
+@import url("./navigation-layout.components.css");
+@import url("./docs-composites.components.css");
+
+:root {
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --color-semantic-background-canvas: var(--color-semantic-background-dark-canvas);
+  --color-semantic-background-surface: var(--color-semantic-background-dark-surface);
+  --color-semantic-background-subtle: #151B20;
+  --color-semantic-background-elevated: #20272E;
+  --color-semantic-text-primary: #F8FAFC;
+  --color-semantic-text-secondary: #CBD5DC;
+  --color-semantic-text-muted: #93A0AA;
+  --color-semantic-border-subtle: rgba(248, 250, 252, 0.14);
+  --color-semantic-border-default: rgba(248, 250, 252, 0.22);
+}

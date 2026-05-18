@@ -1,0 +1,198 @@
+{
+  "meta": {
+    "system_name": "waft Landing Page Components",
+    "version": "0.1.0-core-actions",
+    "based_on_design_system_version": "1.0.0",
+    "status": "draft",
+    "notes": "Batch catalog snapshot for the core-actions CSS-contract poster."
+  },
+  "tech": {
+    "html_strategy": "semantic-html component classes",
+    "css_strategy": "brand tokens plus reusable component selectors",
+    "js_strategy": "small vanilla JS enhancement for copy controls"
+  },
+  "assets": {
+    "tokens_css_path": "brand/tokens.css",
+    "sheet_inventory_path": "components/sheet-inventory.md",
+    "sheet_implementation_batches": [
+      {
+        "category": "core-primitives",
+        "sheet_path": "components/component-sheet-core-actions-css-contract-v1.png",
+        "contract_path": "components/contracts/core-actions.contract.css",
+        "replica_artifact_paths": [
+          "components/core-actions.replica.html"
+        ],
+        "component_artifact_paths": [
+          "components/css/core-actions.components.css",
+          "components/js/core-actions.components.js"
+        ],
+        "catalog_snapshot_path": "components/core-actions.component-catalog.json",
+        "review_path": "components/core-actions.review.md",
+        "review_artifact_paths": [
+          "components/core-actions.review.md",
+          "components/core-actions.replica.html"
+        ],
+        "review_mode": "manual",
+        "blocked_screenshot_reason": "Project-local Playwright, ajv, and ajv-formats are unavailable and network install is blocked in this session.",
+        "reusable_components_added": [
+          "button",
+          "icon-button",
+          "link",
+          "badge",
+          "callout"
+        ],
+        "rubric_scores": {
+          "coverage": 5,
+          "visual_match": 4,
+          "anatomy_match": 5,
+          "responsive_match": 4,
+          "implementation_quality": 4
+        },
+        "corrections_made": [
+          "Mapped poster raw colors and sizing to approved brand tokens."
+        ],
+        "simplifications": [],
+        "deferred_items": [],
+        "completed_before_next_sheet": true,
+        "status": "implemented"
+      }
+    ],
+    "replica_gallery_html_path": "components/core-actions.replica.html",
+    "component_reference_html_path": "components/core-actions.replica.html",
+    "component_sheet_path": "components/component-sheet-core-actions-css-contract-v1.png",
+    "component_sheet_paths": [
+      "components/component-sheet-core-actions-css-contract-v1.png"
+    ],
+    "component_contract_paths": [
+      "components/contracts/core-actions.contract.css"
+    ]
+  },
+  "components": [
+    {
+      "name": "button",
+      "source_required_component": "button",
+      "files": [
+        "components/css/core-actions.components.css",
+        "components/js/core-actions.components.js",
+        "components/core-actions.replica.html"
+      ],
+      "selectors": [
+        ".component-button",
+        ".component-button__icon",
+        ".component-button--primary",
+        ".component-button--secondary",
+        ".component-button--ghost",
+        ".component-button--copy",
+        ".component-button--sm",
+        ".component-button--md"
+      ],
+      "implemented_variants": [
+        "primary",
+        "secondary",
+        "ghost",
+        "copy"
+      ],
+      "implemented_sizes": [
+        "sm",
+        "md"
+      ],
+      "implemented_states": [
+        "default",
+        "hover",
+        "focus-visible",
+        "active",
+        "disabled"
+      ],
+      "api": {
+        "slots": [
+          "label",
+          "leading-icon",
+          "trailing-icon"
+        ],
+        "required_attributes": [
+          "type for button elements",
+          "href for link-style actions"
+        ],
+        "js_behavior": "Optional data-copy-text buttons copy command text and temporarily announce Copied.",
+        "usage_examples": [
+          "<button class=\"component-button component-button--primary component-button--md\">Install</button>",
+          "<button class=\"component-button component-button--copy component-button--sm\" data-copy-text=\"waft copy --dry-run\">Copy</button>"
+        ]
+      },
+      "accessibility_notes": [
+        "Icon-only copy and menu actions need accessible labels.",
+        "Disabled state uses native disabled or aria-disabled."
+      ],
+      "visual_review": {
+        "reference_image_paths": [
+          "components/component-sheet-core-actions-css-contract-v1.png"
+        ],
+        "similarity_notes": "Matches the poster selector contract and approved brand tokens in manual review.",
+        "qa_notes": [
+          "Automated screenshot QA blocked by missing project-local Playwright."
+        ]
+      },
+      "status": "reviewed"
+    },
+    {
+      "name": "badge-callout-link",
+      "source_required_component": "content-card",
+      "files": [
+        "components/css/core-actions.components.css",
+        "components/core-actions.replica.html"
+      ],
+      "selectors": [
+        ".component-link",
+        ".component-badge",
+        ".component-badge--sync",
+        ".component-badge--air",
+        ".component-badge--error",
+        ".component-callout",
+        ".component-callout--safety",
+        ".component-callout--note",
+        ".component-callout__icon"
+      ],
+      "implemented_variants": [
+        "link",
+        "sync-badge",
+        "air-badge",
+        "error-badge",
+        "safety-callout",
+        "note-callout"
+      ],
+      "implemented_sizes": [
+        "md"
+      ],
+      "implemented_states": [
+        "default",
+        "hover",
+        "focus-visible"
+      ],
+      "api": {
+        "slots": [
+          "icon",
+          "label",
+          "body"
+        ],
+        "usage_examples": [
+          "<span class=\"component-badge component-badge--sync\">sync-ready</span>",
+          "<div class=\"component-callout component-callout--safety\">...</div>"
+        ]
+      },
+      "accessibility_notes": [
+        "Badges must not be the only indicator of destructive or blocked states.",
+        "Callout icons are decorative unless they add unique meaning."
+      ],
+      "visual_review": {
+        "reference_image_paths": [
+          "components/component-sheet-core-actions-css-contract-v1.png"
+        ],
+        "similarity_notes": "Preserves the poster anatomy and compact left-border callout structure.",
+        "qa_notes": [
+          "Manual source review only; browser QA is blocked."
+        ]
+      },
+      "status": "reviewed"
+    }
+  ]
+}

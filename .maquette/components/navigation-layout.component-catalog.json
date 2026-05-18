@@ -1,0 +1,203 @@
+{
+  "meta": {
+    "system_name": "waft Landing Page Components",
+    "version": "0.2.0-navigation-layout",
+    "based_on_design_system_version": "1.0.0",
+    "status": "draft",
+    "notes": "Batch catalog snapshot for the navigation-layout CSS-contract poster."
+  },
+  "tech": {
+    "html_strategy": "semantic-html component classes",
+    "css_strategy": "brand tokens plus reusable component selectors",
+    "js_strategy": "small vanilla JS for menu and toggle state"
+  },
+  "assets": {
+    "tokens_css_path": "brand/tokens.css",
+    "sheet_inventory_path": "components/sheet-inventory.md",
+    "sheet_implementation_batches": [
+      {
+        "category": "navigation-layout",
+        "sheet_path": "components/component-sheet-navigation-layout-css-contract-v1.png",
+        "contract_path": "components/contracts/navigation-layout.contract.css",
+        "replica_artifact_paths": [
+          "components/navigation-layout.replica.html"
+        ],
+        "component_artifact_paths": [
+          "components/css/navigation-layout.components.css",
+          "components/js/navigation-layout.components.js"
+        ],
+        "catalog_snapshot_path": "components/navigation-layout.component-catalog.json",
+        "review_path": "components/navigation-layout.review.md",
+        "review_artifact_paths": [
+          "components/navigation-layout.review.md",
+          "components/navigation-layout.replica.html"
+        ],
+        "review_mode": "manual",
+        "blocked_screenshot_reason": "Project-local Playwright, ajv, and ajv-formats are unavailable and network install is blocked in this session.",
+        "reusable_components_added": [
+          "responsive-navigation",
+          "theme-toggle",
+          "section-shell",
+          "footer"
+        ],
+        "rubric_scores": {
+          "coverage": 5,
+          "visual_match": 4,
+          "anatomy_match": 5,
+          "responsive_match": 4,
+          "implementation_quality": 4
+        },
+        "corrections_made": [
+          "Implemented closed and open navigation examples in the batch reference.",
+          "Added independent panel scrolling for opened mobile navigation."
+        ],
+        "simplifications": [],
+        "deferred_items": [],
+        "completed_before_next_sheet": true,
+        "status": "implemented"
+      }
+    ],
+    "replica_gallery_html_path": "components/navigation-layout.replica.html",
+    "component_reference_html_path": "components/navigation-layout.replica.html",
+    "component_sheet_path": "components/component-sheet-navigation-layout-css-contract-v1.png",
+    "component_sheet_paths": [
+      "components/component-sheet-navigation-layout-css-contract-v1.png"
+    ],
+    "component_contract_paths": [
+      "components/contracts/navigation-layout.contract.css"
+    ],
+    "nav_open_screenshot_paths": []
+  },
+  "components": [
+    {
+      "name": "responsive-navigation",
+      "source_required_component": "responsive-navigation",
+      "files": [
+        "components/css/navigation-layout.components.css",
+        "components/js/navigation-layout.components.js",
+        "components/navigation-layout.replica.html"
+      ],
+      "selectors": [
+        ".component-site-nav",
+        ".component-site-nav__brand",
+        ".component-site-nav__links",
+        ".component-site-nav__link",
+        ".component-site-nav__actions",
+        ".component-site-nav__menu-button",
+        ".component-site-nav__panel",
+        ".component-site-nav[data-open=\"true\"] .component-site-nav__panel",
+        ".component-site-nav__link[aria-current=\"page\"]",
+        ".component-theme-toggle",
+        ".component-theme-toggle svg"
+      ],
+      "implemented_variants": [
+        "desktop-inline",
+        "tablet-collapsed",
+        "mobile-collapsed",
+        "mobile-expanded",
+        "active",
+        "focus-visible"
+      ],
+      "implemented_sizes": [
+        "md"
+      ],
+      "implemented_states": [
+        "default",
+        "hover",
+        "focus-visible",
+        "active",
+        "open"
+      ],
+      "api": {
+        "slots": [
+          "brand",
+          "links",
+          "actions",
+          "menu-button",
+          "panel"
+        ],
+        "required_attributes": [
+          "aria-label on nav",
+          "aria-controls and aria-expanded on menu button",
+          "aria-current for current page"
+        ],
+        "js_behavior": "Menu button toggles data-open on the nav and mirrors aria-expanded. Theme toggle mirrors aria-pressed.",
+        "usage_examples": [
+          "<nav class=\"component-site-nav\" aria-label=\"Primary\">...</nav>"
+        ]
+      },
+      "accessibility_notes": [
+        "Opened panel is independently scrollable.",
+        "Primary navigation does not rely on horizontal scrolling.",
+        "Menu button has aria-controls, aria-expanded, and an accessible label."
+      ],
+      "layout_behavior": {
+        "responsive_notes": "Desktop links are inline; under 760px links are hidden and an accessible stacked panel is available."
+      },
+      "visual_review": {
+        "reference_image_paths": [
+          "components/component-sheet-navigation-layout-css-contract-v1.png"
+        ],
+        "similarity_notes": "Manual review confirms selector contract coverage and open/closed states.",
+        "qa_notes": [
+          "Automated responsive measurements are blocked by missing project-local Playwright."
+        ]
+      },
+      "status": "reviewed"
+    },
+    {
+      "name": "section-footer-layout",
+      "source_required_component": "content-card",
+      "files": [
+        "components/css/navigation-layout.components.css",
+        "components/navigation-layout.replica.html"
+      ],
+      "selectors": [
+        ".component-section",
+        ".component-section__inner",
+        ".component-section--subtle",
+        ".component-footer",
+        ".component-footer__inner",
+        ".component-footer__links",
+        ".component-footer__link"
+      ],
+      "implemented_variants": [
+        "standard-section",
+        "subtle-section",
+        "compact-footer"
+      ],
+      "implemented_sizes": [
+        "md"
+      ],
+      "implemented_states": [
+        "default",
+        "hover",
+        "focus-visible"
+      ],
+      "api": {
+        "slots": [
+          "inner",
+          "footer-links",
+          "footer-link"
+        ],
+        "usage_examples": [
+          "<section class=\"component-section\"><div class=\"component-section__inner\">...</div></section>",
+          "<footer class=\"component-footer\">...</footer>"
+        ]
+      },
+      "accessibility_notes": [
+        "Footer links preserve 32px minimum hit area and focus rings."
+      ],
+      "visual_review": {
+        "reference_image_paths": [
+          "components/component-sheet-navigation-layout-css-contract-v1.png"
+        ],
+        "similarity_notes": "Manual review confirms compact section and footer anatomy.",
+        "qa_notes": [
+          "No screenshot QA available."
+        ]
+      },
+      "status": "reviewed"
+    }
+  ]
+}

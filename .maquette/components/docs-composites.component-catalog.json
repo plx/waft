@@ -1,0 +1,201 @@
+{
+  "meta": {
+    "system_name": "waft Landing Page Components",
+    "version": "0.3.0-docs-composites",
+    "based_on_design_system_version": "1.0.0",
+    "status": "draft",
+    "notes": "Batch catalog snapshot for the docs-composites CSS-contract poster v2. The v1 poster was rejected."
+  },
+  "tech": {
+    "html_strategy": "semantic-html component classes",
+    "css_strategy": "brand tokens plus reusable component selectors",
+    "js_strategy": "small vanilla JS for command copy controls"
+  },
+  "assets": {
+    "tokens_css_path": "brand/tokens.css",
+    "sheet_inventory_path": "components/sheet-inventory.md",
+    "sheet_implementation_batches": [
+      {
+        "category": "cards-composites",
+        "sheet_path": "components/component-sheet-docs-composites-css-contract-v2.png",
+        "contract_path": "components/contracts/docs-composites.contract.css",
+        "replica_artifact_paths": [
+          "components/docs-composites.replica.html"
+        ],
+        "component_artifact_paths": [
+          "components/css/docs-composites.components.css",
+          "components/js/docs-composites.components.js"
+        ],
+        "catalog_snapshot_path": "components/docs-composites.component-catalog.json",
+        "review_path": "components/docs-composites.review.md",
+        "review_artifact_paths": [
+          "components/docs-composites.review.md",
+          "components/docs-composites.replica.html"
+        ],
+        "review_mode": "manual",
+        "blocked_screenshot_reason": "Project-local Playwright, ajv, and ajv-formats are unavailable and network install is blocked in this session.",
+        "reusable_components_added": [
+          "command-block",
+          "doc-card",
+          "doc-card-grid",
+          "step-list"
+        ],
+        "rubric_scores": {
+          "coverage": 5,
+          "visual_match": 4,
+          "anatomy_match": 5,
+          "responsive_match": 4,
+          "implementation_quality": 4
+        },
+        "corrections_made": [
+          "Rejected v1 poster and regenerated v2 through the image-generation path.",
+          "Mapped sparse poster values to approved token variables."
+        ],
+        "simplifications": [],
+        "deferred_items": [],
+        "completed_before_next_sheet": true,
+        "status": "implemented"
+      }
+    ],
+    "replica_gallery_html_path": "components/docs-composites.replica.html",
+    "component_reference_html_path": "components/docs-composites.replica.html",
+    "component_sheet_path": "components/component-sheet-docs-composites-css-contract-v2.png",
+    "component_sheet_paths": [
+      "components/component-sheet-docs-composites-css-contract-v2.png"
+    ],
+    "component_contract_paths": [
+      "components/contracts/docs-composites.contract.css"
+    ]
+  },
+  "components": [
+    {
+      "name": "command-block",
+      "source_required_component": "command-block",
+      "files": [
+        "components/css/docs-composites.components.css",
+        "components/js/docs-composites.components.js",
+        "components/docs-composites.replica.html"
+      ],
+      "selectors": [
+        ".component-command",
+        ".component-command__header",
+        ".component-command__body",
+        ".component-command__line",
+        ".component-command__prompt",
+        ".component-command__output",
+        ".component-command__copy",
+        ".component-command--dark"
+      ],
+      "implemented_variants": [
+        "dark",
+        "copyable"
+      ],
+      "implemented_sizes": [
+        "md"
+      ],
+      "implemented_states": [
+        "default",
+        "focus-visible"
+      ],
+      "api": {
+        "slots": [
+          "header",
+          "body",
+          "line",
+          "prompt",
+          "output",
+          "copy"
+        ],
+        "js_behavior": "Copy buttons with data-copy-target copy the command body and temporarily show Copied.",
+        "usage_examples": [
+          "<article class=\"component-command component-command--dark\">...</article>"
+        ]
+      },
+      "accessibility_notes": [
+        "Copy control is a real button.",
+        "Command lines wrap to avoid page-level horizontal overflow."
+      ],
+      "visual_review": {
+        "reference_image_paths": [
+          "components/component-sheet-docs-composites-css-contract-v2.png"
+        ],
+        "similarity_notes": "Manual review confirms command selector contract coverage.",
+        "qa_notes": [
+          "Automated browser QA is blocked."
+        ]
+      },
+      "status": "reviewed"
+    },
+    {
+      "name": "doc-card-grid-step-list",
+      "source_required_component": "content-card",
+      "files": [
+        "components/css/docs-composites.components.css",
+        "components/docs-composites.replica.html"
+      ],
+      "selectors": [
+        ".component-doc-card",
+        ".component-doc-card__eyebrow",
+        ".component-doc-card__title",
+        ".component-doc-card__body",
+        ".component-doc-card__footer",
+        ".component-doc-card--safety",
+        ".component-doc-card--profile",
+        ".component-doc-card-grid",
+        ".component-step-list",
+        ".component-step",
+        ".component-step__marker",
+        ".component-step__content"
+      ],
+      "implemented_variants": [
+        "default-card",
+        "safety-card",
+        "profile-card",
+        "equal-height-grid",
+        "numbered-steps"
+      ],
+      "implemented_sizes": [
+        "md"
+      ],
+      "implemented_states": [
+        "default",
+        "hover",
+        "focus-visible"
+      ],
+      "api": {
+        "slots": [
+          "eyebrow",
+          "title",
+          "body",
+          "footer",
+          "step-marker",
+          "step-content"
+        ],
+        "usage_examples": [
+          "<section class=\"component-doc-card-grid\">...</section>",
+          "<ol class=\"component-step-list\">...</ol>"
+        ]
+      },
+      "accessibility_notes": [
+        "Step list uses ordered-list semantics.",
+        "Card footers can contain links and badges with accessible labels inherited from child controls."
+      ],
+      "layout_behavior": {
+        "equal_height_grid": "Grid items stretch and cards use min-height:100%.",
+        "body_layout": "Cards are flex columns with body content allowed to wrap.",
+        "action_row_alignment": "Card footer uses margin-top:auto to pin actions to the bottom.",
+        "responsive_notes": "Grid uses repeat(auto-fit, minmax(min(220px,100%),1fr)) to avoid page-level overflow."
+      },
+      "visual_review": {
+        "reference_image_paths": [
+          "components/component-sheet-docs-composites-css-contract-v2.png"
+        ],
+        "similarity_notes": "Manual review confirms equal-height card and step-list contract coverage.",
+        "qa_notes": [
+          "No screenshot QA available."
+        ]
+      },
+      "status": "reviewed"
+    }
+  ]
+}
