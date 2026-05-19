@@ -1,35 +1,62 @@
 import { defineConfig } from "astro/config";
-import mdx from "@astrojs/mdx";
 import starlight from "@astrojs/starlight";
+import { siteConfig } from "./src/site.config.mjs";
+
+const fontStylesheetUrl =
+  "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap";
+
+const basePath =
+  siteConfig.site.basePath === "/" ? "" : siteConfig.site.basePath;
+/** @param {string} path */
+const siteAsset = (path) => `${basePath}/${path.replace(/^\/+/, "")}`;
 
 export default defineConfig({
-  site: "https://plx.github.io",
-  base: "/waft",
+  site: siteConfig.site.host,
+  base: siteConfig.site.basePath,
+  trailingSlash: "always",
   integrations: [
     starlight({
-      title: "waft",
-      description: "Copy .worktreeinclude-selected ignored files between Git worktrees.",
-      social: [
-        { icon: "github", label: "GitHub", href: "https://github.com/plx/waft" }
-      ],
-      customCss: ["./src/styles/waft.css"],
-      sidebar: [
+      title: siteConfig.project.title,
+      description: siteConfig.project.description,
+      logo: {
+        src: "./src/assets/tool-mark.svg",
+        alt: "",
+      },
+      customCss: ["./src/styles/starlight.css"],
+      head: [
         {
-          label: "Guides",
-          items: [
-            { label: "Usage", slug: "usage" },
-            { label: ".worktreeinclude", slug: "worktreeinclude" },
-            { label: "Safety", slug: "safety" },
-            { label: "Profiles", slug: "profiles" },
-            { label: "Configuration", slug: "configuration" }
-          ]
+          tag: "link",
+          attrs: { rel: "preconnect", href: "https://fonts.googleapis.com" },
         },
         {
-          label: "Reference",
-          items: [{ label: "Architecture", slug: "architecture" }]
-        }
-      ]
+          tag: "link",
+          attrs: {
+            rel: "preconnect",
+            href: "https://fonts.gstatic.com",
+            crossorigin: "",
+          },
+        },
+        { tag: "link", attrs: { rel: "stylesheet", href: fontStylesheetUrl } },
+        {
+          tag: "link",
+          attrs: {
+            rel: "icon",
+            href: siteAsset("favicon.svg"),
+            type: "image/svg+xml",
+          },
+        },
+      ],
+      social: [
+        {
+          icon: "github",
+          label: "GitHub",
+          href: siteConfig.repository.url,
+        },
+      ],
+      editLink: {
+        baseUrl: `${siteConfig.repository.url}/edit/${siteConfig.repository.defaultBranch}/site/src/content/docs/`,
+      },
+      sidebar: siteConfig.docs.sidebar,
     }),
-    mdx()
-  ]
+  ],
 });
