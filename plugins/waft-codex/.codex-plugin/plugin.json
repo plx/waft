@@ -1,0 +1,17 @@
+{
+  "name": "waft-codex",
+  "version": "0.1.0",
+  "description": "Codex integration for waft (stub).",
+  "author": {
+    "name": "waft contributors"
+  },
+  "interface": {
+    "displayName": "waft for Codex",
+    "shortDescription": "Use waft from Codex.",
+    "longDescription": "Codex integration for waft (stub).",
+    "developerName": "waft contributors",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "Help me use waft."
+  }
+}

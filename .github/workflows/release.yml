@@ -15,8 +15,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: taiki-e/install-action@just
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install harness CLIs
+        run: npm install --global @anthropic-ai/claude-code @openai/codex
+
+      - name: just check-plugins
+        run: just check-plugins
 
       - name: just check-format
         run: just check-format

@@ -164,6 +164,15 @@ just build-release
 
 ## Testing
 
+Run the complete local preflight, including both plugin marketplaces:
+
+```sh
+just check
+```
+
+To validate only the plugin packaging, run `just check-plugins`. To run only
+the Rust test suite, run:
+
 ```sh
 just check-test
 ```

@@ -7,6 +7,26 @@ on:
     branches: [main]
 
 jobs:
+  plugins:
+    name: plugins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: taiki-e/install-action@just
+      - name: Install harness CLIs
+        run: npm install --global @anthropic-ai/claude-code @openai/codex
+      - name: Validate Claude Code marketplace
+        run: just check-claude-marketplace
+      - name: Validate Claude Code plugin
+        run: just check-claude-plugin
+      - name: Validate Codex marketplace
+        run: just check-codex-marketplace
+      - name: Validate Codex plugin
+        run: just check-codex-plugin
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
