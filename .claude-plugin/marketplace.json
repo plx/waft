@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "waft",
+  "description": "Claude Code plugins for waft.",
+  "owner": {
+    "name": "waft contributors"
+  },
+  "plugins": [
+    {
+      "name": "waft-claude-code",
+      "description": "Claude Code integration for waft (stub).",
+      "version": "0.1.0",
+      "author": {
+        "name": "waft contributors"
+      },
+      "source": "./plugins/waft-claude-code"
+    }
+  ]
+}
