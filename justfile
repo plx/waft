@@ -1,6 +1,41 @@
 build-release:
     cargo build --release
 
+# Run every check expected before a change is ready to merge.
+check: check-format check-clippy check-test check-doc-test check-doc-build check-licenses check-self-test check-plugins
+
+# Validate every agent-harness marketplace and plugin.
+check-plugins: check-claude-plugins check-codex-plugins
+
+check-claude-plugins: check-claude-marketplace check-claude-plugin
+
+check-claude-marketplace:
+    claude plugin validate --strict .
+
+check-claude-plugin:
+    claude plugin validate --strict plugins/waft-claude-code
+
+check-codex-plugins: check-codex-marketplace check-codex-plugin
+
+# Codex has no standalone validate command. Adding a marketplace exercises its
+# built-in marketplace ingestion in a disposable configuration directory.
+check-codex-marketplace:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    codex_home="$(mktemp -d)"
+    trap 'rm -rf "$codex_home"' EXIT
+    CODEX_HOME="$codex_home" codex plugin marketplace add "$PWD" --json
+
+# Installing the plugin exercises Codex's built-in plugin ingestion without
+# modifying the developer's real Codex configuration.
+check-codex-plugin:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    codex_home="$(mktemp -d)"
+    trap 'rm -rf "$codex_home"' EXIT
+    CODEX_HOME="$codex_home" codex plugin marketplace add "$PWD" --json >/dev/null
+    CODEX_HOME="$codex_home" codex plugin add waft-codex@waft --json
+
 # Wire the tracked hooks/ directory into this clone (per-clone setup;
 # re-run after `git clone` or in any new linked worktree that needs it).
 install-hooks:

@@ -1,0 +1,8 @@
+{
+  "name": "waft-claude-code",
+  "version": "0.1.0",
+  "description": "Claude Code integration for waft (stub).",
+  "author": {
+    "name": "waft contributors"
+  }
+}
