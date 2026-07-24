@@ -8,16 +8,9 @@
 //!   is what `waft` has done since its initial implementation; PR6
 //!   formalizes it as a named engine.
 //! - [`Claude202604Semantics`]: a versioned snapshot of Claude Code's
-//!   observed behavior. PR6 ships this as a thin delegate to
-//!   [`GitSemantics`]; PR7 implements the divergence (notably ignoring
-//!   nested `.worktreeinclude` files).
+//!   root-only rule-file behavior.
 //! - [`Wt039Semantics`]: a versioned snapshot of `worktrunk 0.39`'s
-//!   behavior. PR6 ships this as a thin delegate to [`GitSemantics`];
-//!   PR8 implements the divergence.
-//!
-//! Behavior is unchanged in PR6 — the abstraction is in place but each
-//! engine returns identical results. Subsequent PRs add the per-engine
-//! deviations covered by the fixture matrix.
+//!   subtractive selection behavior.
 
 use std::path::Path;
 
@@ -26,7 +19,7 @@ use crate::model::WorktreeincludeStatus;
 
 /// A pluggable `.worktreeinclude` evaluation engine.
 pub trait WorktreeincludeSemanticsEngine {
-    /// Evaluate `rel_path` against the engine's selection algorithm.
+    /// Evaluate a UTF-8 repository-relative path.
     fn evaluate(
         &self,
         repo_root: &Path,
@@ -35,6 +28,32 @@ pub trait WorktreeincludeSemanticsEngine {
         case_insensitive: bool,
         symlink_policy: SymlinkPolicy,
     ) -> WorktreeincludeStatus;
+
+    /// Evaluate a native repository-relative path against the engine's
+    /// selection algorithm.
+    ///
+    /// Keeping the path native lets candidate discovery reject unrelated
+    /// non-UTF-8 Unix names before converting selected paths to
+    /// [`RepoRelPath`](crate::path::RepoRelPath).
+    fn evaluate_path(
+        &self,
+        repo_root: &Path,
+        rel_path: &Path,
+        is_dir: bool,
+        case_insensitive: bool,
+        symlink_policy: SymlinkPolicy,
+    ) -> WorktreeincludeStatus {
+        let Some(rel_path) = rel_path.to_str() else {
+            return WorktreeincludeStatus::NoMatch;
+        };
+        self.evaluate(
+            repo_root,
+            rel_path,
+            is_dir,
+            case_insensitive,
+            symlink_policy,
+        )
+    }
 }
 
 /// Git per-directory `.gitignore`-style semantics with negation caveats.
@@ -51,6 +70,23 @@ impl WorktreeincludeSemanticsEngine for GitSemantics {
         symlink_policy: SymlinkPolicy,
     ) -> WorktreeincludeStatus {
         crate::worktreeinclude::explain(
+            repo_root,
+            rel_path,
+            is_dir,
+            case_insensitive,
+            symlink_policy,
+        )
+    }
+
+    fn evaluate_path(
+        &self,
+        repo_root: &Path,
+        rel_path: &Path,
+        is_dir: bool,
+        case_insensitive: bool,
+        symlink_policy: SymlinkPolicy,
+    ) -> WorktreeincludeStatus {
+        crate::worktreeinclude::explain_path(
             repo_root,
             rel_path,
             is_dir,
@@ -85,6 +121,23 @@ impl WorktreeincludeSemanticsEngine for Claude202604Semantics {
         symlink_policy: SymlinkPolicy,
     ) -> WorktreeincludeStatus {
         crate::worktreeinclude::evaluate_root_only(
+            repo_root,
+            rel_path,
+            is_dir,
+            case_insensitive,
+            symlink_policy,
+        )
+    }
+
+    fn evaluate_path(
+        &self,
+        repo_root: &Path,
+        rel_path: &Path,
+        is_dir: bool,
+        case_insensitive: bool,
+        symlink_policy: SymlinkPolicy,
+    ) -> WorktreeincludeStatus {
+        crate::worktreeinclude::evaluate_root_only_path(
             repo_root,
             rel_path,
             is_dir,
@@ -131,6 +184,23 @@ impl WorktreeincludeSemanticsEngine for Wt039Semantics {
             symlink_policy,
         )
     }
+
+    fn evaluate_path(
+        &self,
+        repo_root: &Path,
+        rel_path: &Path,
+        is_dir: bool,
+        case_insensitive: bool,
+        symlink_policy: SymlinkPolicy,
+    ) -> WorktreeincludeStatus {
+        GitSemantics.evaluate_path(
+            repo_root,
+            rel_path,
+            is_dir,
+            case_insensitive,
+            symlink_policy,
+        )
+    }
 }
 
 /// Compute candidate paths under the wt-0.39 algorithm.
@@ -149,7 +219,8 @@ pub fn wt_collect_candidates(
     symlink_policy: SymlinkPolicy,
 ) -> crate::error::Result<Vec<crate::path::RepoRelPath>> {
     let mut paths = git.list_ignored_untracked(source_root)?;
-    let removals = collect_wt_literal_negations(source_root, symlink_policy);
+    let gitlinks = git.gitlinks(source_root)?;
+    let removals = collect_wt_literal_negations(source_root, symlink_policy, &gitlinks);
     paths.retain(|p| !removals.contains(p.as_str()));
     Ok(paths)
 }
@@ -157,14 +228,20 @@ pub fn wt_collect_candidates(
 fn collect_wt_literal_negations(
     source_root: &std::path::Path,
     symlink_policy: SymlinkPolicy,
+    gitlinks: &std::collections::HashSet<String>,
 ) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
-    for entry in walkdir::WalkDir::new(source_root) {
+    for entry in walkdir::WalkDir::new(source_root)
+        .into_iter()
+        .filter_entry(|entry| {
+            !crate::walk::is_git_boundary_dir(entry.path(), entry.depth(), source_root, gitlinks)
+        })
+    {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => continue,
         };
-        if entry.file_name() != ".worktreeinclude" {
+        if !crate::walk::special_filename_matches(entry.file_name(), ".worktreeinclude") {
             continue;
         }
         if entry.file_type().is_dir() {

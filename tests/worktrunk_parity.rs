@@ -11,6 +11,8 @@ use std::process::Command;
 
 use tempfile::TempDir;
 
+mod support;
+
 #[derive(Clone, Copy, Debug)]
 enum Scenario {
     RootSimple,
@@ -104,7 +106,7 @@ struct ScenarioResult {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let output = Command::new("git")
+    let output = support::git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -266,7 +268,7 @@ fn prepare_case(scenario: Scenario) -> PreparedCase {
 }
 
 fn ignored_untracked_paths(root: &Path) -> Result<BTreeSet<String>, String> {
-    let output = Command::new("git")
+    let output = support::git_command()
         .arg("-C")
         .arg(root)
         .args([
@@ -335,7 +337,7 @@ fn find_claude_bin() -> Option<String> {
 fn run_waft(case: &PreparedCase) -> ToolRun {
     let source_paths = ignored_untracked_paths(&case.main).unwrap_or_default();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_waft"))
+    let output = support::std_command(env!("CARGO_BIN_EXE_waft"))
         .args([
             "copy",
             "--source",
@@ -362,7 +364,7 @@ fn run_waft(case: &PreparedCase) -> ToolRun {
 fn run_worktrunk(case: &PreparedCase, worktrunk_bin: &str) -> ToolRun {
     let source_paths = ignored_untracked_paths(&case.main).unwrap_or_default();
 
-    let output = Command::new(worktrunk_bin)
+    let output = support::std_command(worktrunk_bin)
         .args([
             "--config",
             case.wt_config.to_str().unwrap(),
@@ -410,7 +412,7 @@ fn extract_first_backtick_path(text: &str) -> Option<PathBuf> {
 fn run_claude(case: &PreparedCase, claude_bin: &str) -> ToolRun {
     let source_paths = ignored_untracked_paths(&case.main).unwrap_or_default();
 
-    let output = Command::new(claude_bin)
+    let output = support::std_command(claude_bin)
         .current_dir(&case.main)
         .args([
             "--worktree",
@@ -453,7 +455,7 @@ fn run_claude(case: &PreparedCase, claude_bin: &str) -> ToolRun {
                 }
 
                 // Cleanup the temporary claude-created worktree.
-                let cleanup = Command::new("git")
+                let cleanup = support::git_command()
                     .arg("-C")
                     .arg(&case.main)
                     .args([

@@ -87,8 +87,6 @@ pub struct CopyPlan {
 pub enum PlannedEntry {
     /// A file to be copied.
     Copy(CopyOp),
-    /// A directory subtree to be copied as one exact-manifest operation.
-    CopyDir(CopyDirOp),
     /// A file that needs no action.
     NoOp(NoOpEntry),
     /// A file that will be skipped.
@@ -100,7 +98,6 @@ impl PlannedEntry {
     pub fn rel_path(&self) -> &RepoRelPath {
         match self {
             PlannedEntry::Copy(op) => &op.rel_path,
-            PlannedEntry::CopyDir(op) => &op.rel_path,
             PlannedEntry::NoOp(entry) => &entry.rel_path,
             PlannedEntry::Skip(entry) => &entry.rel_path,
         }
@@ -116,25 +113,48 @@ pub struct CopyOp {
     pub src_abs: PathBuf,
     /// Absolute destination path.
     pub dst_abs: PathBuf,
+    /// Exact source state observed while planning.
+    pub expected_source: FileSnapshot,
+    /// Destination state this operation was planned against.
+    pub expected_destination: DestinationExpectation,
 }
 
-/// Details for a directory that will be copied as one exact-manifest operation.
-#[derive(Debug)]
-pub struct CopyDirOp {
-    /// Repo-relative directory path.
-    pub rel_path: RepoRelPath,
-    /// Absolute source directory path.
-    pub src_abs: PathBuf,
-    /// Absolute destination directory path.
-    pub dst_abs: PathBuf,
-    /// Repo-relative files covered by this directory operation.
-    pub files: Vec<RepoRelPath>,
+/// Destination state an executor must still observe before publishing a copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DestinationExpectation {
+    /// The destination did not exist during planning and must not be replaced.
+    Missing,
+    /// A legacy planned overwrite state. Real execution rejects this state;
+    /// existing pathname replacement cannot be made race-safe portably.
+    ExistingUntracked(FileSnapshot),
 }
 
-impl CopyDirOp {
-    /// Number of manifest files covered by this directory operation.
-    pub fn file_count(&self) -> usize {
-        self.files.len()
+/// A stable, bounded-memory fingerprint of a regular file.
+///
+/// This is an internal concurrency guard rather than a cryptographic digest.
+/// The fields are intentionally private so callers cannot forge an expected
+/// destination state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSnapshot {
+    pub(crate) len: u64,
+    pub(crate) content_fingerprint: u64,
+    pub(crate) permissions: u32,
+    pub(crate) identity: Option<(u64, u64)>,
+}
+
+impl FileSnapshot {
+    pub(crate) fn new(
+        len: u64,
+        content_fingerprint: u64,
+        permissions: u32,
+        identity: Option<(u64, u64)>,
+    ) -> Self {
+        Self {
+            len,
+            content_fingerprint,
+            permissions,
+            identity,
+        }
     }
 }
 
@@ -150,7 +170,7 @@ pub struct NoOpEntry {
 /// Why a file needs no action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoOpReason {
-    /// Destination file exists and is byte-identical.
+    /// Destination content and relevant permissions match the source.
     UpToDate,
 }
 
@@ -166,7 +186,7 @@ pub struct SkipEntry {
 /// Why a file is being skipped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkipReason {
-    /// Destination has an untracked file that differs (requires --overwrite).
+    /// Destination has an untracked file that differs and must be preserved.
     UntrackedConflict,
     /// Destination path is tracked in the destination worktree.
     TrackedConflict,
@@ -185,7 +205,7 @@ pub enum SkipReason {
 pub enum DestinationState {
     /// Destination does not exist.
     Missing,
-    /// Destination exists and is byte-identical to source.
+    /// Destination content and relevant permissions match the source.
     UpToDate,
     /// Destination has an untracked file that differs.
     UntrackedConflict,
@@ -302,11 +322,6 @@ pub struct CopyResult {
 pub enum CopyResultKind {
     /// A single-file copy result.
     File,
-    /// An aggregate directory copy result.
-    Directory {
-        /// Number of manifest files covered by the directory copy.
-        file_count: usize,
-    },
 }
 
 /// Outcome of a single copy attempt.

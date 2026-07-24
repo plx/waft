@@ -6,8 +6,8 @@ use crate::cli::Cli;
 use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
-use crate::git::default_git_backend;
-use crate::model::ValidationSeverity;
+use crate::git::{GitBackend, default_git_backend};
+use crate::model::{RepoContext, ValidationSeverity};
 use crate::validate;
 
 /// Arguments for the list command.
@@ -27,8 +27,18 @@ pub fn run_list(cli: &Cli, policy: &ResolvedPolicy, _args: &ListArgs) -> Result<
         CommandKind::List,
     )?;
 
+    run_list_with_context(cli, policy, _args, &ctx, git.as_ref())
+}
+
+pub(crate) fn run_list_with_context(
+    cli: &Cli,
+    policy: &ResolvedPolicy,
+    _args: &ListArgs,
+    ctx: &RepoContext,
+    git: &dyn GitBackend,
+) -> Result<()> {
     // Validate
-    let report = validate::validate(&ctx, git.as_ref(), policy.symlink_policy);
+    let report = validate::validate(ctx, git, policy.symlink_policy);
     if report.has_errors() {
         for issue in &report.issues {
             if matches!(issue.severity, ValidationSeverity::Error) {
@@ -49,29 +59,10 @@ pub fn run_list(cli: &Cli, policy: &ResolvedPolicy, _args: &ListArgs) -> Result<
         }
     }
 
-    // Enumerate candidates per the active policy.
-    let mut candidates = super::select_candidates(git.as_ref(), &ctx.source_root, policy)?;
-    // Apply post-selection exclusion policy (builtin set + extra excludes).
-    crate::policy_filter::filter_paths(&mut candidates, policy, &ctx.source_root)?;
-
-    if candidates.is_empty() {
-        return Ok(());
-    }
-
-    // Batch check-ignore to find which candidates are actually git-ignored
-    let ignore_results = git.check_ignore(&ctx.source_root, &candidates)?;
-
-    // Keep only records with real ignore hits
-    let mut eligible: Vec<_> = ignore_results
-        .into_iter()
-        .filter(|r| r.match_info.is_some())
-        .collect();
-
-    // Sort lexically by path
-    eligible.sort_by(|a, b| a.path.as_str().cmp(b.path.as_str()));
+    let eligible = super::eligible_records(git, &ctx.source_root, policy, ctx.core_ignore_case)?;
 
     // Pre-compute destination classification data if verbose + dest available
-    let verbose = cli.verbose > 0;
+    let verbose = cli.verbose > 0 && !cli.quiet;
     let dest_tracked_set = if verbose {
         if let Some(ref dest_root) = ctx.dest_root {
             let rel_paths: Vec<_> = eligible.iter().map(|r| r.path.clone()).collect();
@@ -86,6 +77,9 @@ pub fn run_list(cli: &Cli, policy: &ResolvedPolicy, _args: &ListArgs) -> Result<
 
     // Output
     for record in &eligible {
+        if cli.quiet {
+            continue;
+        }
         let path = record.path.as_str();
         if verbose {
             let abs_path = record.path.to_path(&ctx.source_root);
@@ -114,19 +108,7 @@ pub fn run_list(cli: &Cli, policy: &ResolvedPolicy, _args: &ListArgs) -> Result<
                 ctx.core_ignore_case,
                 policy.symlink_policy,
             );
-            let wti_str = match &wti {
-                crate::model::WorktreeincludeStatus::Included {
-                    file,
-                    line,
-                    pattern,
-                } => format!("included ({}:{}: {})", file.display(), line, pattern),
-                crate::model::WorktreeincludeStatus::ExcludedByNegation {
-                    file,
-                    line,
-                    pattern,
-                } => format!("excluded ({}:{}: {})", file.display(), line, pattern),
-                crate::model::WorktreeincludeStatus::NoMatch => "no match".to_string(),
-            };
+            let wti_str = super::format_worktreeinclude_status(&wti, true, policy.semantics);
 
             println!(
                 "{path}\tsize: {size}\tgitignore: {gitignore_str}\tworktreeinclude: {wti_str}"

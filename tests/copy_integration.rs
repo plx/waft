@@ -1,15 +1,14 @@
 //! Copy command integration tests using real Git worktrees.
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
 use std::process;
 use tempfile::TempDir;
 
-fn waft() -> Command {
-    Command::cargo_bin("waft").unwrap()
-}
+mod support;
+
+use support::waft;
 
 fn make_repo() -> TempDir {
     let dir = TempDir::new().unwrap();
@@ -20,7 +19,7 @@ fn make_repo() -> TempDir {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let output = process::Command::new("git")
+    let output = support::git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -32,6 +31,30 @@ fn git(dir: &Path, args: &[&str]) {
         args.join(" "),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+fn git_path(dir: &Path, name: &str) -> std::path::PathBuf {
+    let output = support::git_command()
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--git-path", name])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git rev-parse --git-path {name} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let path = std::path::PathBuf::from(
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end_matches(['\n', '\r'])
+            .to_string(),
+    );
+    if path.is_absolute() {
+        path
+    } else {
+        dir.join(path)
+    }
 }
 
 fn write_file(dir: &Path, rel_path: &str, content: &str) {
@@ -129,6 +152,34 @@ fn copy_basic() {
 }
 
 #[test]
+fn copy_fails_closed_while_destination_index_is_locked() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+    write_file(main_dir.path(), ".env", "SECRET=value\n");
+
+    let index = git_path(&wt_path, "index");
+    let mut lock_name = index.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    let lock = std::path::PathBuf::from(lock_name);
+    fs::write(&lock, b"held by concurrent Git\n").unwrap();
+
+    waft()
+        .args([
+            "copy",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("destination Git index is locked"));
+
+    assert!(!wt_path.join(".env").exists());
+    assert!(lock.exists(), "waft must not remove another process's lock");
+}
+
+#[test]
 fn copy_dry_run_does_not_copy() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");
@@ -154,6 +205,31 @@ fn copy_dry_run_does_not_copy() {
         !dest_env.exists(),
         ".env should NOT be copied in dry-run mode"
     );
+}
+
+#[test]
+fn quiet_dry_run_suppresses_plan_output() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+    write_file(main_dir.path(), ".env", "SECRET=value\n");
+
+    waft()
+        .args([
+            "copy",
+            "--isolated",
+            "--dry-run",
+            "--quiet",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::is_empty());
+
+    assert!(!wt_path.join(".env").exists());
 }
 
 #[test]
@@ -205,7 +281,7 @@ fn copy_skips_untracked_conflict_without_overwrite() {
 }
 
 #[test]
-fn copy_overwrites_with_flag() {
+fn copy_overwrite_flag_fails_closed_on_existing_untracked_file() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");
 
@@ -222,13 +298,49 @@ fn copy_overwrites_with_flag() {
             wt_path.to_str().unwrap(),
         ])
         .assert()
-        .success()
-        .stderr(predicate::str::contains("copied"));
+        .failure()
+        .stderr(predicate::str::contains(
+            "--overwrite cannot safely replace existing untracked destination",
+        ));
 
-    // Destination file should now match source
+    // The destination remains untouched; the user must review and remove it.
     assert_eq!(
         fs::read_to_string(wt_path.join(".env")).unwrap(),
-        "SOURCE_SECRET\n"
+        "DEST_SECRET\n"
+    );
+}
+
+#[test]
+fn copy_overwrite_conflict_aborts_the_whole_plan_before_mutation() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), "a.secret", "COPY_CANDIDATE\n");
+    write_file(main_dir.path(), "z.secret", "SOURCE_CONFLICT\n");
+    write_file(&wt_path, "z.secret", "DEST_CONFLICT\n");
+
+    waft()
+        .args([
+            "copy",
+            "--overwrite",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--overwrite cannot safely replace existing untracked destination",
+        ));
+
+    assert!(
+        !wt_path.join("a.secret").exists(),
+        "a missing destination must not be copied before the conflict is reported"
+    );
+    assert_eq!(
+        fs::read_to_string(wt_path.join("z.secret")).unwrap(),
+        "DEST_CONFLICT\n"
     );
 }
 
@@ -379,16 +491,13 @@ fn copy_strategy_via_env_var() {
 }
 
 #[test]
-fn copy_overwrite_with_cow_replaces_destination() {
+fn copy_overwrite_with_cow_also_fails_closed() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");
 
     write_file(main_dir.path(), ".env", "NEW\n");
     write_file(&wt_path, ".env", "OLD\n");
 
-    // The temp+rename atomic-replace path must still work when the chosen
-    // strategy is reflink: cow-copy should overwrite an existing untracked
-    // destination just like simple-copy does.
     waft()
         .args([
             "--copy-strategy",
@@ -401,9 +510,12 @@ fn copy_overwrite_with_cow_replaces_destination() {
             wt_path.to_str().unwrap(),
         ])
         .assert()
-        .success();
+        .failure()
+        .stderr(predicate::str::contains(
+            "--overwrite cannot safely replace existing untracked destination",
+        ));
 
-    assert_eq!(fs::read_to_string(wt_path.join(".env")).unwrap(), "NEW\n");
+    assert_eq!(fs::read_to_string(wt_path.join(".env")).unwrap(), "OLD\n");
 }
 
 #[test]
@@ -441,7 +553,160 @@ fn copy_skips_tracked_destination_even_with_overwrite() {
 }
 
 #[test]
-fn copy_uses_fast_path_for_safe_fresh_subtree() {
+fn copy_never_overwrites_case_folded_tracked_destination() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".gitignore", "*.env\n");
+    write_file(main_dir.path(), ".worktreeinclude", "*.env\n");
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "select env files"]);
+    git(main_dir.path(), &["config", "core.ignoreCase", "true"]);
+
+    write_file(main_dir.path(), "SECRET.env", "SOURCE_SECRET\n");
+    write_file(&wt_path, "secret.env", "DEST_TRACKED\n");
+    git(&wt_path, &["add", "-f", "secret.env"]);
+    git(&wt_path, &["commit", "-m", "track case-folded destination"]);
+
+    waft()
+        .args([
+            "copy",
+            "--overwrite",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join("secret.env")).unwrap(),
+        "DEST_TRACKED\n"
+    );
+}
+
+#[test]
+fn copy_never_overwrites_unicode_case_folded_tracked_destination() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".gitignore", "*.env\n");
+    write_file(main_dir.path(), ".worktreeinclude", "*.env\n");
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "select env files"]);
+    git(main_dir.path(), &["config", "core.ignoreCase", "true"]);
+
+    write_file(main_dir.path(), "Ä.env", "SOURCE_SECRET\n");
+    write_file(&wt_path, "ä.env", "DEST_TRACKED\n");
+    git(&wt_path, &["add", "-f", "ä.env"]);
+    git(
+        &wt_path,
+        &["commit", "-m", "track Unicode case-folded destination"],
+    );
+
+    waft()
+        .args([
+            "copy",
+            "--overwrite",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join("ä.env")).unwrap(),
+        "DEST_TRACKED\n"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn copy_uses_filesystem_identity_when_ignore_case_is_false() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+    let probe = wt_path.join(".waft-case-probe");
+    fs::write(&probe, "probe").unwrap();
+    let case_insensitive = wt_path.join(".WAFT-CASE-PROBE").exists();
+    fs::remove_file(probe).unwrap();
+    assert!(
+        case_insensitive,
+        "macOS safety regression requires a case-insensitive test volume"
+    );
+
+    write_file(main_dir.path(), ".gitignore", "*.env\n");
+    write_file(main_dir.path(), ".worktreeinclude", "*.env\n");
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "select env files"]);
+    git(main_dir.path(), &["config", "core.ignoreCase", "false"]);
+
+    write_file(main_dir.path(), "SECRET.env", "SOURCE_SECRET\n");
+    write_file(&wt_path, "secret.env", "DEST_TRACKED\n");
+    git(&wt_path, &["add", "-f", "secret.env"]);
+    git(
+        &wt_path,
+        &["commit", "-m", "track filesystem-aliased destination"],
+    );
+
+    waft()
+        .args([
+            "copy",
+            "--overwrite",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("skip"));
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join("secret.env")).unwrap(),
+        "DEST_TRACKED\n"
+    );
+}
+
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn copy_protects_missing_case_alias_when_ignore_case_is_false() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".gitignore", "*.env\n");
+    write_file(main_dir.path(), ".worktreeinclude", "*.env\n");
+    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "select env files"]);
+    git(main_dir.path(), &["config", "core.ignoreCase", "false"]);
+
+    write_file(main_dir.path(), "SECRET.env", "SOURCE_SECRET\n");
+    write_file(&wt_path, "secret.env", "DEST_TRACKED\n");
+    git(&wt_path, &["add", "-f", "secret.env"]);
+    git(&wt_path, &["commit", "-m", "track lower-case destination"]);
+    fs::remove_file(wt_path.join("secret.env")).unwrap();
+
+    waft()
+        .args([
+            "copy",
+            "--overwrite",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("skip"));
+
+    assert!(!wt_path.join("secret.env").exists());
+    assert!(!wt_path.join("SECRET.env").exists());
+}
+
+#[test]
+fn copy_streams_each_selected_file_in_fresh_subtree() {
     let (main_dir, wt_dir) = setup_with_safe_full_dir();
     let wt_path = wt_dir.path().join("linked");
 
@@ -453,8 +718,8 @@ fn copy_uses_fast_path_for_safe_fresh_subtree() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(stderr.contains("copy-dir: cfg (3 files)"), "{stderr}");
-    assert!(!stderr.contains("copied: cfg/a.conf"), "{stderr}");
+    assert!(stderr.contains("copied: cfg/a.conf"), "{stderr}");
+    assert!(stderr.contains("copied: cfg/nested/c.conf"), "{stderr}");
     assert_eq!(
         fs::read_to_string(wt_path.join("cfg/a.conf")).unwrap(),
         "a\n"
@@ -467,7 +732,7 @@ fn copy_uses_fast_path_for_safe_fresh_subtree() {
 }
 
 #[test]
-fn copy_falls_back_for_existing_dst_dir() {
+fn copy_streams_selected_files_into_existing_dst_dir() {
     let (main_dir, wt_dir) = setup_with_safe_full_dir();
     let wt_path = wt_dir.path().join("linked");
     fs::create_dir_all(wt_path.join("cfg")).unwrap();
@@ -476,7 +741,6 @@ fn copy_falls_back_for_existing_dst_dir() {
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
     assert!(stderr.contains("copied: cfg/a.conf"), "{stderr}");
     assert_eq!(
         fs::read_to_string(wt_path.join("cfg/b.conf")).unwrap(),
@@ -485,23 +749,22 @@ fn copy_falls_back_for_existing_dst_dir() {
 }
 
 #[test]
-fn copy_idempotency_with_fast_path() {
+fn copy_streaming_manifest_is_idempotent() {
     let (main_dir, wt_dir) = setup_with_safe_full_dir();
     let wt_path = wt_dir.path().join("linked");
 
     let first = run_copy(main_dir.path(), &wt_path);
     assert!(first.status.success());
-    assert!(String::from_utf8_lossy(&first.stderr).contains("copy-dir: cfg (3 files)"));
+    assert!(String::from_utf8_lossy(&first.stderr).contains("copied: cfg/a.conf"));
 
     let second = run_copy(main_dir.path(), &wt_path);
     assert!(second.status.success());
     let stderr = String::from_utf8_lossy(&second.stderr);
-    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
     assert!(stderr.contains("4 up-to-date"), "{stderr}");
 }
 
 #[test]
-fn copy_fast_path_does_not_write_missing_tracked_dest_file() {
+fn copy_manifest_does_not_write_missing_tracked_dest_file() {
     let (main_dir, wt_dir) = setup_with_safe_full_dir();
     let wt_path = wt_dir.path().join("linked");
 
@@ -514,7 +777,6 @@ fn copy_fast_path_does_not_write_missing_tracked_dest_file() {
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
     assert!(stderr.contains("skipped"), "{stderr}");
     assert!(!wt_path.join("cfg/a.conf").exists());
     assert_eq!(
@@ -525,7 +787,7 @@ fn copy_fast_path_does_not_write_missing_tracked_dest_file() {
 
 #[cfg(unix)]
 #[test]
-fn copy_fast_path_skips_subtree_with_symlink() {
+fn copy_manifest_skips_selected_symlink() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");
 
@@ -540,7 +802,6 @@ fn copy_fast_path_skips_subtree_with_symlink() {
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
     assert!(stderr.contains("skipped"), "{stderr}");
     assert_eq!(
         fs::read_to_string(wt_path.join("cfg/a.conf")).unwrap(),
@@ -550,7 +811,7 @@ fn copy_fast_path_skips_subtree_with_symlink() {
 }
 
 #[test]
-fn copy_fast_path_does_not_clone_gitlink_contents() {
+fn copy_manifest_does_not_copy_gitlink_contents() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");
 
@@ -580,8 +841,8 @@ fn copy_fast_path_does_not_clone_gitlink_contents() {
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(stderr.contains("copy-dir: safe (1 files)"), "{stderr}");
-    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
+    assert!(stderr.contains("copied: safe/a.conf"), "{stderr}");
+    assert!(stderr.contains("copied: cfg/a.conf"), "{stderr}");
     assert_eq!(
         fs::read_to_string(wt_path.join("cfg/a.conf")).unwrap(),
         "a\n"
@@ -590,7 +851,7 @@ fn copy_fast_path_does_not_clone_gitlink_contents() {
 }
 
 #[test]
-fn copy_fast_path_does_not_clone_nested_repo_contents() {
+fn copy_manifest_does_not_copy_nested_repo_contents() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");
 
@@ -607,8 +868,8 @@ fn copy_fast_path_does_not_clone_nested_repo_contents() {
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(stderr.contains("copy-dir: safe (1 files)"), "{stderr}");
-    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
+    assert!(stderr.contains("copied: safe/a.conf"), "{stderr}");
+    assert!(stderr.contains("copied: cfg/a.conf"), "{stderr}");
     assert_eq!(
         fs::read_to_string(wt_path.join("cfg/a.conf")).unwrap(),
         "a\n"
@@ -617,7 +878,7 @@ fn copy_fast_path_does_not_clone_nested_repo_contents() {
 }
 
 #[test]
-fn copy_fast_path_does_not_create_empty_dirs() {
+fn copy_manifest_does_not_create_empty_dirs() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");
 
@@ -630,9 +891,6 @@ fn copy_fast_path_does_not_create_empty_dirs() {
 
     let output = run_copy(main_dir.path(), &wt_path);
     assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    assert!(!stderr.contains("copy-dir: cfg"), "{stderr}");
     assert_eq!(
         fs::read_to_string(wt_path.join("cfg/a.conf")).unwrap(),
         "a\n"
@@ -641,7 +899,7 @@ fn copy_fast_path_does_not_create_empty_dirs() {
 }
 
 #[test]
-fn copy_fast_path_handles_nested_dir_with_missing_parent() {
+fn copy_manifest_handles_nested_dir_with_missing_parent() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");
 
@@ -652,14 +910,14 @@ fn copy_fast_path_handles_nested_dir_with_missing_parent() {
     git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(
         main_dir.path(),
-        &["commit", "-m", "nested fast path fixture"],
+        &["commit", "-m", "nested manifest fixture"],
     );
 
     let output = run_copy(main_dir.path(), &wt_path);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    assert!(stderr.contains("copy-dir: outer/cfg (1 files)"), "{stderr}");
+    assert!(stderr.contains("copied: outer/cfg/a.conf"), "{stderr}");
     assert_eq!(
         fs::read_to_string(wt_path.join("outer/cfg/a.conf")).unwrap(),
         "a\n"

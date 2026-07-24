@@ -248,7 +248,7 @@ fn extra_excludes_must_be_strings() {
 // --- Layer composition ---
 
 #[test]
-fn scalar_overwrite_in_precedence_order() {
+fn higher_profile_resets_profile_owned_scalars() {
     let lower = ConfigLayer {
         profile: Some(CompatProfile::Git),
         when_missing: Some(WhenMissingWorktreeinclude::Blank),
@@ -260,8 +260,7 @@ fn scalar_overwrite_in_precedence_order() {
     };
     let policy = ResolvedPolicy::from_layers([&lower, &upper]);
     assert_eq!(policy.profile, CompatProfile::Wt);
-    // Lower's set value is preserved when upper does not override it.
-    assert_eq!(policy.when_missing, WhenMissingWorktreeinclude::Blank);
+    assert_eq!(policy.when_missing, WhenMissingWorktreeinclude::AllIgnored);
 }
 
 #[test]
@@ -427,7 +426,7 @@ fn preset_expands_unset_knobs() {
 }
 
 #[test]
-fn explicit_knob_beats_preset_regardless_of_layer() {
+fn higher_profile_resets_lower_layer_knob() {
     let user = ConfigLayer {
         symlink_policy: Some(SymlinkPolicy::Error),
         ..ConfigLayer::default()
@@ -437,8 +436,7 @@ fn explicit_knob_beats_preset_regardless_of_layer() {
         ..ConfigLayer::default()
     };
     let policy = ResolvedPolicy::from_layers([&user, &cli]);
-    // Wt preset says Follow but the user's explicit Error wins.
-    assert_eq!(policy.symlink_policy, SymlinkPolicy::Error);
+    assert_eq!(policy.symlink_policy, SymlinkPolicy::Follow);
 }
 
 // --- Resolution wrapper ---

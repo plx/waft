@@ -6,8 +6,8 @@ use crate::cli::Cli;
 use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
-use crate::git::default_git_backend;
-use crate::model::ValidationSeverity;
+use crate::git::{GitBackend, default_git_backend};
+use crate::model::{RepoContext, ValidationSeverity};
 use crate::validate;
 
 /// Arguments for the copy command.
@@ -17,7 +17,7 @@ pub struct CopyArgs {
     #[arg(short = 'n', long)]
     pub dry_run: bool,
 
-    /// Allow overwriting existing untracked destination files.
+    /// Compatibility flag; existing destination conflicts fail closed.
     #[arg(long)]
     pub overwrite: bool,
 }
@@ -25,7 +25,6 @@ pub struct CopyArgs {
 /// Run the `copy` subcommand.
 pub fn run_copy(cli: &Cli, policy: &ResolvedPolicy, args: &CopyArgs) -> Result<()> {
     let git = default_git_backend();
-    let fs = crate::fs::RealFs;
 
     // Resolve context (copy requires a destination)
     let ctx = context::resolve_context(
@@ -36,8 +35,20 @@ pub fn run_copy(cli: &Cli, policy: &ResolvedPolicy, args: &CopyArgs) -> Result<(
         CommandKind::Copy,
     )?;
 
+    run_copy_with_context(cli, policy, args, &ctx, git.as_ref())
+}
+
+pub(crate) fn run_copy_with_context(
+    cli: &Cli,
+    policy: &ResolvedPolicy,
+    args: &CopyArgs,
+    ctx: &RepoContext,
+    git: &dyn GitBackend,
+) -> Result<()> {
+    let fs = crate::fs::RealFs;
+
     // Validate
-    let report = validate::validate(&ctx, git.as_ref(), policy.symlink_policy);
+    let report = validate::validate(ctx, git, policy.symlink_policy);
     if report.has_errors() {
         for issue in &report.issues {
             if matches!(issue.severity, ValidationSeverity::Error) {
@@ -58,23 +69,11 @@ pub fn run_copy(cli: &Cli, policy: &ResolvedPolicy, args: &CopyArgs) -> Result<(
         }
     }
 
-    // Enumerate candidate files per the active policy.
-    let mut candidates = super::select_candidates(git.as_ref(), &ctx.source_root, policy)?;
-    // Apply post-selection exclusion policy (builtin set + extra excludes).
-    crate::policy_filter::filter_paths(&mut candidates, policy, &ctx.source_root)?;
-    if candidates.is_empty() {
-        if !cli.quiet {
-            eprintln!("no eligible files found");
-        }
-        return Ok(());
-    }
-
-    let ignore_results = git.check_ignore(&ctx.source_root, &candidates)?;
-    let eligible: Vec<_> = ignore_results
-        .into_iter()
-        .filter(|r| r.match_info.is_some())
-        .map(|r| r.path)
-        .collect();
+    let eligible: Vec<_> =
+        super::eligible_records(git, &ctx.source_root, policy, ctx.core_ignore_case)?
+            .into_iter()
+            .map(|r| r.path)
+            .collect();
 
     if eligible.is_empty() {
         if !cli.quiet {
@@ -87,23 +86,17 @@ pub fn run_copy(cli: &Cli, policy: &ResolvedPolicy, args: &CopyArgs) -> Result<(
     let groups = crate::eligibility_groups::compute(&ctx.source_root, eligible, &gitlinks)?;
 
     // Build plan
-    let plan = crate::planner::plan(
-        &ctx,
-        report,
-        groups,
-        git.as_ref(),
-        &fs,
-        args.overwrite,
-        args.dry_run,
-    )?;
+    let plan = crate::planner::plan(ctx, report, groups, git, &fs, args.overwrite, args.dry_run)?;
 
     if args.dry_run {
-        crate::planner::render_dry_run(&plan);
+        if !cli.quiet {
+            crate::planner::render_dry_run(&plan);
+        }
         return Ok(());
     }
 
     // Execute
-    let copy_report = crate::executor::execute(&plan, &fs, policy.copy_strategy);
+    let copy_report = crate::executor::execute(&plan, &fs, git, policy.copy_strategy);
     crate::executor::render_report(&copy_report, cli.quiet);
 
     if let Some((failed, total)) = crate::executor::report_has_failures(&copy_report) {

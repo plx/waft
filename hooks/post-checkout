@@ -3,8 +3,10 @@
 # run waft from the new worktree to copy in any .worktreeinclude-selected
 # ignored files from the main worktree.
 #
-# Wired via `git config core.hooksPath hooks` (see `just install-hooks`).
-# Vanilla git: no hook manager required.
+# `scripts/install-hooks.sh` copies this reviewed version, together with a
+# pinned waft binary, under Git's common directory. Do not point
+# core.hooksPath at this tracked directory: a checked-out branch can replace
+# tracked hook content before Git executes it.
 
 set -eu
 
@@ -27,16 +29,23 @@ git_dir_abs="$(cd "${git_dir}" && pwd)"
 common_dir_abs="$(cd "${common_dir}" && pwd)"
 [ "${git_dir_abs}" != "${common_dir_abs}" ] || exit 0
 
-# Resolve the waft binary: explicit override wins, then PATH lookup.
-waft_bin="${WAFT:-}"
-if [ -z "${waft_bin}" ]; then
-  if command -v waft >/dev/null 2>&1; then
-    waft_bin="waft"
-  else
-    echo "post-checkout: waft not found on PATH; skipping worktree copy." >&2
-    echo "  install waft or set WAFT=<path-to-binary> to enable." >&2
-    exit 0
-  fi
+# A managed installation always uses the reviewed binary snapshot next to
+# this hook. WAFT/PATH are fallback mechanisms only for explicitly unmanaged
+# manual hook use.
+hook_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+if [ -x "${hook_dir}/.waft-bin" ]; then
+  waft_bin="${hook_dir}/.waft-bin"
+elif [ -n "${WAFT:-}" ]; then
+  waft_bin="${WAFT}"
+elif command -v waft >/dev/null 2>&1; then
+  waft_bin="waft"
+else
+  echo "post-checkout: waft not found on PATH; skipping worktree copy." >&2
+  echo "  re-run the hook installer or set WAFT=<path-to-binary> to enable." >&2
+  exit 0
 fi
 
-exec "${waft_bin}"
+# Automatic operation must not inherit user-level or WAFT_* policy. Project
+# policy is still loaded from the trusted source worktree, and explicit
+# operational overrides such as WAFT_GIT_BACKEND remain available.
+exec "${waft_bin}" --isolated

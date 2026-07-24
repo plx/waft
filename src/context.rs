@@ -71,14 +71,18 @@ pub fn resolve_context(
 
     // List all worktrees
     let worktrees = git.list_worktrees(&toplevel)?;
-    let main_wt = worktrees
+    let main_record = worktrees
         .iter()
         .find(|w| w.is_main)
         .ok_or_else(|| Error::Git {
             message: "no main worktree found".to_string(),
-        })?
-        .path
-        .clone();
+        })?;
+    if main_record.is_bare && command == CommandKind::Copy {
+        return Err(Error::Context {
+            message: "copy is unsupported when the repository's main worktree is bare; use a non-bare main worktree as the copy source".to_string(),
+        });
+    }
+    let main_wt = main_record.path.clone();
 
     let known_worktrees: Vec<PathBuf> = worktrees.iter().map(|w| w.path.clone()).collect();
 
@@ -360,5 +364,27 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("not a linked worktree"));
+    }
+
+    #[test]
+    fn copy_rejects_bare_main_with_actionable_error() {
+        let main = main_repo_path();
+        let linked = linked_repo_path();
+        let git = MockGit::new(vec![
+            WorktreeRecord {
+                path: main.clone(),
+                is_main: true,
+                is_bare: true,
+            },
+            WorktreeRecord {
+                path: linked.clone(),
+                is_main: false,
+                is_bare: false,
+            },
+        ]);
+
+        let err =
+            resolve_context(&git, Some(&main), Some(&linked), None, CommandKind::Copy).unwrap_err();
+        assert!(err.to_string().contains("main worktree is bare"));
     }
 }

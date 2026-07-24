@@ -11,6 +11,20 @@ over to linked worktrees because they're in `.gitignore`.
 `waft` solves this: create a `.worktreeinclude` file listing which ignored
 files you want copied, and `waft` handles the rest.
 
+## Installation
+
+`waft` is not currently published to crates.io. Install a reviewed revision
+directly from the repository:
+
+```sh
+cargo install --git https://github.com/plx/waft \
+  --rev REVIEWED_COMMIT_SHA --locked waft
+```
+
+Replace `REVIEWED_COMMIT_SHA` with the full commit you reviewed. Omitting
+`--rev` installs the current tip of the default branch and is not recommended
+for managed environments.
+
 ## Quick start
 
 ```sh
@@ -86,13 +100,14 @@ A file is eligible for copying when **all** of these are true:
 | `-C <PATH>` | Operate as if started in PATH |
 | `-q, --quiet` | Suppress non-error output |
 | `-v, --verbose` | Increase output verbosity |
+| `--isolated` | Ignore user config and `WAFT_*` policy environment variables |
 
 ## Copy options
 
 | Option | Description |
 |--------|-------------|
 | `-n, --dry-run` | Show what would be done without copying |
-| `--overwrite` | Allow overwriting existing untracked files |
+| `--overwrite` | Compatibility flag; fails closed on existing destination conflicts |
 
 ## Compatibility profiles
 
@@ -116,12 +131,23 @@ Profile and individual knobs are resolved from a layered config in this order
 
 1. Built-in defaults (claude preset)
 2. User config: `~/.config/waft/config.toml`
-3. Project configs: each `.waft.toml` from repo root down to cwd
+3. Project configs: each `.waft.toml` in the resolved source worktree, from
+   its repo root down to the invocation directory's equivalent source path
 4. Environment variables (`WAFT_*`)
 5. CLI flags
 
-Explicit knob settings (in any layer) always beat preset values from a
-higher-precedence layer.
+Project configs must be regular files. Symlinked configs fail closed, and
+discovery does not cross nested-repository or registered-submodule boundaries.
+
+Selecting a profile resets all profile-owned knobs at that layer. Explicit
+knobs in the same layer, or in a later layer, can override the preset; knobs
+from lower layers cannot silently alter a higher-precedence profile.
+
+For managed or hermetic use, `--isolated` removes layers 2 and 4. Built-in
+defaults, source-repository project configs, and CLI overrides still apply in
+that order. `--isolated` conflicts with `--config`; it also ignores
+`WAFT_CONFIG_PATH`. Operational environment such as `WAFT_GIT_BACKEND` is not
+part of policy resolution and remains available.
 
 ### Per-knob CLI flags
 
@@ -135,6 +161,7 @@ higher-precedence layer.
 | `--extra-exclude <GLOB>` | Repeatable additional excludes |
 | `--replace-extra-excludes` | Drop inherited `extra-exclude` values |
 | `--config <PATH>` | Use this file instead of the default user config |
+| `--isolated` | Use only defaults, source project config, and CLI policy flags |
 
 Example `.waft.toml`:
 
@@ -150,11 +177,31 @@ extra = ["*.bak"]
 
 ## Safety guarantees
 
-- **Tracked files are never overwritten** in the destination worktree
-- **Symlink traversal is blocked** — waft refuses to follow symlinks in
-  source files or write through symlinked destination parents
-- **Atomic writes** — files are written to a temp file first, then renamed
+- **Tracked-file protection** — destination trackedness is checked while
+  planning and again under Git's cooperative index lock immediately before
+  publication
+- **No replacement** — every destination is published with no-clobber
+  semantics; existing pathnames are preserved, and `--overwrite` fails closed
+  when it encounters an untracked conflict
+- **Descriptor-anchored traversal on Unix** — source and destination
+  components are opened relative to canonical worktree directory handles with
+  `O_NOFOLLOW`; source state is matched to its planning snapshot, and a
+  destination parent is revalidated before publication
+- **Durable atomic visibility** — file contents are synced to a temp file
+  before publication, then the parent directory is synced on Unix
 - **Dry-run is mutation-free** — `--dry-run` reads only, writes nothing
+
+Normal Git writers honor the index lock and cannot change trackedness across
+the final check and publication. A process that edits the index directly while
+ignoring Git's lock protocol remains outside that guarantee. Unix directory
+handles prevent a symlink or name swap from redirecting publication to a
+different directory object. An already-open authorized directory can still be
+relocated by another process after final revalidation; avoid concurrent
+directory relocation when the destination pathname itself must remain stable.
+For immediacy without holding Git's index lock during content preparation,
+waft reacquires the lock and rechecks the index for each published file. That
+cost is proportional to selected files times index size; keep automatic
+manifests narrow and benchmark large cache manifests in monorepos.
 
 ## Building
 
@@ -162,11 +209,46 @@ extra = ["*.bak"]
 just build-release
 ```
 
+## Optional post-checkout hook
+
+Review the checkout, then install the automatic worktree hook with:
+
+```sh
+just install-hooks
+```
+
+The installer builds `waft`, then copies the reviewed binary and hook into
+the repository's common Git directory. It configures an absolute
+`core.hooksPath`, proxies the standard Git hooks to the previously effective
+trusted hook directory, and refuses to chain hooks sourced from a checked-out
+worktree or through a symlink. It also refuses worktree-scoped hook overrides
+in any extant linked worktree, since those would bypass the shared managed
+path. Subsequent branch changes cannot replace the installed hook or binary.
+The automatic hook always invokes that pinned sibling binary and runs
+`waft --isolated`, so ambient `WAFT`, user config, and `WAFT_*` policy
+variables cannot change automatic execution or copy selection; trusted
+project config from the source worktree still applies. Re-run the command
+after upgrading `waft`.
+
+Do **not** configure `core.hooksPath` to this repository's tracked `hooks/`
+directory. A branch can change tracked hook content before Git executes it.
+
+To restore the prior hook configuration:
+
+```sh
+just uninstall-hooks
+```
+
 ## Testing
 
 ```sh
 just check-test
 ```
+
+`waft` intentionally creates additional copies of ignored files. Prefer
+short-lived credentials or secret injection over copying high-value,
+long-lived secrets, and review `waft copy --dry-run` before enabling the
+automatic hook.
 
 ## License
 

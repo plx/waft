@@ -1,7 +1,8 @@
-//! Unit tests for compat-profile preset expansion and explicit-override
+//! Unit tests for compat-profile preset expansion and layer-local override
 //! precedence.
 //!
-//! Documented contract: explicit knob > preset > legacy default. Profiles
+//! A profile resets its coordinated knobs at the layer where it is selected.
+//! Explicit knobs in that layer or a higher layer can override it. Profiles
 //! never set `extra_excludes`; that array is purely layered.
 
 use waft::config::{
@@ -90,7 +91,7 @@ fn explicit_knob_in_same_layer_overrides_preset() {
 }
 
 #[test]
-fn explicit_knob_in_lower_layer_still_beats_preset() {
+fn higher_profile_resets_explicit_knob_from_lower_layer() {
     // user file sets symlink_policy=ignore; CLI selects wt profile
     let user = ConfigLayer {
         symlink_policy: Some(SymlinkPolicy::Ignore),
@@ -102,16 +103,15 @@ fn explicit_knob_in_lower_layer_still_beats_preset() {
     };
     let policy = resolve(&[&user, &cli]);
     assert_eq!(policy.profile, CompatProfile::Wt);
-    // Wt preset's symlink_policy would be Follow, but the user file's
-    // explicit Ignore wins because explicit > preset, regardless of layer.
-    assert_eq!(policy.symlink_policy, SymlinkPolicy::Ignore);
+    // Selecting Wt at the higher layer resets the lower-layer override.
+    assert_eq!(policy.symlink_policy, SymlinkPolicy::Follow);
     // Other Wt preset values still apply.
     assert_eq!(policy.semantics, WorktreeincludeSemantics::Wt039);
 }
 
 #[test]
-fn explicit_knob_in_higher_layer_overrides_preset() {
-    // CLI selects git profile; env explicitly sets when_missing
+fn higher_profile_resets_explicit_knob_from_immediately_lower_layer() {
+    // The lower env layer sets when_missing; the CLI selects Git.
     let env = ConfigLayer {
         when_missing: Some(WhenMissingWorktreeinclude::AllIgnored),
         ..ConfigLayer::default()
@@ -122,9 +122,7 @@ fn explicit_knob_in_higher_layer_overrides_preset() {
     };
     let policy = resolve(&[&env, &cli]);
     assert_eq!(policy.profile, CompatProfile::Git);
-    // Git preset's when_missing is Blank, but env explicitly set
-    // AllIgnored. Explicit beats preset.
-    assert_eq!(policy.when_missing, WhenMissingWorktreeinclude::AllIgnored);
+    assert_eq!(policy.when_missing, WhenMissingWorktreeinclude::Blank);
     // Other Git preset values still apply.
     assert_eq!(policy.semantics, WorktreeincludeSemantics::Git);
     assert_eq!(policy.symlink_policy, SymlinkPolicy::Ignore);

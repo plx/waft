@@ -1,9 +1,8 @@
-use assert_cmd::Command;
 use predicates::prelude::*;
 
-fn waft() -> Command {
-    Command::cargo_bin("waft").unwrap()
-}
+mod support;
+
+use support::waft;
 
 #[test]
 fn help_shows_usage() {
@@ -32,7 +31,8 @@ fn help_shows_compat_profile_flags() {
         .stdout(predicate::str::contains("--extra-exclude"))
         .stdout(predicate::str::contains("--replace-extra-excludes"))
         .stdout(predicate::str::contains("--copy-strategy"))
-        .stdout(predicate::str::contains("--config"));
+        .stdout(predicate::str::contains("--config"))
+        .stdout(predicate::str::contains("--isolated"));
 }
 
 #[test]
@@ -53,6 +53,15 @@ fn invalid_compat_profile_value_rejected() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("rainbow"));
+}
+
+#[test]
+fn isolated_conflicts_with_explicit_user_config() {
+    waft()
+        .args(["--isolated", "--config", "config.toml", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used with"));
 }
 
 #[test]

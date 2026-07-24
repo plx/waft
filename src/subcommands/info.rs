@@ -1,14 +1,15 @@
 //! `info` subcommand — detailed status for one or more paths.
 
 use clap::Args;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::cli::Cli;
 use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
-use crate::git::default_git_backend;
-use crate::model::ValidationSeverity;
+use crate::git::{GitBackend, default_git_backend};
+use crate::model::{RepoContext, ValidationSeverity};
 use crate::validate;
 
 /// Arguments for the info command.
@@ -23,10 +24,6 @@ pub struct InfoArgs {
 pub fn run_info(cli: &Cli, policy: &ResolvedPolicy, args: &InfoArgs) -> Result<()> {
     let git = default_git_backend();
 
-    if cli.verbose > 0 {
-        print_resolved_policy(policy);
-    }
-
     let ctx = context::resolve_context(
         git.as_ref(),
         cli.source.as_deref(),
@@ -35,8 +32,22 @@ pub fn run_info(cli: &Cli, policy: &ResolvedPolicy, args: &InfoArgs) -> Result<(
         CommandKind::Info,
     )?;
 
+    run_info_with_context(cli, policy, args, &ctx, git.as_ref())
+}
+
+pub(crate) fn run_info_with_context(
+    cli: &Cli,
+    policy: &ResolvedPolicy,
+    args: &InfoArgs,
+    ctx: &RepoContext,
+    git: &dyn GitBackend,
+) -> Result<()> {
+    if cli.verbose > 0 && !cli.quiet {
+        print_resolved_policy(policy);
+    }
+
     // Validate
-    let report = validate::validate(&ctx, git.as_ref(), policy.symlink_policy);
+    let report = validate::validate(ctx, git, policy.symlink_policy);
     if report.has_errors() {
         for issue in &report.issues {
             if matches!(issue.severity, ValidationSeverity::Error) {
@@ -60,9 +71,15 @@ pub fn run_info(cli: &Cli, policy: &ResolvedPolicy, args: &InfoArgs) -> Result<(
     // Normalize all input paths to repo-relative
     let mut rel_paths = Vec::new();
     for path in &args.paths {
-        let rp = crate::path::RepoRelPath::normalize(path, &ctx.source_root)?;
+        let rp = cli.normalize_source_path(path, ctx)?;
         rel_paths.push(rp);
     }
+
+    let eligible_set: HashSet<_> =
+        super::eligible_records(git, &ctx.source_root, policy, ctx.core_ignore_case)?
+            .into_iter()
+            .map(|record| record.path)
+            .collect();
 
     // Check tracked status for all paths
     let tracked_set = git.tracked_paths(&ctx.source_root, &rel_paths)?;
@@ -92,28 +109,46 @@ pub fn run_info(cli: &Cli, policy: &ResolvedPolicy, args: &InfoArgs) -> Result<(
     // Print info for each path
     for rp in &rel_paths {
         let abs_path = rp.to_path(&ctx.source_root);
-        let source_exists = abs_path.exists();
-        let source_kind = if !source_exists {
-            "missing"
-        } else if abs_path.is_file() {
-            "file"
-        } else if abs_path.is_dir() {
-            "directory"
-        } else if abs_path.is_symlink() {
-            "symlink"
-        } else {
-            "other"
+        let source_metadata = std::fs::symlink_metadata(&abs_path).ok();
+        let source_exists = source_metadata.is_some();
+        let source_kind = match source_metadata.as_ref().map(|m| m.file_type()) {
+            None => "missing",
+            Some(kind) if kind.is_symlink() => "symlink",
+            Some(kind) if kind.is_file() => "file",
+            Some(kind) if kind.is_dir() => "directory",
+            Some(_) => "other",
         };
+        let source_is_regular = source_kind == "file";
 
         let is_tracked = tracked_set.contains(rp);
+        let eligible = eligible_set.contains(rp)
+            || (source_exists
+                && eligible_set.iter().any(|path| {
+                    crate::git::repo_paths_equivalent(
+                        path.as_str(),
+                        rp.as_str(),
+                        ctx.core_ignore_case,
+                    ) || crate::git::repo_paths_alias_on_filesystem(&ctx.source_root, path, rp)
+                }));
 
         // Git ignore status
         let gitignore_str = if is_tracked {
             "tracked".to_string()
         } else if let Some(record) = ignore_map.get(rp.as_str()) {
-            if let Some(ref info) = record.match_info {
+            if record.ignored {
+                let info = record
+                    .match_info
+                    .as_ref()
+                    .expect("ignored records include their matching rule");
                 format!(
                     "ignored ({}:{}: {})",
+                    info.source_file.display(),
+                    info.line,
+                    info.pattern
+                )
+            } else if let Some(ref info) = record.match_info {
+                format!(
+                    "not ignored ({}:{}: {})",
                     info.source_file.display(),
                     info.line,
                     info.pattern
@@ -130,44 +165,24 @@ pub fn run_info(cli: &Cli, policy: &ResolvedPolicy, args: &InfoArgs) -> Result<(
         let wti = engine.evaluate(
             &ctx.source_root,
             rp.as_str(),
-            abs_path.is_dir(),
+            source_kind == "directory",
             ctx.core_ignore_case,
             policy.symlink_policy,
         );
-        let wti_str = match &wti {
-            crate::model::WorktreeincludeStatus::Included {
-                file,
-                line,
-                pattern,
-            } => format!("included ({}:{}: {})", file.display(), line, pattern),
-            crate::model::WorktreeincludeStatus::ExcludedByNegation {
-                file,
-                line,
-                pattern,
-            } => format!("excluded ({}:{}: {})", file.display(), line, pattern),
-            crate::model::WorktreeincludeStatus::NoMatch => "no match".to_string(),
-        };
+        let wti_str = super::format_worktreeinclude_status(&wti, eligible, policy.semantics);
 
-        // Eligibility
-        let is_ignored = !is_tracked
-            && ignore_map
-                .get(rp.as_str())
-                .map(|r| r.match_info.is_some())
-                .unwrap_or(false);
-        let is_included = matches!(wti, crate::model::WorktreeincludeStatus::Included { .. });
-        let eligible =
-            source_exists && abs_path.is_file() && !is_tracked && is_ignored && is_included;
-
-        println!("path: {rp}");
-        println!(
-            "source_exists: {}",
-            if source_exists { "yes" } else { "no" }
-        );
-        println!("source_kind: {source_kind}");
-        println!("tracked: {}", if is_tracked { "yes" } else { "no" });
-        println!("gitignore: {gitignore_str}");
-        println!("worktreeinclude: {wti_str}");
-        println!("eligible_to_copy: {}", if eligible { "yes" } else { "no" });
+        if !cli.quiet {
+            println!("path: {rp}");
+            println!(
+                "source_exists: {}",
+                if source_exists { "yes" } else { "no" }
+            );
+            println!("source_kind: {source_kind}");
+            println!("tracked: {}", if is_tracked { "yes" } else { "no" });
+            println!("gitignore: {gitignore_str}");
+            println!("worktreeinclude: {wti_str}");
+            println!("eligible_to_copy: {}", if eligible { "yes" } else { "no" });
+        }
 
         // Destination info if available
         if let Some(ref dest_root) = ctx.dest_root {
@@ -176,7 +191,7 @@ pub fn run_info(cli: &Cli, policy: &ResolvedPolicy, args: &InfoArgs) -> Result<(
             // Only run full classification when source is a regular file
             // (matching planner preconditions). For missing/non-regular sources
             // classify_destination's read-based comparison would be misleading.
-            if source_exists && abs_path.is_file() {
+            if source_is_regular {
                 let state = crate::planner::classify_destination(
                     rp,
                     &abs_path,
@@ -184,41 +199,57 @@ pub fn run_info(cli: &Cli, policy: &ResolvedPolicy, args: &InfoArgs) -> Result<(
                     &dest_tracked_set,
                     &fs,
                 );
-                match state {
-                    crate::model::DestinationState::Missing => {
-                        println!("destination: missing");
-                        if eligible {
-                            println!("planned_action: copy");
+                if !cli.quiet {
+                    match state {
+                        crate::model::DestinationState::Missing => {
+                            println!("destination: missing");
+                            if eligible {
+                                println!("planned_action: copy");
+                            }
+                        }
+                        crate::model::DestinationState::UpToDate => {
+                            println!("destination: up-to-date");
+                            if eligible {
+                                println!("planned_action: no-op");
+                            }
+                        }
+                        crate::model::DestinationState::UntrackedConflict => {
+                            println!("destination: untracked-conflict");
+                            if eligible {
+                                println!("planned_action: skip (untracked conflict)");
+                            }
+                        }
+                        crate::model::DestinationState::TrackedConflict => {
+                            println!("destination: tracked-conflict");
+                            if eligible {
+                                println!("planned_action: skip (tracked conflict)");
+                            }
+                        }
+                        crate::model::DestinationState::TypeConflict => {
+                            println!("destination: type-conflict");
+                            if eligible {
+                                println!("planned_action: skip (type conflict)");
+                            }
+                        }
+                        crate::model::DestinationState::UnsafePath => {
+                            println!("destination: unsafe-path");
+                            if eligible {
+                                println!("planned_action: skip (unsafe path)");
+                            }
                         }
                     }
-                    crate::model::DestinationState::UpToDate => {
-                        println!("destination: up-to-date");
-                        println!("planned_action: no-op");
-                    }
-                    crate::model::DestinationState::UntrackedConflict => {
-                        println!("destination: untracked-conflict");
-                        println!("planned_action: skip (untracked conflict)");
-                    }
-                    crate::model::DestinationState::TrackedConflict => {
-                        println!("destination: tracked-conflict");
-                        println!("planned_action: skip (tracked conflict)");
-                    }
-                    crate::model::DestinationState::TypeConflict => {
-                        println!("destination: type-conflict");
-                        println!("planned_action: skip (type conflict)");
-                    }
-                    crate::model::DestinationState::UnsafePath => {
-                        println!("destination: unsafe-path");
-                        println!("planned_action: skip (unsafe path)");
-                    }
                 }
-            } else if dest_path.exists() {
-                println!("destination: exists");
-            } else {
-                println!("destination: missing");
+            } else if !cli.quiet {
+                if std::fs::symlink_metadata(&dest_path).is_ok() {
+                    println!("destination: exists");
+                } else {
+                    println!("destination: missing");
+                }
             }
         }
-        println!();
+        if !cli.quiet {
+            println!();
+        }
     }
 
     Ok(())

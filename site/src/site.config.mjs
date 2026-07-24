@@ -15,7 +15,7 @@ export const siteConfig = {
     "category": "worktree-aware file tool",
     "tagline": "Copy .worktreeinclude-selected ignored files between Git worktrees.",
     "description": "waft is a small Rust CLI for copying selected ignored files between Git worktrees.",
-    "installCommand": "cargo install waft"
+    "installCommand": "cargo install --git https://github.com/plx/waft --rev REVIEWED_COMMIT_SHA --locked waft"
   },
   "site": {
     "host": "https://plx.github.io",
@@ -114,7 +114,7 @@ export const siteConfig = {
       {
         "eyebrow": "Safety",
         "title": "Tracked files and symlinks stay protected",
-        "body": "waft refuses tracked overwrites, source symlinks, and symlinked destination parents. Existing files require --overwrite.",
+        "body": "waft refuses tracked overwrites, source symlinks, symlinked destination parents, and every existing destination conflict. --overwrite is accepted only as a fail-closed compatibility flag.",
         "href": "safety/"
       }
     ],

@@ -12,11 +12,11 @@
 //! same layer sets `replace_extra = true`, in which case that layer's value
 //! replaces accumulated values from lower-precedence layers.
 //!
-//! Note: the resolved policy is plumbed through subcommand entrypoints, but
-//! does not yet drive runtime behavior. Subsequent PRs wire individual knobs
-//! (`when_missing`, `symlink_policy`, exclude filters, semantics engines)
-//! into the selector and copy paths.
+//! Project configuration discovery is bounded to the resolved source
+//! repository. `--isolated` omits the user and environment policy layers for
+//! managed, reproducible invocation.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -28,8 +28,9 @@ use crate::error::{Error, Result};
 /// Top-level compatibility preset.
 ///
 /// Selects a coordinated set of defaults tuned to match a particular tool's
-/// observed behavior. The preset is expanded into concrete knob values during
-/// policy resolution; explicit knob overrides take precedence.
+/// observed behavior. The preset is expanded into concrete knob values at the
+/// layer where it is selected; explicit knobs in that layer or a later layer
+/// take precedence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
 #[clap(rename_all = "kebab-case")]
 pub enum CompatProfile {
@@ -349,13 +350,12 @@ impl ResolvedPolicy {
     ///
     /// The resolution rule is:
     ///
-    /// - For each scalar knob, take the highest-precedence explicit value.
-    /// - If no explicit profile was set, fall back to the legacy defaults
-    ///   for any unset knob.
-    /// - If a profile was set anywhere, expand that profile's preset for
-    ///   any knob not explicitly set in any layer.
-    /// - Explicit knob settings (in any layer) ALWAYS beat preset values:
-    ///   "explicit knob > preset" is the documented contract.
+    /// - Start from the default profile's coordinated preset.
+    /// - Process layers from lowest to highest precedence.
+    /// - Selecting a profile resets every profile-owned knob to that preset.
+    /// - Explicit knobs in the same layer are then applied, followed by later
+    ///   layers. A lower-layer knob therefore cannot silently modify a
+    ///   profile selected at a higher layer.
     /// - `extra_excludes` accumulate across layers; a layer's
     ///   `replace_extra_excludes = true` clears accumulated values before
     ///   appending the layer's own values.
@@ -363,48 +363,40 @@ impl ResolvedPolicy {
     where
         I: IntoIterator<Item = &'a ConfigLayer>,
     {
-        let mut effective = ConfigLayer::default();
+        let mut resolved = Self::default();
         for layer in layers {
             if let Some(v) = layer.profile {
-                effective.profile = Some(v);
+                let preset = Preset::for_profile(v);
+                resolved.profile = v;
+                resolved.when_missing = preset.when_missing;
+                resolved.semantics = preset.semantics;
+                resolved.symlink_policy = preset.symlink_policy;
+                resolved.builtin_exclude_set = preset.builtin_exclude_set;
             }
             if let Some(v) = layer.when_missing {
-                effective.when_missing = Some(v);
+                resolved.when_missing = v;
             }
             if let Some(v) = layer.semantics {
-                effective.semantics = Some(v);
+                resolved.semantics = v;
             }
             if let Some(v) = layer.symlink_policy {
-                effective.symlink_policy = Some(v);
+                resolved.symlink_policy = v;
             }
             if let Some(v) = layer.builtin_exclude_set {
-                effective.builtin_exclude_set = Some(v);
+                resolved.builtin_exclude_set = v;
             }
             if let Some(v) = layer.copy_strategy {
-                effective.copy_strategy = Some(v);
+                resolved.copy_strategy = v;
             }
             if layer.replace_extra_excludes == Some(true) {
-                effective.extra_excludes.clear();
+                resolved.extra_excludes.clear();
             }
-            effective
+            resolved
                 .extra_excludes
                 .extend(layer.extra_excludes.iter().cloned());
         }
 
-        let profile = effective.profile.unwrap_or(DEFAULT_PROFILE);
-        let preset = Preset::for_profile(profile);
-
-        Self {
-            profile,
-            when_missing: effective.when_missing.unwrap_or(preset.when_missing),
-            semantics: effective.semantics.unwrap_or(preset.semantics),
-            symlink_policy: effective.symlink_policy.unwrap_or(preset.symlink_policy),
-            builtin_exclude_set: effective
-                .builtin_exclude_set
-                .unwrap_or(preset.builtin_exclude_set),
-            extra_excludes: effective.extra_excludes,
-            copy_strategy: effective.copy_strategy.unwrap_or(DEFAULT_COPY_STRATEGY),
-        }
+        resolved
     }
 }
 
@@ -673,10 +665,94 @@ pub fn discover_project_configs(cwd: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// Discover project configs within one resolved repository.
+///
+/// `repo_root` is always included in the search. When `cwd` is inside that
+/// repository, configs are then considered from the root down to `cwd`.
+/// Discovery is bounded by `repo_root`, so a config from an unrelated process
+/// working directory can never affect the resolved repository. If the path
+/// crosses into a nested Git checkout or a registered `gitlink`, that
+/// boundary and its descendants are excluded from discovery.
+///
+/// Returned paths are ordered from outermost to innermost.
+pub fn discover_project_configs_in_repo(
+    repo_root: &Path,
+    cwd: &Path,
+    gitlinks: &HashSet<String>,
+    case_insensitive: bool,
+) -> Vec<PathBuf> {
+    let mut directories = vec![repo_root.to_path_buf()];
+
+    if let Ok(relative) = cwd.strip_prefix(repo_root) {
+        let mut current = repo_root.to_path_buf();
+        for component in relative.components() {
+            use std::path::Component;
+
+            match component {
+                Component::CurDir => continue,
+                Component::Normal(part) => current.push(part),
+                // Callers pass an absolute, normalized source-view path. If
+                // that invariant is violated, keep the safe root-only result.
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => break,
+            }
+
+            // Do not let a nested checkout's branch-local config influence
+            // selection in the outer source repository.
+            if current != repo_root {
+                let is_gitlink = crate::path::RepoRelPath::normalize(&current, repo_root)
+                    .ok()
+                    .is_some_and(|relative| {
+                        gitlinks.iter().any(|gitlink| {
+                            crate::git::repo_paths_equivalent(
+                                relative.as_str(),
+                                gitlink,
+                                case_insensitive,
+                            )
+                        })
+                    });
+                if current.join(".git").exists() || is_gitlink {
+                    break;
+                }
+            }
+            directories.push(current.clone());
+        }
+    }
+
+    directories
+        .into_iter()
+        .map(|dir| dir.join(".waft.toml"))
+        // Keep symlinks in the discovered set so loading can reject them
+        // explicitly, including dangling symlinks.
+        .filter(|path| {
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+                let file_type = metadata.file_type();
+                file_type.is_file() || file_type.is_symlink()
+            })
+        })
+        .collect()
+}
+
 /// Read and parse a list of project config files into layers, in order.
 pub fn load_project_layers(paths: &[PathBuf]) -> Result<Vec<ConfigLayer>> {
     let mut layers = Vec::with_capacity(paths.len());
     for path in paths {
+        let metadata = std::fs::symlink_metadata(path).map_err(|e| Error::Io {
+            context: format!("inspecting project config {}", path.display()),
+            source: e,
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(Error::Config {
+                message: format!(
+                    "project config {} is a symlink; source project configs must be regular files",
+                    path.display()
+                ),
+            });
+        }
+        if !metadata.file_type().is_file() {
+            return Err(Error::Config {
+                message: format!("project config {} is not a regular file", path.display()),
+            });
+        }
         let content = std::fs::read_to_string(path).map_err(|e| Error::Io {
             context: format!("reading project config {}", path.display()),
             source: e,
@@ -927,5 +1003,84 @@ profile = "rainbow"
         std::fs::create_dir_all(&dir).unwrap();
         let found = discover_project_configs(&dir);
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn in_repo_discovery_is_bounded_to_resolved_source() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        let unrelated = tmp.path().join("unrelated");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        std::fs::write(source.join(".waft.toml"), "version = 1\n").unwrap();
+        std::fs::write(unrelated.join(".waft.toml"), "version = 1\n").unwrap();
+
+        assert_eq!(
+            discover_project_configs_in_repo(&source, &unrelated, &HashSet::new(), false),
+            vec![source.join(".waft.toml")]
+        );
+    }
+
+    #[test]
+    fn in_repo_discovery_stops_before_nested_checkout() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path();
+        let nested = source.join("vendor/dependency");
+        std::fs::create_dir_all(nested.join(".git")).unwrap();
+        std::fs::write(source.join(".waft.toml"), "version = 1\n").unwrap();
+        std::fs::write(nested.join(".waft.toml"), "version = 1\n").unwrap();
+
+        assert_eq!(
+            discover_project_configs_in_repo(source, &nested, &HashSet::new(), false),
+            vec![source.join(".waft.toml")]
+        );
+    }
+
+    #[test]
+    fn in_repo_discovery_stops_before_registered_gitlink() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path();
+        let gitlink = source.join("vendor/dependency");
+        std::fs::create_dir_all(&gitlink).unwrap();
+        std::fs::write(source.join(".waft.toml"), "version = 1\n").unwrap();
+        std::fs::write(gitlink.join(".waft.toml"), "version = 1\n").unwrap();
+        let gitlinks = HashSet::from(["vendor/dependency".to_string()]);
+
+        assert_eq!(
+            discover_project_configs_in_repo(source, &gitlink, &gitlinks, false),
+            vec![source.join(".waft.toml")]
+        );
+    }
+
+    #[test]
+    fn in_repo_discovery_matches_gitlinks_with_unicode_case_folding() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path();
+        let gitlink = source.join("vendor/Äddon");
+        std::fs::create_dir_all(&gitlink).unwrap();
+        std::fs::write(source.join(".waft.toml"), "version = 1\n").unwrap();
+        std::fs::write(gitlink.join(".waft.toml"), "version = 1\n").unwrap();
+        let gitlinks = HashSet::from(["vendor/äddon".to_string()]);
+
+        assert_eq!(
+            discover_project_configs_in_repo(source, &gitlink, &gitlinks, true),
+            vec![source.join(".waft.toml")]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_config_symlink_is_discovered_then_rejected() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("external.toml");
+        let config = tmp.path().join(".waft.toml");
+        std::fs::write(&target, "[compat]\nprofile = \"wt\"\n").unwrap();
+        std::os::unix::fs::symlink(&target, &config).unwrap();
+
+        let configs =
+            discover_project_configs_in_repo(tmp.path(), tmp.path(), &HashSet::new(), false);
+        assert_eq!(configs, vec![config.clone()]);
+        let error = load_project_layers(&configs).unwrap_err();
+        assert!(error.to_string().contains("is a symlink"));
     }
 }

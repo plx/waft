@@ -1,20 +1,17 @@
 //! Targeted CLI-flag override tests.
 //!
-//! For each fixture, verify that explicit knob flags reliably override the
-//! preset selected by `--compat-profile`. Currently covers F2's
-//! `--when-missing-worktreeinclude`; later PRs add overrides for other knobs.
+//! For each fixture and Git backend, verify that explicit knob flags reliably
+//! override the preset selected by `--compat-profile`.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process;
 
-use assert_cmd::Command;
 use tempfile::TempDir;
 
-fn waft() -> Command {
-    Command::cargo_bin("waft").unwrap()
-}
+mod support;
+
+use support::waft;
 
 fn make_repo() -> TempDir {
     let dir = TempDir::new().unwrap();
@@ -25,7 +22,7 @@ fn make_repo() -> TempDir {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let output = process::Command::new("git")
+    let output = support::git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -48,21 +45,33 @@ fn write_file(dir: &Path, rel_path: &str, content: &str) {
 }
 
 fn list_paths(source: &Path, extra_args: &[&str]) -> BTreeSet<String> {
-    let mut cmd = waft();
-    // Run from the source repo so project-level `.waft.toml` discovery
-    // (which walks upward from cwd) sees configs committed in the test
-    // fixture.
-    cmd.current_dir(source)
-        .args(["list", "--source"])
-        .arg(source);
-    cmd.args(extra_args);
-    let assert = cmd.assert().success();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    stdout
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect()
+    let outputs: Vec<(String, BTreeSet<String>)> = ["gix", "cli"]
+        .into_iter()
+        .map(|backend| {
+            let mut cmd = waft();
+            // Run from the source repo so project-level `.waft.toml`
+            // discovery sees configs committed in the fixture.
+            cmd.env("WAFT_GIT_BACKEND", backend)
+                .current_dir(source)
+                .args(["list", "--source"])
+                .arg(source)
+                .args(extra_args);
+            let assert = cmd.assert().success();
+            let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+            let paths = stdout
+                .lines()
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect();
+            (backend.to_string(), paths)
+        })
+        .collect();
+    assert_eq!(
+        outputs[0].1, outputs[1].1,
+        "{} and {} backend results differ",
+        outputs[0].0, outputs[1].0
+    );
+    outputs[0].1.clone()
 }
 
 fn setup_f2() -> TempDir {
@@ -223,19 +232,22 @@ fn setup_f8() -> TempDir {
 #[test]
 fn f8_symlink_policy_error_fails() {
     let repo = setup_f8();
-    waft()
-        .current_dir(repo.path())
-        .args([
-            "list",
-            "--source",
-            repo.path().to_str().unwrap(),
-            "--compat-profile",
-            "claude",
-            "--worktreeinclude-symlink-policy",
-            "error",
-        ])
-        .assert()
-        .failure();
+    for backend in ["gix", "cli"] {
+        waft()
+            .env("WAFT_GIT_BACKEND", backend)
+            .current_dir(repo.path())
+            .args([
+                "list",
+                "--source",
+                repo.path().to_str().unwrap(),
+                "--compat-profile",
+                "claude",
+                "--worktreeinclude-symlink-policy",
+                "error",
+            ])
+            .assert()
+            .failure();
+    }
 }
 
 #[cfg(unix)]

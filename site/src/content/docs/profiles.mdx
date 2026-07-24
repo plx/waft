@@ -8,11 +8,56 @@ description: "Compatibility profiles for different worktree workflows."
 `waft` ships with coordinated compatibility profiles. Each profile selects a
 bundle of matcher and safety behavior.
 
-| Profile  | Missing `.worktreeinclude`                | Matcher semantics | Symlinked rule files | Tool-state excludes |
-| -------- | ----------------------------------------- | ----------------- | -------------------- | ------------------- |
-| `claude` | nothing selected                          | `claude-2026-04`  | follow               | none                |
-| `git`    | nothing selected                          | `git`             | ignore               | none                |
-| `wt`     | every git-ignored untracked file selected | `wt-0.39`         | follow               | `tooling-v1`        |
+<table tabindex="0" aria-label="Compatibility profile comparison">
+  <thead>
+    <tr>
+      <th>Profile</th>
+      <th>
+        Missing <code>.worktreeinclude</code>
+      </th>
+      <th>Matcher semantics</th>
+      <th>Symlinked rule files</th>
+      <th>Tool-state excludes</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>
+        <code>claude</code>
+      </td>
+      <td>nothing selected</td>
+      <td>
+        <code>claude-2026-04</code>
+      </td>
+      <td>follow</td>
+      <td>none</td>
+    </tr>
+    <tr>
+      <td>
+        <code>git</code>
+      </td>
+      <td>nothing selected</td>
+      <td>
+        <code>git</code>
+      </td>
+      <td>ignore</td>
+      <td>none</td>
+    </tr>
+    <tr>
+      <td>
+        <code>wt</code>
+      </td>
+      <td>every git-ignored untracked file selected</td>
+      <td>
+        <code>wt-0.39</code>
+      </td>
+      <td>follow</td>
+      <td>
+        <code>tooling-v1</code>
+      </td>
+    </tr>
+  </tbody>
+</table>
 
 ## `claude`
 

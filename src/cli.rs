@@ -1,17 +1,22 @@
 //! CLI argument parsing and command dispatch.
 
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::config::{
     BuiltinExcludeSet, CompatProfile, ConfigLayer, CopyStrategy, PolicyResolutionInputs,
     ResolvedPolicy, SymlinkPolicy, WhenMissingWorktreeinclude, WorktreeincludeSemantics,
-    discover_project_configs, layer_from_env, load_project_layers, load_user_layer,
+    discover_project_configs_in_repo, layer_from_env, load_project_layers, load_user_layer,
     user_config_path,
 };
+use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
+use crate::git::{GitBackend, default_git_backend};
+use crate::model::RepoContext;
+use crate::path::RepoRelPath;
 use crate::subcommands::{
-    CopyArgs, InfoArgs, ListArgs, ValidateArgs, run_copy, run_info, run_list, run_validate,
+    CopyArgs, InfoArgs, ListArgs, ValidateArgs, run_copy_with_context, run_info_with_context,
+    run_list_with_context, run_validate_with_context,
 };
 
 /// waft — copy .worktreeinclude-selected ignored files between Git worktrees.
@@ -71,8 +76,12 @@ pub struct Cli {
     pub copy_strategy: Option<CopyStrategy>,
 
     /// Path to an explicit config file (overrides user config discovery).
-    #[arg(long, global = true, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH", conflicts_with = "isolated")]
     pub config: Option<PathBuf>,
+
+    /// Ignore user config and WAFT_* policy environment variables.
+    #[arg(long, global = true)]
+    pub isolated: bool,
 
     /// Subcommand to run. If omitted, defaults to `copy`.
     #[command(subcommand)]
@@ -114,10 +123,28 @@ impl Cli {
         }
     }
 
-    /// Resolve the active [`ResolvedPolicy`] from CLI flags, env vars, and
-    /// discovered config files.
+    /// Resolve the active [`ResolvedPolicy`] for this command's source
+    /// repository.
+    ///
+    /// Project config discovery is performed only after Git context
+    /// resolution. This keeps an unrelated process working directory, or a
+    /// destination worktree on another branch, from changing source
+    /// selection.
     pub fn resolve_policy(&self) -> Result<ResolvedPolicy> {
-        let cwd = match self.directory.as_deref() {
+        let git = default_git_backend();
+        let ctx = context::resolve_context(
+            git.as_ref(),
+            self.source.as_deref(),
+            self.dest.as_deref(),
+            self.directory.as_deref(),
+            self.command_kind(),
+        )?;
+        self.resolve_policy_for_context(&ctx, git.as_ref())
+    }
+
+    /// Return the effective working directory after applying `-C`.
+    pub(crate) fn effective_directory(&self) -> Result<PathBuf> {
+        let path = match self.directory.as_deref() {
             Some(dir) if dir.is_absolute() => dir.to_path_buf(),
             Some(dir) => std::env::current_dir()
                 .map_err(|e| Error::Io {
@@ -131,22 +158,79 @@ impl Cli {
             })?,
         };
 
-        let user_path = if let Some(p) = self.config.as_deref() {
-            Some(p.to_path_buf())
-        } else if let Ok(p) = std::env::var("WAFT_CONFIG_PATH") {
-            if p.is_empty() {
-                user_config_path()
-            } else {
-                Some(PathBuf::from(p))
-            }
+        // Context resolution requires this path to exist. Canonicalizing here
+        // also lets us compare `-C` paths containing `..` or symlinked parent
+        // components with Git's normalized worktree paths.
+        Ok(std::fs::canonicalize(&path).unwrap_or(path))
+    }
+
+    /// Normalize a user-supplied path against the invocation directory and
+    /// map a linked-worktree path to the equivalent source-worktree path.
+    pub(crate) fn normalize_source_path(
+        &self,
+        path: &Path,
+        ctx: &RepoContext,
+    ) -> Result<RepoRelPath> {
+        let input = if path.is_absolute() {
+            let normalized = canonicalize_parent(path);
+            self.map_worktree_path_to_source(&normalized, ctx)
+                .unwrap_or(normalized)
         } else {
-            user_config_path()
+            let invocation_dir = self.effective_directory()?;
+            self.map_worktree_path_to_source(&invocation_dir, ctx)
+                .unwrap_or(invocation_dir)
+                .join(path)
+        };
+        RepoRelPath::normalize(&input, &ctx.source_root)
+    }
+
+    fn command_kind(&self) -> CommandKind {
+        match &self.command {
+            None | Some(Command::Copy(_)) => CommandKind::Copy,
+            Some(Command::List(_)) => CommandKind::List,
+            Some(Command::Info(_)) => CommandKind::Info,
+            Some(Command::Validate(_)) => CommandKind::Validate,
+        }
+    }
+
+    fn resolve_policy_for_context(
+        &self,
+        ctx: &RepoContext,
+        git: &dyn GitBackend,
+    ) -> Result<ResolvedPolicy> {
+        let invocation_dir = self.effective_directory()?;
+
+        let user = if self.isolated {
+            None
+        } else {
+            let user_path = if let Some(p) = self.config.as_deref() {
+                Some(resolve_from(p, &invocation_dir))
+            } else if let Ok(p) = std::env::var("WAFT_CONFIG_PATH") {
+                if p.is_empty() {
+                    user_config_path()
+                } else {
+                    Some(resolve_from(Path::new(&p), &invocation_dir))
+                }
+            } else {
+                user_config_path()
+            };
+            load_user_layer(user_path.as_deref())?
         };
 
-        let user = load_user_layer(user_path.as_deref())?;
-        let project_paths = discover_project_configs(&cwd);
+        let project_dir = self.source_view_directory(ctx)?;
+        let gitlinks = git.gitlinks(&ctx.source_root)?;
+        let project_paths = discover_project_configs_in_repo(
+            &ctx.source_root,
+            project_dir.as_path(),
+            &gitlinks,
+            ctx.core_ignore_case,
+        );
         let project = load_project_layers(&project_paths)?;
-        let env = layer_from_env()?;
+        let env = if self.isolated {
+            ConfigLayer::default()
+        } else {
+            layer_from_env()?
+        };
         let cli = self.cli_layer();
 
         let inputs = PolicyResolutionInputs {
@@ -161,20 +245,122 @@ impl Cli {
 
     /// Dispatch the parsed CLI to the appropriate command handler.
     pub fn dispatch(self) -> Result<()> {
-        let policy = self.resolve_policy()?;
+        let git = default_git_backend();
+        let ctx = context::resolve_context(
+            git.as_ref(),
+            self.source.as_deref(),
+            self.dest.as_deref(),
+            self.directory.as_deref(),
+            self.command_kind(),
+        )?;
+        let policy = self.resolve_policy_for_context(&ctx, git.as_ref())?;
 
-        match self.command {
+        match &self.command {
             None => {
                 let args = CopyArgs {
                     dry_run: false,
                     overwrite: false,
                 };
-                run_copy(&self, &policy, &args)
+                run_copy_with_context(&self, &policy, &args, &ctx, git.as_ref())
             }
-            Some(Command::Copy(ref args)) => run_copy(&self, &policy, args),
-            Some(Command::List(ref args)) => run_list(&self, &policy, args),
-            Some(Command::Info(ref args)) => run_info(&self, &policy, args),
-            Some(Command::Validate(ref args)) => run_validate(&self, &policy, args),
+            Some(Command::Copy(args)) => {
+                run_copy_with_context(&self, &policy, args, &ctx, git.as_ref())
+            }
+            Some(Command::List(args)) => {
+                run_list_with_context(&self, &policy, args, &ctx, git.as_ref())
+            }
+            Some(Command::Info(args)) => {
+                run_info_with_context(&self, &policy, args, &ctx, git.as_ref())
+            }
+            Some(Command::Validate(args)) => {
+                run_validate_with_context(&self, &policy, args, &ctx, git.as_ref())
+            }
         }
+    }
+
+    fn source_view_directory(&self, ctx: &RepoContext) -> Result<PathBuf> {
+        let invocation_dir = self.effective_directory()?;
+        Ok(self
+            .map_worktree_path_to_source(&invocation_dir, ctx)
+            .unwrap_or_else(|| ctx.source_root.clone()))
+    }
+
+    fn map_worktree_path_to_source(&self, path: &Path, ctx: &RepoContext) -> Option<PathBuf> {
+        let path = crate::path::without_windows_verbatim_prefix(path);
+        ctx.known_worktrees
+            .iter()
+            .filter_map(|worktree| {
+                let worktree = crate::path::without_windows_verbatim_prefix(worktree);
+                path.strip_prefix(&worktree)
+                    .ok()
+                    .map(|relative| (worktree.components().count(), relative.to_path_buf()))
+            })
+            // Worktrees should not overlap, but choosing the deepest match
+            // makes the mapping deterministic if they do.
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, relative)| ctx.source_root.join(relative))
+    }
+}
+
+fn resolve_from(path: &Path, cwd: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn canonicalize_parent(path: &Path) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let Some(file_name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+
+    let mut cursor = parent;
+    let mut missing = Vec::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(cursor) {
+            let mut result = canonical;
+            for component in missing.iter().rev() {
+                result.push(component);
+            }
+            result.push(file_name);
+            return result;
+        }
+        let Some(name) = cursor.file_name() else {
+            return path.to_path_buf();
+        };
+        missing.push(name.to_os_string());
+        let Some(next) = cursor.parent() else {
+            return path.to_path_buf();
+        };
+        cursor = next;
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_verbatim_linked_worktree_path_to_source() {
+        let cli = Cli::parse_from(["waft"]);
+        let ctx = RepoContext {
+            source_root: PathBuf::from(r"C:\repos\main"),
+            dest_root: None,
+            main_worktree: PathBuf::from(r"C:\repos\main"),
+            known_worktrees: vec![
+                PathBuf::from(r"C:\repos\main"),
+                PathBuf::from(r"C:\worktrees\linked"),
+            ],
+            core_ignore_case: true,
+        };
+
+        let mapped =
+            cli.map_worktree_path_to_source(Path::new(r"\\?\C:\worktrees\linked\nested"), &ctx);
+
+        assert_eq!(mapped, Some(PathBuf::from(r"C:\repos\main\nested")));
     }
 }

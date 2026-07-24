@@ -54,7 +54,7 @@ const docsPages: DocsPage[] = [
     }
   ];
 const pagesToCheck = ["/", ...docsPages.map((page) => page.href)];
-const pagesToAudit = ["/", docsPages[0]?.href].filter(Boolean);
+const pagesToAudit = pagesToCheck;
 
 function sitePath(path = "/"): string {
   const cleanPath = path.startsWith("/") ? path : `/${path}`;
@@ -109,9 +109,12 @@ test.describe("rendered site", () => {
     await page.goto(sitePath("/"));
 
     const toggle = page.locator("[data-nav-toggle]");
-    if (!(await toggle.isVisible())) {
+    const compactNavigation = (page.viewportSize()?.width ?? 0) <= 900;
+    if (!compactNavigation) {
+      await expect(toggle).toBeHidden();
       return;
     }
+    await expect(toggle).toBeVisible();
 
     const panel = page.locator("[data-nav-panel]");
     await expect(toggle).toHaveAttribute("aria-controls", "mobile-nav");
