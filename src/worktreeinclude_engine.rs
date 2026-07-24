@@ -19,7 +19,7 @@ use crate::model::WorktreeincludeStatus;
 
 /// A pluggable `.worktreeinclude` evaluation engine.
 pub trait WorktreeincludeSemanticsEngine {
-    /// Evaluate `rel_path` against the engine's selection algorithm.
+    /// Evaluate a UTF-8 repository-relative path.
     fn evaluate(
         &self,
         repo_root: &Path,
@@ -28,6 +28,32 @@ pub trait WorktreeincludeSemanticsEngine {
         case_insensitive: bool,
         symlink_policy: SymlinkPolicy,
     ) -> WorktreeincludeStatus;
+
+    /// Evaluate a native repository-relative path against the engine's
+    /// selection algorithm.
+    ///
+    /// Keeping the path native lets candidate discovery reject unrelated
+    /// non-UTF-8 Unix names before converting selected paths to
+    /// [`RepoRelPath`](crate::path::RepoRelPath).
+    fn evaluate_path(
+        &self,
+        repo_root: &Path,
+        rel_path: &Path,
+        is_dir: bool,
+        case_insensitive: bool,
+        symlink_policy: SymlinkPolicy,
+    ) -> WorktreeincludeStatus {
+        let Some(rel_path) = rel_path.to_str() else {
+            return WorktreeincludeStatus::NoMatch;
+        };
+        self.evaluate(
+            repo_root,
+            rel_path,
+            is_dir,
+            case_insensitive,
+            symlink_policy,
+        )
+    }
 }
 
 /// Git per-directory `.gitignore`-style semantics with negation caveats.
@@ -44,6 +70,23 @@ impl WorktreeincludeSemanticsEngine for GitSemantics {
         symlink_policy: SymlinkPolicy,
     ) -> WorktreeincludeStatus {
         crate::worktreeinclude::explain(
+            repo_root,
+            rel_path,
+            is_dir,
+            case_insensitive,
+            symlink_policy,
+        )
+    }
+
+    fn evaluate_path(
+        &self,
+        repo_root: &Path,
+        rel_path: &Path,
+        is_dir: bool,
+        case_insensitive: bool,
+        symlink_policy: SymlinkPolicy,
+    ) -> WorktreeincludeStatus {
+        crate::worktreeinclude::explain_path(
             repo_root,
             rel_path,
             is_dir,
@@ -85,6 +128,23 @@ impl WorktreeincludeSemanticsEngine for Claude202604Semantics {
             symlink_policy,
         )
     }
+
+    fn evaluate_path(
+        &self,
+        repo_root: &Path,
+        rel_path: &Path,
+        is_dir: bool,
+        case_insensitive: bool,
+        symlink_policy: SymlinkPolicy,
+    ) -> WorktreeincludeStatus {
+        crate::worktreeinclude::evaluate_root_only_path(
+            repo_root,
+            rel_path,
+            is_dir,
+            case_insensitive,
+            symlink_policy,
+        )
+    }
 }
 
 /// Versioned snapshot of `worktrunk 0.39`'s observed behavior.
@@ -117,6 +177,23 @@ impl WorktreeincludeSemanticsEngine for Wt039Semantics {
         symlink_policy: SymlinkPolicy,
     ) -> WorktreeincludeStatus {
         GitSemantics.evaluate(
+            repo_root,
+            rel_path,
+            is_dir,
+            case_insensitive,
+            symlink_policy,
+        )
+    }
+
+    fn evaluate_path(
+        &self,
+        repo_root: &Path,
+        rel_path: &Path,
+        is_dir: bool,
+        case_insensitive: bool,
+        symlink_policy: SymlinkPolicy,
+    ) -> WorktreeincludeStatus {
+        GitSemantics.evaluate_path(
             repo_root,
             rel_path,
             is_dir,

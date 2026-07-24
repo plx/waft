@@ -717,25 +717,46 @@ impl GitBackend for GitGix {
                 continue;
             }
 
-            let rel = RepoRelPath::normalize(entry.path(), source_root)?;
+            let rel_path =
+                entry
+                    .path()
+                    .strip_prefix(source_root)
+                    .map_err(|error| Error::InvalidPath {
+                        message: format!(
+                            "{} is outside repository root {}: {error}",
+                            entry.path().display(),
+                            source_root.display()
+                        ),
+                    })?;
 
-            if tracked_paths.contains(source_root, rel.as_str().as_bytes()) {
-                continue;
+            // Git paths are raw bytes on Unix. Check trackedness and
+            // worktreeinclude selection before crossing the UTF-8-only
+            // RepoRelPath boundary, so an unrelated raw-byte filename cannot
+            // abort discovery.
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                if tracked_paths.contains(source_root, rel_path.as_os_str().as_bytes()) {
+                    continue;
+                }
             }
 
             let selected = matches!(
-                engine.evaluate(
-                    source_root,
-                    rel.as_str(),
-                    false,
-                    ignore_case,
-                    symlink_policy
-                ),
+                engine.evaluate_path(source_root, rel_path, false, ignore_case, symlink_policy),
                 crate::model::WorktreeincludeStatus::Included { .. }
             );
-            if selected {
-                candidates.push(rel);
+            if !selected {
+                continue;
             }
+
+            // Selected non-UTF-8 names still fail closed here: downstream
+            // policy, planning, and copy operations require an unambiguous
+            // normalized repository path.
+            let rel = RepoRelPath::normalize(entry.path(), source_root)?;
+            if tracked_paths.contains(source_root, rel.as_str().as_bytes()) {
+                continue;
+            }
+            candidates.push(rel);
         }
 
         candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -969,24 +990,39 @@ fn cli_list_candidates_with_engine(
         if entry.file_type().is_dir() {
             continue;
         }
+        let rel_path =
+            entry
+                .path()
+                .strip_prefix(source_root)
+                .map_err(|error| Error::InvalidPath {
+                    message: format!(
+                        "{} is outside repository root {}: {error}",
+                        entry.path().display(),
+                        source_root.display()
+                    ),
+                })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            if tracked.contains(source_root, rel_path.as_os_str().as_bytes()) {
+                continue;
+            }
+        }
+
+        let selected = matches!(
+            engine.evaluate_path(source_root, rel_path, false, ignore_case, symlink_policy),
+            crate::model::WorktreeincludeStatus::Included { .. }
+        );
+        if !selected {
+            continue;
+        }
+
         let rel = RepoRelPath::normalize(entry.path(), source_root)?;
         if tracked.contains(source_root, rel.as_str().as_bytes()) {
             continue;
         }
-
-        let selected = matches!(
-            engine.evaluate(
-                source_root,
-                rel.as_str(),
-                false,
-                ignore_case,
-                symlink_policy,
-            ),
-            crate::model::WorktreeincludeStatus::Included { .. }
-        );
-        if selected {
-            candidates.push(rel);
-        }
+        candidates.push(rel);
     }
 
     candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));

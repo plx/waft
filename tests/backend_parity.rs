@@ -284,6 +284,43 @@ fn invalid_utf8_candidate_fails_closed_for_both_backends() {
 
 #[cfg(unix)]
 #[test]
+fn unrelated_unselected_invalid_utf8_name_does_not_break_explicit_selection() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let repo = make_repo();
+    std::fs::write(repo.path().join(".gitignore"), ".env\n").unwrap();
+    std::fs::write(repo.path().join(".worktreeinclude"), ".env\n").unwrap();
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "select one valid candidate"]);
+    std::fs::write(repo.path().join(".env"), "selected").unwrap();
+    if let Err(error) = std::fs::write(
+        repo.path().join(OsStr::from_bytes(b"unrelated-\xff.txt")),
+        "unselected",
+    ) {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        panic!("creating invalid UTF-8 fixture failed: {error}");
+    }
+
+    let source = repo.path().to_string_lossy().to_string();
+    for backend in ["gix", "cli"] {
+        let output = run_waft(repo.path(), backend, &["list", "--source", &source]);
+        assert!(
+            output.status.success(),
+            "{backend} backend failed on an unselected non-UTF-8 name: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(".env"),
+            "{backend} backend omitted the selected UTF-8 candidate"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn unrelated_unignored_invalid_utf8_name_does_not_break_fallback_parity() {
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;

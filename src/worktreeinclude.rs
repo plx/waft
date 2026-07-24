@@ -87,7 +87,28 @@ pub fn explain(
     case_insensitive: bool,
     symlink_policy: SymlinkPolicy,
 ) -> WorktreeincludeStatus {
-    let path_within_repo = Path::new(rel_path);
+    explain_path(
+        repo_root,
+        Path::new(rel_path),
+        is_dir,
+        case_insensitive,
+        symlink_policy,
+    )
+}
+
+/// Native-path variant of [`explain`] used during filesystem discovery.
+///
+/// Unix filenames are byte strings, so an unselected non-UTF-8 entry must be
+/// matchable without first forcing it through the UTF-8-only `RepoRelPath`
+/// boundary.
+pub fn explain_path(
+    repo_root: &Path,
+    rel_path: &Path,
+    is_dir: bool,
+    case_insensitive: bool,
+    symlink_policy: SymlinkPolicy,
+) -> WorktreeincludeStatus {
+    let path_within_repo = rel_path;
 
     // Collect directories from repo root to the path's parent
     let mut dirs_to_check = Vec::new();
@@ -159,7 +180,7 @@ pub fn explain(
 fn evaluate_against_context(
     ctx: &FileMatchContext,
     full_path: &Path,
-    rel_path: &str,
+    rel_path: &Path,
     is_dir: bool,
     repo_root: &Path,
 ) -> Option<WorktreeincludeStatus> {
@@ -176,7 +197,7 @@ fn evaluate_against_context(
     } else if matched.is_whitelist() {
         // Within-file caveat: check if this file's own patterns select a
         // parent directory — if so, negation cannot override.
-        let path_within = Path::new(rel_path);
+        let path_within = rel_path;
         let mut ancestor = path_within.parent();
         while let Some(p) = ancestor {
             if p.as_os_str().is_empty() {
@@ -212,10 +233,10 @@ fn evaluate_against_context(
 /// override a negation result (the cross-file negation caveat).
 fn cross_file_ancestor_check(
     contexts: &[FileMatchContext],
-    rel_path: &str,
+    rel_path: &Path,
     repo_root: &Path,
 ) -> Option<WorktreeincludeStatus> {
-    let path_within = Path::new(rel_path);
+    let path_within = rel_path;
     let mut ancestor = path_within.parent();
     while let Some(p) = ancestor {
         if p.as_os_str().is_empty() {
@@ -267,6 +288,24 @@ fn glob_line_info(
 pub fn evaluate_root_only(
     repo_root: &Path,
     rel_path: &str,
+    is_dir: bool,
+    case_insensitive: bool,
+    symlink_policy: SymlinkPolicy,
+) -> WorktreeincludeStatus {
+    evaluate_root_only_path(
+        repo_root,
+        Path::new(rel_path),
+        is_dir,
+        case_insensitive,
+        symlink_policy,
+    )
+}
+
+/// Native-path variant of [`evaluate_root_only`] used during filesystem
+/// discovery.
+pub fn evaluate_root_only_path(
+    repo_root: &Path,
+    rel_path: &Path,
     is_dir: bool,
     case_insensitive: bool,
     symlink_policy: SymlinkPolicy,
