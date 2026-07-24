@@ -1,7 +1,23 @@
 use std::collections::HashSet;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use crate::path::RepoRelPath;
+
+/// Match control filenames according to the native worktree threat model.
+///
+/// macOS and Windows may alias differently-cased spellings even when
+/// `core.ignoreCase` is explicitly false. Discovery, validation, and nested
+/// repository boundaries must all make the same conservative decision.
+pub(crate) fn special_filename_matches(actual: &OsStr, expected: &str) -> bool {
+    if actual == OsStr::new(expected) {
+        return true;
+    }
+    cfg!(any(target_os = "macos", windows))
+        && actual
+            .to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case(expected))
+}
 
 pub(crate) fn is_git_boundary_dir(
     path: &Path,
@@ -9,7 +25,10 @@ pub(crate) fn is_git_boundary_dir(
     source_root: &Path,
     gitlinks: &HashSet<String>,
 ) -> bool {
-    if path.file_name().is_some_and(|name| name == ".git") {
+    if path
+        .file_name()
+        .is_some_and(|name| special_filename_matches(name, ".git"))
+    {
         return true;
     }
     if depth == 0 {
@@ -26,7 +45,12 @@ pub(crate) fn is_git_boundary_dir(
         return true;
     }
     if let Ok(rel) = RepoRelPath::normalize(path, source_root)
-        && gitlinks.contains(rel.as_str())
+        && gitlinks.iter().any(|gitlink| {
+            // A repository boundary is a safety filter, so prefer a
+            // conservative case/normalization match even when Git's current
+            // config claims the filesystem is case-sensitive.
+            crate::git::repo_paths_equivalent(rel.as_str(), gitlink, true)
+        })
     {
         return true;
     }

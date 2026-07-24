@@ -119,13 +119,15 @@ All commands follow this pipeline:
 
 1. **CLI parsing** (`cli.rs`) — clap derive parses args, dispatches to a
    subcommand handler in `subcommands/`.
-2. **Policy resolution** (`config.rs`) — merge built-in defaults, user
-   config (`~/.config/waft/config.toml`), each `.waft.toml` from repo
-   root down to cwd, environment variables (`WAFT_*`), and CLI flags
-   into a single `ResolvedPolicy`. Explicit knob values always beat
-   preset values from a higher-precedence layer.
-3. **Context resolution** (`context.rs`) — resolve source/dest worktrees
+2. **Context resolution** (`context.rs`) — resolve source/dest worktrees
    via the Git backend (`show_toplevel`, `list_worktrees`).
+3. **Policy resolution** (`config.rs`) — merge built-in defaults, user
+   config (`~/.config/waft/config.toml`), each `.waft.toml` from repo
+   root down to the equivalent directory in the resolved source worktree,
+   environment variables (`WAFT_*`), and CLI flags into a single
+   `ResolvedPolicy`. Selecting a profile resets its coordinated knobs at that
+   layer; same-layer and later explicit values may then override it.
+   `--isolated` omits user and environment policy.
 4. **Validation** (`validate.rs`) — parse all ignore files with
    `GitignoreBuilder`. The `symlink_policy` knob decides what happens
    when a `.worktreeinclude` rule file is itself a symlink.
@@ -142,7 +144,11 @@ All commands follow this pipeline:
 7. **Ignore filtering** (`git.rs`) — `check_ignore` retains only paths
    the Git backend confirms are git-ignored.
 8. **Planning** (`planner.rs`) — classify destinations, produce `CopyPlan`.
-9. **Execution** (`executor.rs`) — atomic copy via temp file + rename.
+9. **Execution** (`executor.rs`) — on Unix, open source and destination paths
+   relative to canonical worktree directory descriptors, verify the planned
+   source snapshot, hold Git's cooperative index lock across the final tracked
+   check, and publish a synced temp file with no-clobber semantics. Existing
+   pathname replacement is rejected.
 
 Commands stop at different stages: `validate` at step 4, `list` at step 7,
 `info` at step 7 plus per-path explanation, `copy --dry-run` at step 8,
@@ -157,7 +163,7 @@ Tests are organized in several layers:
    (mock git backend), `config.rs` (TOML parsing, layer merge), and
    `policy_filter.rs` (pattern matching).
 2. **Config tests** (`tests/config_*.rs`) — schema/enum acceptance,
-   layer composition with explicit-beats-preset rules, and project-config
+   layer composition with profile-reset rules, and project-config
    discovery via upward walk.
 3. **Integration tests** — real Git repos in temp directories for all
    commands.

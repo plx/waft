@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use waft::config::{CopyStrategy, SymlinkPolicy, WorktreeincludeSemantics};
 use waft::eligibility_groups::EligibilityGroups;
 use waft::error::Result as WaftResult;
-use waft::fs::FileSystem;
+use waft::fs::{CopyFileRequest, FileSystem};
 use waft::git::{GitBackend, GitGix, IgnoreCheckRecord, WorktreeRecord};
 use waft::model::{RepoContext, ValidationReport};
 use waft::path::RepoRelPath;
@@ -288,7 +288,7 @@ impl PlannerFixture {
     }
 }
 
-struct CopyDirFixture {
+struct ManifestFixture {
     _tmp: TempDir,
     ctx: RepoContext,
     eligible: Vec<RepoRelPath>,
@@ -296,7 +296,7 @@ struct CopyDirFixture {
     git: EmptyTrackedGit,
 }
 
-impl CopyDirFixture {
+impl ManifestFixture {
     fn safe_tree(files: usize) -> Self {
         Self::new(files, false)
     }
@@ -394,22 +394,12 @@ impl FileSystem for BenchFs {
         false
     }
 
-    fn create_dir_all(&self, _path: &Path) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn copy_file(&self, _src: &Path, _dst: &Path, _strategy: CopyStrategy) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn copy_dir_exact(
+    fn copy_file(
         &self,
-        _src: &Path,
-        _dst: &Path,
-        _expected_files: &[PathBuf],
-        _strategy: CopyStrategy,
+        _request: CopyFileRequest<'_>,
+        before_publish: &mut dyn FnMut() -> io::Result<()>,
     ) -> io::Result<()> {
-        Ok(())
+        before_publish()
     }
 }
 
@@ -688,13 +678,13 @@ fn bench_planner(c: &mut Criterion) {
     deep.finish();
 }
 
-fn bench_copy_dir_fast_path(c: &mut Criterion) {
+fn bench_checked_manifest_execution(c: &mut Criterion) {
     let fixtures = vec![
-        ("fast-path", CopyDirFixture::safe_tree(2_048)),
-        ("fallback", CopyDirFixture::blocker_tree(2_048)),
+        ("eligible-only", ManifestFixture::safe_tree(2_048)),
+        ("mixed-source", ManifestFixture::blocker_tree(2_048)),
     ];
 
-    let mut group = c.benchmark_group("copy_plan_execute_directory_fast_path");
+    let mut group = c.benchmark_group("copy_plan_execute_checked_manifest");
     for (case, fixture) in &fixtures {
         group.throughput(Throughput::Elements(fixture.eligible.len() as u64));
         group.bench_with_input(BenchmarkId::from_parameter(case), fixture, |b, fixture| {
@@ -717,8 +707,12 @@ fn bench_copy_dir_fast_path(c: &mut Criterion) {
                         false,
                     )
                     .unwrap();
-                    let report =
-                        waft::executor::execute(&plan, &fixture.fs, CopyStrategy::SimpleCopy);
+                    let report = waft::executor::execute(
+                        &plan,
+                        &fixture.fs,
+                        &fixture.git,
+                        CopyStrategy::SimpleCopy,
+                    );
                     black_box((plan.entries.len(), report.copied))
                 },
                 BatchSize::LargeInput,
@@ -737,6 +731,6 @@ criterion_group! {
         bench_candidate_enumeration,
         bench_validation,
         bench_planner,
-        bench_copy_dir_fast_path
+        bench_checked_manifest_execution
 }
 criterion_main!(benches);

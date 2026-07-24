@@ -25,6 +25,21 @@ impl RepoRelPath {
         Self { inner: s }
     }
 
+    /// Create a repository-relative path from Git's raw path bytes.
+    ///
+    /// waft's public output and configuration formats are UTF-8. Reject an
+    /// unrepresentable path instead of lossily converting it and risking a
+    /// collision with a different destination filename.
+    pub(crate) fn from_git_bytes(bytes: &[u8]) -> Result<Self> {
+        let value = std::str::from_utf8(bytes).map_err(|_| Error::InvalidPath {
+            message: "repository path is not valid UTF-8 and is unsupported".to_string(),
+        })?;
+        validate_text_path(value)?;
+        Ok(Self {
+            inner: value.to_string(),
+        })
+    }
+
     /// Normalize a path relative to a repo root.
     ///
     /// Accepts absolute or relative paths. Rejects paths that escape the repo
@@ -58,14 +73,21 @@ impl RepoRelPath {
         }
 
         // Convert to forward-slash string
-        let s = rel
-            .components()
-            .map(|c| match c {
-                Component::Normal(os) => os.to_string_lossy().to_string(),
-                _ => unreachable!("normalized path should only have Normal components"),
-            })
-            .collect::<Vec<_>>()
-            .join("/");
+        let mut parts = Vec::new();
+        for component in rel.components() {
+            let Component::Normal(os) = component else {
+                unreachable!("normalized path should only have Normal components");
+            };
+            let value = os.to_str().ok_or_else(|| Error::InvalidPath {
+                message: format!(
+                    "path {} is not valid UTF-8 and is unsupported",
+                    path.display()
+                ),
+            })?;
+            parts.push(value.to_string());
+        }
+        let s = parts.join("/");
+        validate_text_path(&s)?;
 
         Ok(Self { inner: s })
     }
@@ -79,6 +101,15 @@ impl RepoRelPath {
     pub fn to_path(&self, root: &Path) -> PathBuf {
         root.join(self.inner.replace('/', std::path::MAIN_SEPARATOR_STR))
     }
+}
+
+fn validate_text_path(value: &str) -> Result<()> {
+    if value.contains(['\n', '\r', '\0']) {
+        return Err(Error::InvalidPath {
+            message: "repository paths containing NUL or newlines are unsupported".to_string(),
+        });
+    }
+    Ok(())
 }
 
 impl fmt::Display for RepoRelPath {
@@ -215,5 +246,23 @@ mod tests {
         let root = Path::new("/repo");
         let err = RepoRelPath::normalize(Path::new("a/../../outside"), root).unwrap_err();
         assert!(err.to_string().contains("outside the repository root"));
+    }
+
+    #[test]
+    fn reject_newline_path_that_would_corrupt_line_output() {
+        let root = Path::new("/repo");
+        let err = RepoRelPath::normalize(Path::new("line\nbreak.env"), root).unwrap_err();
+        assert!(err.to_string().contains("newlines"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_non_utf8_path_without_lossy_collision() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = Path::new("/repo");
+        let invalid = std::ffi::OsStr::from_bytes(b"bad-\xff.env");
+        let err = RepoRelPath::normalize(Path::new(invalid), root).unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"));
     }
 }

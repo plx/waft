@@ -2,19 +2,54 @@
 name = "waft"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.90"
 description = "Copy .worktreeinclude-selected ignored files between Git worktrees"
 license = "MIT"
+repository = "https://github.com/plx/waft"
+readme = "README.md"
+keywords = ["git", "worktree", "cli", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
+publish = false
+include = [
+    "/src/**",
+    "/tests/**",
+    "/benches/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+    "/THIRD_PARTY_LICENSES.md",
+    "/CHANGELOG.md",
+    "/SECURITY.md",
+    "/rust-toolchain.toml",
+    "/about.toml",
+    "/about.hbs",
+    "/justfile",
+    "/hooks/dispatcher",
+    "/hooks/post-checkout",
+    "/scripts/install-hooks.sh",
+    "/scripts/self-test.sh",
+]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-gix = "0.81"
+gix = { version = "0.81", default-features = false, features = ["excludes", "index", "sha1"] }
 ignore = "0.4"
 reflink-copy = "0.1"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 thiserror = "2"
 toml = "0.9"
+unicode-casefold = "0.2"
+unicode-normalization = "0.1"
 walkdir = "2"
+
+[target.'cfg(unix)'.dependencies]
+getrandom = "0.3"
+rustix = { version = "1.1", features = ["fs"] }
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

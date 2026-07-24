@@ -11,11 +11,12 @@
 //! Backend parity tests in `tests/backend_parity.rs` pin both implementations
 //! to the same observable behavior.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use gix::bstr::ByteSlice;
+use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::config::{SymlinkPolicy, WorktreeincludeSemantics};
 use crate::error::{Error, Result};
@@ -37,7 +38,10 @@ pub struct WorktreeRecord {
 pub struct IgnoreCheckRecord {
     /// The path that was checked.
     pub path: RepoRelPath,
-    /// If the path matched an ignore rule, details about the match.
+    /// Whether the effective match excludes the path.
+    pub ignored: bool,
+    /// If the path matched an ignore rule, details about the match. This may
+    /// describe a negated rule even when `ignored` is false.
     pub match_info: Option<IgnoreMatchInfo>,
 }
 
@@ -66,6 +70,15 @@ pub trait GitBackend {
         source_root: &Path,
         paths: &[RepoRelPath],
     ) -> Result<HashSet<RepoRelPath>>;
+
+    /// Return the worktree-specific index path when the backend can expose it.
+    ///
+    /// The executor holds the corresponding `.lock` file across its final
+    /// tracked-state check and publication so normal Git writers cannot change
+    /// trackedness in between. Test and specialized backends may return `None`.
+    fn index_path(&self, _source_root: &Path) -> Result<Option<PathBuf>> {
+        Ok(None)
+    }
 
     /// Return registered submodule paths from the index (mode 160000 gitlinks).
     fn gitlinks(&self, source_root: &Path) -> Result<HashSet<String>>;
@@ -112,6 +125,14 @@ pub trait GitBackend {
 
     /// Read a Git config value as a string. Returns `None` if the key is unset.
     fn read_config(&self, source_root: &Path, key: &str) -> Result<Option<String>>;
+
+    /// Whether this backend reads Git's ambient default global excludes file.
+    ///
+    /// Real backends return true. In-memory test/specialized backends default
+    /// to false so validation does not unexpectedly consult the host account.
+    fn reads_default_global_excludes(&self) -> bool {
+        false
+    }
 }
 
 /// Create the configured Git backend.
@@ -253,11 +274,57 @@ fn strip_unc_prefix(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Convert Git's raw path bytes without changing their spelling.
+///
+/// Unix paths are byte strings, so preserve every byte. Other supported
+/// platforms require Unicode paths; fail closed instead of replacing invalid
+/// bytes and potentially aliasing two distinct names.
+fn path_buf_from_git_bytes(bytes: &[u8], context: &str) -> Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let _ = context;
+        Ok(PathBuf::from(OsStr::from_bytes(bytes)))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let path = std::str::from_utf8(bytes).map_err(|error| Error::InvalidPath {
+            message: format!("{context} is not valid UTF-8: {error}"),
+        })?;
+        Ok(PathBuf::from(path))
+    }
+}
+
+fn trim_git_line_ending(mut bytes: &[u8]) -> &[u8] {
+    if let Some(trimmed) = bytes.strip_suffix(b"\n") {
+        bytes = trimmed;
+    }
+    if let Some(trimmed) = bytes.strip_suffix(b"\r") {
+        bytes = trimmed;
+    }
+    bytes
+}
+
+fn gitlinks_from_gix_index(index: &gix::index::State) -> Result<HashSet<String>> {
+    index
+        .entries()
+        .iter()
+        .filter(|entry| entry.mode == gix::index::entry::Mode::COMMIT)
+        .map(|entry| {
+            RepoRelPath::from_git_bytes(entry.path(index).as_ref())
+                .map(|path| path.as_str().to_string())
+        })
+        .collect()
+}
+
 impl GitBackend for GitCli {
     fn show_toplevel(&self, path: &Path) -> Result<PathBuf> {
         let output = self.run_git(path, &["rev-parse", "--show-toplevel"])?;
-        let s = String::from_utf8_lossy(&output);
-        let raw = PathBuf::from(s.trim_end_matches(['\n', '\r']));
+        let path_bytes = trim_git_line_ending(&output);
+        let raw = path_buf_from_git_bytes(path_bytes, "repository root")?;
         Ok(normalize_repo_path(&raw))
     }
 
@@ -275,20 +342,36 @@ impl GitBackend for GitCli {
             return Ok(HashSet::new());
         }
 
-        let mut args: Vec<&str> = vec!["ls-files", "--cached", "--full-name", "-z", "--"];
-        let path_strings: Vec<&str> = paths.iter().map(|p| p.as_str()).collect();
-        args.extend(path_strings.iter());
-
-        let output = self.run_git(source_root, &args)?;
+        // Do not pass the candidates as pathspecs here. Git's pathspec lookup
+        // can remain case-sensitive even when core.ignoreCase is true, which
+        // would let `SECRET.env` be treated as untracked when the index
+        // contains `secret.env`. Enumerate the index once and return the
+        // caller's spelling for every matching query.
+        let output = self.run_git(source_root, &["ls-files", "--cached", "--full-name", "-z"])?;
+        let ignore_case = self.read_bool_config(source_root, "core.ignoreCase")?;
+        let index_paths = TrackedPathLookup::new(
+            output.split(|&b| b == 0).filter(|entry| !entry.is_empty()),
+            ignore_case,
+        );
         let mut result = HashSet::new();
-        for entry in output.split(|&b| b == 0) {
-            if entry.is_empty() {
-                continue;
+        for path in paths {
+            if index_paths.contains(source_root, path.as_str().as_bytes()) {
+                result.insert(path.clone());
             }
-            let s = String::from_utf8_lossy(entry);
-            result.insert(RepoRelPath::from_normalized(s.into_owned()));
         }
         Ok(result)
+    }
+
+    fn index_path(&self, source_root: &Path) -> Result<Option<PathBuf>> {
+        let output = self.run_git(source_root, &["rev-parse", "--git-path", "index"])?;
+        let path_bytes = trim_git_line_ending(&output);
+        let raw = path_buf_from_git_bytes(path_bytes, "Git index path")?;
+        let path = if raw.is_absolute() {
+            raw
+        } else {
+            source_root.join(raw)
+        };
+        Ok(Some(path))
     }
 
     fn gitlinks(&self, source_root: &Path) -> Result<HashSet<String>> {
@@ -326,48 +409,11 @@ impl GitBackend for GitCli {
         semantics: WorktreeincludeSemantics,
         symlink_policy: SymlinkPolicy,
     ) -> Result<Vec<RepoRelPath>> {
-        // The CLI fast path uses `git ls-files --exclude-per-directory`,
-        // which is hard-wired to Git's per-directory exclude semantics. As
-        // long as the requested semantics engine produces the same result
-        // for this fixture (true in PR6 since Claude202604 and Wt039
-        // delegate to GitSemantics), the fast path is valid. PR7 / PR8
-        // will route divergent engines through the walk path below.
-        let semantics_matches_git_cli = matches!(
-            semantics,
-            WorktreeincludeSemantics::Git
-                | WorktreeincludeSemantics::Claude202604
-                | WorktreeincludeSemantics::Wt039
-        );
-
-        // Under Ignore policy, symlinked .worktreeinclude files must NOT
-        // contribute patterns. Git CLI's `--exclude-per-directory` follows
-        // symlinks unconditionally, so fall through to a walkdir + matcher
-        // path when Ignore is requested.
-        if symlink_policy == SymlinkPolicy::Ignore || !semantics_matches_git_cli {
-            return cli_list_candidates_skipping_symlinked_rules(self, source_root, semantics);
-        }
-
-        let output = self.run_git(
-            source_root,
-            &[
-                "ls-files",
-                "--others",
-                "--ignored",
-                "--exclude-per-directory=.worktreeinclude",
-                "--full-name",
-                "-z",
-            ],
-        )?;
-
-        let mut result = Vec::new();
-        for entry in output.split(|&b| b == 0) {
-            let s = String::from_utf8_lossy(entry);
-            let s = s.trim();
-            if !s.is_empty() {
-                result.push(RepoRelPath::from_normalized(s.to_string()));
-            }
-        }
-        Ok(result)
+        // `git ls-files --exclude-per-directory` only implements Git's
+        // nested rule semantics. Claude is intentionally root-only and Wt
+        // has its own subtractive selection algorithm, so every profile uses
+        // the same semantics engine as the in-process backend.
+        cli_list_candidates_with_engine(self, source_root, semantics, symlink_policy)
     }
 
     fn list_ignored_untracked(&self, source_root: &Path) -> Result<Vec<RepoRelPath>> {
@@ -385,10 +431,8 @@ impl GitBackend for GitCli {
 
         let mut result = Vec::new();
         for entry in output.split(|&b| b == 0) {
-            let s = String::from_utf8_lossy(entry);
-            let s = s.trim();
-            if !s.is_empty() {
-                result.push(RepoRelPath::from_normalized(s.to_string()));
+            if !entry.is_empty() {
+                result.push(RepoRelPath::from_git_bytes(entry)?);
             }
         }
         Ok(result)
@@ -442,6 +486,10 @@ impl GitBackend for GitCli {
                 Ok(None)
             }
         }
+    }
+
+    fn reads_default_global_excludes(&self) -> bool {
+        true
     }
 }
 
@@ -522,14 +570,28 @@ impl GitBackend for GitGix {
         })?;
 
         let mut tracked = HashSet::new();
+        let ignore_case = repo
+            .config_snapshot()
+            .boolean("core.ignoreCase")
+            .unwrap_or(false);
+        let index_paths = TrackedPathLookup::new(
+            index
+                .entries()
+                .iter()
+                .map(|entry| entry.path(&index).as_ref()),
+            ignore_case,
+        );
         for path in paths {
-            let rela = path.as_str().as_bytes().as_bstr();
-            if index.entry_by_path(rela).is_some() {
+            if index_paths.contains(source_root, path.as_str().as_bytes()) {
                 tracked.insert(path.clone());
             }
         }
 
         Ok(tracked)
+    }
+
+    fn index_path(&self, source_root: &Path) -> Result<Option<PathBuf>> {
+        Ok(Some(self.discover_repo(source_root)?.index_path()))
     }
 
     fn gitlinks(&self, source_root: &Path) -> Result<HashSet<String>> {
@@ -541,12 +603,7 @@ impl GitBackend for GitGix {
             ),
         })?;
 
-        Ok(index
-            .entries()
-            .iter()
-            .filter(|e| e.mode == gix::index::entry::Mode::COMMIT)
-            .map(|e| e.path(&index).to_str_lossy().into_owned())
-            .collect())
+        gitlinks_from_gix_index(&index)
     }
 
     fn check_ignore(
@@ -575,8 +632,8 @@ impl GitBackend for GitGix {
 
         let mut records = Vec::with_capacity(paths.len());
         for path in paths {
-            let match_info = if tracked.contains(path) {
-                None
+            let (ignored, match_info) = if tracked.contains(path) {
+                (false, None)
             } else {
                 let abs = path.to_path(source_root);
                 let mode = if abs.is_dir() {
@@ -591,20 +648,24 @@ impl GitBackend for GitGix {
                         source: e,
                     })?;
 
-                platform
-                    .matching_exclude_pattern()
-                    .map(|m| IgnoreMatchInfo {
-                        source_file: m
-                            .source
-                            .map(|p| Self::normalize_ignore_source(p, source_root))
-                            .unwrap_or_default(),
-                        line: m.sequence_number,
-                        pattern: m.pattern.to_string(),
-                    })
+                let matched = platform.matching_exclude_pattern();
+                let ignored = matched
+                    .as_ref()
+                    .is_some_and(|matched| !matched.pattern.is_negative());
+                let match_info = matched.map(|m| IgnoreMatchInfo {
+                    source_file: m
+                        .source
+                        .map(|p| Self::normalize_ignore_source(p, source_root))
+                        .unwrap_or_default(),
+                    line: m.sequence_number,
+                    pattern: m.pattern.to_string(),
+                });
+                (ignored, match_info)
             };
 
             records.push(IgnoreCheckRecord {
                 path: path.clone(),
+                ignored,
                 match_info,
             });
         }
@@ -629,16 +690,18 @@ impl GitBackend for GitGix {
             .config_snapshot()
             .boolean("core.ignoreCase")
             .unwrap_or(false);
+        let tracked_paths = TrackedPathLookup::new(
+            index
+                .entries()
+                .iter()
+                .map(|entry| entry.path(&index).as_ref()),
+            ignore_case,
+        );
 
         // Submodules registered with `git submodule add` are stored in the
         // index as entries with mode 160000 (gitlink). `git ls-files` skips
         // these when walking the worktree, and so must we.
-        let gitlinks: HashSet<String> = index
-            .entries()
-            .iter()
-            .filter(|e| e.mode == gix::index::entry::Mode::COMMIT)
-            .map(|e| e.path(&index).to_str_lossy().into_owned())
-            .collect();
+        let gitlinks = gitlinks_from_gix_index(&index)?;
 
         let engine = crate::worktreeinclude_engine::engine_for(semantics);
         let mut candidates = Vec::new();
@@ -654,13 +717,9 @@ impl GitBackend for GitGix {
                 continue;
             }
 
-            let rel = match RepoRelPath::normalize(entry.path(), source_root) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
+            let rel = RepoRelPath::normalize(entry.path(), source_root)?;
 
-            let rela_bstr = rel.as_str().as_bytes().as_bstr();
-            if index.entry_by_path(rela_bstr).is_some() {
+            if tracked_paths.contains(source_root, rel.as_str().as_bytes()) {
                 continue;
             }
 
@@ -704,12 +763,18 @@ impl GitBackend for GitGix {
             ),
         })?;
 
-        let gitlinks: HashSet<String> = index
-            .entries()
-            .iter()
-            .filter(|e| e.mode == gix::index::entry::Mode::COMMIT)
-            .map(|e| e.path(&index).to_str_lossy().into_owned())
-            .collect();
+        let gitlinks = gitlinks_from_gix_index(&index)?;
+        let ignore_case = repo
+            .config_snapshot()
+            .boolean("core.ignoreCase")
+            .unwrap_or(false);
+        let tracked_paths = TrackedPathLookup::new(
+            index
+                .entries()
+                .iter()
+                .map(|entry| entry.path(&index).as_ref()),
+            ignore_case,
+        );
 
         let mut result = Vec::new();
         for entry in walkdir::WalkDir::new(source_root)
@@ -724,32 +789,35 @@ impl GitBackend for GitGix {
                 continue;
             }
 
-            let rel = match RepoRelPath::normalize(entry.path(), source_root) {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
+            // Match ignore state using the native pathname first. This lets
+            // an unrelated, unignored non-UTF-8 Unix name remain outside the
+            // candidate set just as it does with `git ls-files`; selected
+            // names still fail closed when converted to RepoRelPath below.
+            let rel_path =
+                entry
+                    .path()
+                    .strip_prefix(source_root)
+                    .map_err(|error| Error::InvalidPath {
+                        message: format!(
+                            "{} is outside repository root {}: {error}",
+                            entry.path().display(),
+                            source_root.display()
+                        ),
+                    })?;
+            let platform = excludes.at_path(rel_path, None).map_err(|e| Error::Io {
+                context: format!("matching ignore patterns for {}", entry.path().display()),
+                source: e,
+            })?;
 
-            let rela_bstr = rel.as_str().as_bytes().as_bstr();
-            if index.entry_by_path(rela_bstr).is_some() {
+            if !platform.is_excluded() {
                 continue;
             }
 
-            let abs = rel.to_path(source_root);
-            let mode = if abs.is_dir() {
-                Some(gix::index::entry::Mode::DIR)
-            } else {
-                None
-            };
-            let platform = excludes
-                .at_path(Path::new(rel.as_str()), mode)
-                .map_err(|e| Error::Io {
-                    context: format!("matching ignore patterns for {}", rel.as_str()),
-                    source: e,
-                })?;
-
-            if platform.matching_exclude_pattern().is_some() {
-                result.push(rel);
+            let rel = RepoRelPath::normalize(entry.path(), source_root)?;
+            if tracked_paths.contains(source_root, rel.as_str().as_bytes()) {
+                continue;
             }
+            result.push(rel);
         }
 
         result.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -768,12 +836,7 @@ impl GitBackend for GitGix {
                 source_root.display()
             ),
         })?;
-        let gitlinks: HashSet<String> = index
-            .entries()
-            .iter()
-            .filter(|e| e.mode == gix::index::entry::Mode::COMMIT)
-            .map(|e| e.path(&index).to_str_lossy().into_owned())
-            .collect();
+        let gitlinks = gitlinks_from_gix_index(&index)?;
         Ok(walk_for_first_worktreeinclude(
             source_root,
             &gitlinks,
@@ -803,6 +866,10 @@ impl GitBackend for GitGix {
             None => Ok(None),
         }
     }
+
+    fn reads_default_global_excludes(&self) -> bool {
+        true
+    }
 }
 
 /// Read the set of gitlink paths (mode 160000) from the index using the Git
@@ -811,22 +878,19 @@ impl GitBackend for GitGix {
 fn read_gitlinks_via_cli(cli: &GitCli, source_root: &Path) -> Result<HashSet<String>> {
     // `git ls-files -s -z` emits one entry per line in the form
     // `<mode> <hash> <stage>\t<path>` with NUL separators.
-    let output = match cli.run_git(source_root, &["ls-files", "-s", "-z"]) {
-        Ok(out) => out,
-        Err(_) => return Ok(HashSet::new()),
-    };
+    let output = cli.run_git(source_root, &["ls-files", "-s", "-z"])?;
     let mut links = HashSet::new();
     for record in output.split(|&b| b == 0) {
         if record.is_empty() {
             continue;
         }
-        let s = String::from_utf8_lossy(record);
         // Format: "160000 <hash> <stage>\t<path>"
-        let mut parts = s.splitn(2, '\t');
-        let header = parts.next().unwrap_or("");
-        let path = parts.next().unwrap_or("").to_string();
-        if header.starts_with("160000 ") {
-            links.insert(path);
+        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+            continue;
+        };
+        if record[..tab].starts_with(b"160000 ") {
+            let path = RepoRelPath::from_git_bytes(&record[tab + 1..])?;
+            links.insert(path.as_str().to_string());
         }
     }
     Ok(links)
@@ -855,7 +919,7 @@ fn walk_for_first_worktreeinclude(
         if entry.file_type().is_dir() {
             continue;
         }
-        if entry.file_name() != ".worktreeinclude" {
+        if !crate::walk::special_filename_matches(entry.file_name(), ".worktreeinclude") {
             continue;
         }
         if entry.file_type().is_symlink() {
@@ -871,16 +935,13 @@ fn walk_for_first_worktreeinclude(
     false
 }
 
-/// CLI-backend candidate enumeration that mirrors the gix walker.
-///
-/// Used when the CLI fast path (`git ls-files --exclude-per-directory`) is
-/// not safe — either because the requested `SymlinkPolicy::Ignore` requires
-/// hiding symlinked rule files or because `semantics` selects an engine
-/// whose output diverges from Git's per-directory rules.
-fn cli_list_candidates_skipping_symlinked_rules(
+/// CLI-backend candidate enumeration that mirrors the gix walker and invokes
+/// the selected semantics engine for every path.
+fn cli_list_candidates_with_engine(
     cli: &GitCli,
     source_root: &Path,
     semantics: WorktreeincludeSemantics,
+    symlink_policy: SymlinkPolicy,
 ) -> Result<Vec<RepoRelPath>> {
     let gitlinks = read_gitlinks_via_cli(cli, source_root)?;
     let ignore_case = cli
@@ -891,11 +952,10 @@ fn cli_list_candidates_skipping_symlinked_rules(
     // check used by the gix backend. Use `git ls-files --cached` for a
     // single CLI invocation rather than per-path checks.
     let cached = cli.run_git(source_root, &["ls-files", "--cached", "-z"])?;
-    let tracked: HashSet<String> = cached
-        .split(|&b| b == 0)
-        .filter(|e| !e.is_empty())
-        .map(|e| String::from_utf8_lossy(e).into_owned())
-        .collect();
+    let tracked = TrackedPathLookup::new(
+        cached.split(|&b| b == 0).filter(|entry| !entry.is_empty()),
+        ignore_case,
+    );
 
     let engine = crate::worktreeinclude_engine::engine_for(semantics);
     let mut candidates = Vec::new();
@@ -909,11 +969,8 @@ fn cli_list_candidates_skipping_symlinked_rules(
         if entry.file_type().is_dir() {
             continue;
         }
-        let rel = match RepoRelPath::normalize(entry.path(), source_root) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if tracked.contains(rel.as_str()) {
+        let rel = RepoRelPath::normalize(entry.path(), source_root)?;
+        if tracked.contains(source_root, rel.as_str().as_bytes()) {
             continue;
         }
 
@@ -923,7 +980,7 @@ fn cli_list_candidates_skipping_symlinked_rules(
                 rel.as_str(),
                 false,
                 ignore_case,
-                SymlinkPolicy::Ignore,
+                symlink_policy,
             ),
             crate::model::WorktreeincludeStatus::Included { .. }
         );
@@ -934,6 +991,233 @@ fn cli_list_candidates_skipping_symlinked_rules(
 
     candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     Ok(candidates)
+}
+
+/// Compare normalized repository paths using the same case semantics as
+/// tracked-path protection.
+///
+/// This is crate-visible so other repository-boundary checks can avoid
+/// drifting back to ASCII-only comparisons.
+pub(crate) fn repo_paths_equivalent(left: &str, right: &str, ignore_case: bool) -> bool {
+    repo_path_bytes_equal(left.as_bytes(), right.as_bytes(), ignore_case)
+}
+
+/// Return true when `alias` is a non-exact spelling that the filesystem
+/// resolves to the same entry as `canonical`.
+///
+/// Requiring at least one missing exact directory entry distinguishes a
+/// case/normalization alias from two explicitly named hard links.
+pub(crate) fn repo_paths_alias_on_filesystem(
+    source_root: &Path,
+    canonical: &RepoRelPath,
+    alias: &RepoRelPath,
+) -> bool {
+    if canonical == alias || repo_path_has_exact_spelling(source_root, alias) {
+        return false;
+    }
+
+    let canonical_info = repo_path_filesystem_info(source_root, canonical.as_str().as_bytes());
+    let alias_info = repo_path_filesystem_info(source_root, alias.as_str().as_bytes());
+    canonical_info
+        .zip(alias_info)
+        .is_some_and(|(canonical, alias)| canonical.identity == alias.identity)
+}
+
+fn repo_path_has_exact_spelling(source_root: &Path, path: &RepoRelPath) -> bool {
+    let mut directory = source_root.to_path_buf();
+    for component in path.as_str().split('/') {
+        let Ok(mut entries) = std::fs::read_dir(&directory) else {
+            return false;
+        };
+        if !entries.any(|entry| {
+            entry
+                .ok()
+                .is_some_and(|entry| entry.file_name() == std::ffi::OsStr::new(component))
+        }) {
+            return false;
+        }
+        directory.push(component);
+    }
+    true
+}
+
+/// Compare repository paths using exact bytes first, then conservative
+/// normalized Unicode folding when Git is configured case-insensitively.
+fn repo_path_bytes_equal(left: &[u8], right: &[u8], ignore_case: bool) -> bool {
+    left == right || (ignore_case && case_folded_repo_path(left) == case_folded_repo_path(right))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum CaseFoldedRepoPath {
+    Utf8(String),
+    NonUtf8(Vec<u8>),
+}
+
+fn case_folded_repo_path(path: &[u8]) -> CaseFoldedRepoPath {
+    match std::str::from_utf8(path) {
+        Ok(path) => {
+            // Unicode's stable caseless matching transform is
+            // NFD(toCasefold(NFD(path))). `char::to_lowercase` is not enough:
+            // Greek final sigma (ς) and sigma (σ), for example, are aliases
+            // on normal case-insensitive macOS volumes but lowercase to
+            // distinct code points.
+            let decomposed = path.nfd().collect::<String>();
+            let folded = decomposed.as_str().case_fold().collect::<String>();
+            CaseFoldedRepoPath::Utf8(folded.nfd().collect())
+        }
+        Err(_) => CaseFoldedRepoPath::NonUtf8(
+            path.iter()
+                .copied()
+                .map(|byte| byte.to_ascii_lowercase())
+                .collect(),
+        ),
+    }
+}
+
+/// Precomputed tracked-name lookup with lazy filesystem-identity checks.
+///
+/// Exact and protected case-folded queries are constant-time. On platforms
+/// where folding is not automatically protective, only tracked names in the
+/// query's folded-name bucket are opened to detect a filesystem alias.
+/// macOS/Windows native aliases and Unix hard-linked queries may require a
+/// wider identity scan.
+struct TrackedPathLookup {
+    exact: HashSet<Vec<u8>>,
+    protected_folded: Option<HashSet<CaseFoldedRepoPath>>,
+    always_folded: HashMap<CaseFoldedRepoPath, Vec<Vec<u8>>>,
+}
+
+impl TrackedPathLookup {
+    fn new<'a>(paths: impl IntoIterator<Item = &'a [u8]>, ignore_case: bool) -> Self {
+        let mut exact = HashSet::new();
+        // A false core.ignoreCase cannot prove that a macOS volume or Windows
+        // directory is case-sensitive, especially when both spellings are
+        // currently absent and there is no filesystem identity to compare.
+        // Prefer a conservative skip on those platforms. Linux keeps Git's
+        // configured semantics and uses the lazy identity checks below.
+        let protect_folded_names = ignore_case || cfg!(target_os = "macos") || cfg!(windows);
+        let mut protected_folded = protect_folded_names.then(HashSet::new);
+        let mut always_folded: HashMap<CaseFoldedRepoPath, Vec<Vec<u8>>> = HashMap::new();
+
+        for path in paths {
+            exact.insert(path.to_vec());
+            let folded_path = case_folded_repo_path(path);
+            if let Some(protected_folded) = &mut protected_folded {
+                protected_folded.insert(folded_path.clone());
+            }
+            always_folded
+                .entry(folded_path)
+                .or_default()
+                .push(path.to_vec());
+        }
+
+        Self {
+            exact,
+            protected_folded,
+            always_folded,
+        }
+    }
+
+    fn contains(&self, source_root: &Path, query: &[u8]) -> bool {
+        if self.exact.contains(query) {
+            return true;
+        }
+
+        let folded_query = case_folded_repo_path(query);
+        if self
+            .protected_folded
+            .as_ref()
+            .is_some_and(|folded| folded.contains(&folded_query))
+        {
+            return true;
+        }
+
+        let Some(query_info) = repo_path_filesystem_info(source_root, query) else {
+            return false;
+        };
+
+        if let Some(bucket) = self.always_folded.get(&folded_query)
+            && bucket.iter().any(|path| {
+                repo_path_filesystem_info(source_root, path)
+                    .is_some_and(|info| info.identity == query_info.identity)
+            })
+        {
+            return true;
+        }
+
+        // A filesystem's native caseless comparison can be broader than the
+        // Unicode version compiled into this binary. On macOS and Windows,
+        // compare identities across every folded bucket when the query
+        // resolves; on other Unix systems the wider scan is needed for hard
+        // links.
+        (cfg!(target_os = "macos") || cfg!(windows) || query_info.hard_link_count > 1)
+            && self
+                .always_folded
+                .iter()
+                .filter(|(folded, _)| *folded != &folded_query)
+                .flat_map(|(_, paths)| paths)
+                .any(|path| {
+                    repo_path_filesystem_info(source_root, path)
+                        .is_some_and(|info| info.identity == query_info.identity)
+                })
+    }
+}
+
+fn repo_path_filesystem_info(source_root: &Path, path: &[u8]) -> Option<FilesystemInfo> {
+    let path = repo_bytes_to_path(source_root, path)?;
+    filesystem_info(&path)
+}
+
+#[cfg(unix)]
+fn repo_bytes_to_path(source_root: &Path, path: &[u8]) -> Option<PathBuf> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    Some(source_root.join(OsStr::from_bytes(path)))
+}
+
+#[cfg(not(unix))]
+fn repo_bytes_to_path(source_root: &Path, path: &[u8]) -> Option<PathBuf> {
+    Some(source_root.join(std::str::from_utf8(path).ok()?))
+}
+
+#[cfg(unix)]
+type FilesystemIdentity = (u64, u64);
+
+#[cfg(unix)]
+fn filesystem_info(path: &Path) -> Option<FilesystemInfo> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    Some(FilesystemInfo {
+        identity: (metadata.dev(), metadata.ino()),
+        hard_link_count: metadata.nlink(),
+    })
+}
+
+#[cfg(windows)]
+type FilesystemIdentity = (u64, u64);
+
+#[cfg(windows)]
+fn filesystem_info(path: &Path) -> Option<FilesystemInfo> {
+    let handle = winapi_util::Handle::from_path_any(path).ok()?;
+    let info = winapi_util::file::information(&handle).ok()?;
+    Some(FilesystemInfo {
+        identity: (info.volume_serial_number(), info.file_index()),
+        hard_link_count: info.number_of_links(),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+type FilesystemIdentity = ();
+
+#[cfg(not(any(unix, windows)))]
+fn filesystem_info(_path: &Path) -> Option<FilesystemInfo> {
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FilesystemInfo {
+    identity: FilesystemIdentity,
+    hard_link_count: u64,
 }
 
 /// Return true when `entry` is a directory that should not be descended into
@@ -982,13 +1266,12 @@ fn is_nested_git_boundary(
 /// An empty field (from the double-NUL record separator) finalizes the record.
 /// The first record is always the main worktree.
 fn parse_worktree_list(output: &[u8]) -> Result<Vec<WorktreeRecord>> {
-    let text = String::from_utf8_lossy(output);
     let mut worktrees = Vec::new();
 
     let mut current_path: Option<PathBuf> = None;
     let mut current_is_bare = false;
 
-    for field in text.split('\0') {
+    for field in output.split(|byte| *byte == 0) {
         if field.is_empty() {
             // Empty field = record separator. Finalize current record if any.
             if let Some(path) = current_path.take() {
@@ -1003,7 +1286,7 @@ fn parse_worktree_list(output: &[u8]) -> Result<Vec<WorktreeRecord>> {
             continue;
         }
 
-        if let Some(p) = field.strip_prefix("worktree ") {
+        if let Some(path_bytes) = field.strip_prefix(b"worktree ") {
             // A new record starts. Finalize any pending record first (handles
             // streams that lack the trailing double-NUL).
             if let Some(path) = current_path.take() {
@@ -1015,8 +1298,8 @@ fn parse_worktree_list(output: &[u8]) -> Result<Vec<WorktreeRecord>> {
                 });
                 current_is_bare = false;
             }
-            current_path = Some(PathBuf::from(p));
-        } else if field == "bare" {
+            current_path = Some(path_buf_from_git_bytes(path_bytes, "worktree path")?);
+        } else if field == b"bare" {
             current_is_bare = true;
         }
         // Other fields (HEAD, branch, detached) are ignored for now.
@@ -1060,9 +1343,7 @@ fn parse_check_ignore_output(output: &[u8]) -> Result<Vec<IgnoreCheckRecord>> {
         let source = String::from_utf8_lossy(fields[i]).to_string();
         let linenum_str = String::from_utf8_lossy(fields[i + 1]).to_string();
         let pattern = String::from_utf8_lossy(fields[i + 2]).to_string();
-        let pathname = String::from_utf8_lossy(fields[i + 3]).to_string();
-
-        let path = RepoRelPath::from_normalized(pathname);
+        let path = RepoRelPath::from_git_bytes(fields[i + 3])?;
 
         let match_info = if source.is_empty() && linenum_str.is_empty() {
             None
@@ -1075,7 +1356,14 @@ fn parse_check_ignore_output(output: &[u8]) -> Result<Vec<IgnoreCheckRecord>> {
             })
         };
 
-        records.push(IgnoreCheckRecord { path, match_info });
+        let ignored = match_info
+            .as_ref()
+            .is_some_and(|info| !info.pattern.starts_with('!'));
+        records.push(IgnoreCheckRecord {
+            path,
+            ignored,
+            match_info,
+        });
         i += 4;
     }
 
@@ -1085,6 +1373,60 @@ fn parse_check_ignore_output(output: &[u8]) -> Result<Vec<IgnoreCheckRecord>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repository_path_equivalence_normalizes_unicode_case() {
+        assert!(repo_paths_equivalent("Ä.env", "a\u{308}.env", true));
+        assert!(repo_paths_equivalent("σ.env", "ς.env", true));
+        assert!(!repo_paths_equivalent("Ä.env", "a\u{308}.env", false));
+        assert!(!repo_paths_equivalent("σ.env", "ς.env", false));
+        assert!(repo_paths_equivalent("same/path", "same/path", false));
+    }
+
+    #[test]
+    fn repository_path_equivalence_preserves_ascii_folding_for_non_utf8() {
+        assert_eq!(
+            case_folded_repo_path(b"DIR/\xffA.env"),
+            case_folded_repo_path(b"dir/\xffa.env")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn filesystem_alias_detection_handles_case_aliases() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("Secret.env"), "x").unwrap();
+        assert!(
+            temp.path().join("secret.env").exists(),
+            "macOS safety regression requires a case-insensitive test volume"
+        );
+        let canonical = RepoRelPath::from_normalized("Secret.env".to_string());
+        let alias = RepoRelPath::from_normalized("secret.env".to_string());
+        assert!(repo_paths_alias_on_filesystem(
+            temp.path(),
+            &canonical,
+            &alias
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_alias_detection_does_not_conflate_named_hard_links() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("first.env"), "x").unwrap();
+        std::fs::hard_link(
+            temp.path().join("first.env"),
+            temp.path().join("second.env"),
+        )
+        .unwrap();
+        let first = RepoRelPath::from_normalized("first.env".to_string());
+        let second = RepoRelPath::from_normalized("second.env".to_string());
+        assert!(!repo_paths_alias_on_filesystem(
+            temp.path(),
+            &first,
+            &second
+        ));
+    }
 
     #[test]
     fn parse_worktree_list_single() {
@@ -1104,6 +1446,20 @@ mod tests {
         assert!(wts[0].is_main);
         assert!(!wts[1].is_main);
         assert_eq!(wts[1].path, PathBuf::from("/home/user/repo-wt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_worktree_list_preserves_non_utf8_root_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let output = b"worktree /tmp/repo-\xff\0HEAD abc123\0branch refs/heads/main\0\0";
+        let wts = parse_worktree_list(output).unwrap();
+        assert_eq!(
+            wts[0].path.as_os_str().as_bytes(),
+            b"/tmp/repo-\xff",
+            "worktree discovery must not replace raw pathname bytes"
+        );
     }
 
     #[test]
@@ -1216,6 +1572,7 @@ mod tests {
         let records = parse_check_ignore_output(output).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].path.as_str(), "debug.log");
+        assert!(records[0].ignored);
         let info = records[0].match_info.as_ref().unwrap();
         assert_eq!(info.source_file, PathBuf::from(".gitignore"));
         assert_eq!(info.line, 5);
@@ -1229,7 +1586,17 @@ mod tests {
         let records = parse_check_ignore_output(output).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].path.as_str(), "src/main.rs");
+        assert!(!records[0].ignored);
         assert!(records[0].match_info.is_none());
+    }
+
+    #[test]
+    fn parse_check_ignore_negation_is_not_ignored() {
+        let output = b".gitignore\x002\x00!keep.env\x00keep.env\x00";
+        let records = parse_check_ignore_output(output).unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(!records[0].ignored);
+        assert_eq!(records[0].match_info.as_ref().unwrap().pattern, "!keep.env");
     }
 
     #[test]
@@ -1237,6 +1604,8 @@ mod tests {
         let output = b".gitignore\x003\x00*.log\x00app.log\x00\x00\x00\x00README.md\x00";
         let records = parse_check_ignore_output(output).unwrap();
         assert_eq!(records.len(), 2);
+        assert!(records[0].ignored);
+        assert!(!records[1].ignored);
         assert!(records[0].match_info.is_some());
         assert!(records[1].match_info.is_none());
     }
@@ -1249,8 +1618,50 @@ mod tests {
 
     // ---- nested-repo skip behavior for list_worktreeinclude_candidates ----
 
+    fn isolated_git_command() -> std::process::Command {
+        const GIT_ROUTING_ENV: &[&str] = &[
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+            "GIT_CONFIG",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_NAMESPACE",
+            "GIT_PREFIX",
+            "GIT_SHALLOW_FILE",
+            "GIT_QUARANTINE_PATH",
+            "GIT_LITERAL_PATHSPECS",
+            "GIT_GLOB_PATHSPECS",
+            "GIT_NOGLOB_PATHSPECS",
+            "GIT_ICASE_PATHSPECS",
+            "GIT_INDEX_VERSION",
+            "GIT_DEFAULT_HASH",
+            "GIT_DEFAULT_REF_FORMAT",
+        ];
+
+        static XDG_HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let xdg_home = XDG_HOME
+            .get_or_init(|| tempfile::TempDir::new().expect("isolated test config directory"));
+        let mut command = std::process::Command::new("git");
+        command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .env("GIT_CONFIG_COUNT", "0")
+            .env("XDG_CONFIG_HOME", xdg_home.path());
+        for key in GIT_ROUTING_ENV {
+            command.env_remove(key);
+        }
+        command
+    }
+
     fn run_git(dir: &Path, args: &[&str]) {
-        let output = std::process::Command::new("git")
+        let output = isolated_git_command()
             .arg("-C")
             .arg(dir)
             .args(args)

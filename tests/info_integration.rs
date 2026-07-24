@@ -1,14 +1,18 @@
 //! Info command integration tests.
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
-use std::process;
 use tempfile::TempDir;
 
-fn waft() -> Command {
-    Command::cargo_bin("waft").unwrap()
+mod support;
+
+use support::waft;
+
+fn waft_in(dir: &Path) -> assert_cmd::Command {
+    let mut command = waft();
+    command.current_dir(dir);
+    command
 }
 
 fn make_repo() -> TempDir {
@@ -20,7 +24,7 @@ fn make_repo() -> TempDir {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let output = process::Command::new("git")
+    let output = support::git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -49,7 +53,7 @@ fn info_verbose_emits_resolved_policy() {
     git(repo.path(), &["add", "README.md"]);
     git(repo.path(), &["commit", "-m", "init"]);
 
-    waft()
+    waft_in(repo.path())
         .args([
             "info",
             "-v",
@@ -76,7 +80,7 @@ fn info_non_verbose_omits_policy_block() {
     git(repo.path(), &["add", "README.md"]);
     git(repo.path(), &["commit", "-m", "init"]);
 
-    waft()
+    waft_in(repo.path())
         .args([
             "info",
             "--source",
@@ -95,7 +99,7 @@ fn info_tracked_file() {
     git(repo.path(), &["add", "README.md"]);
     git(repo.path(), &["commit", "-m", "init"]);
 
-    waft()
+    waft_in(repo.path())
         .args([
             "info",
             "--source",
@@ -117,7 +121,7 @@ fn info_ignored_and_included() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    waft()
+    waft_in(repo.path())
         .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
         .assert()
         .success()
@@ -136,7 +140,7 @@ fn info_not_ignored_not_eligible() {
     git(repo.path(), &["commit", "-m", "setup"]);
 
     // README.md is not ignored and not matched by .worktreeinclude
-    waft()
+    waft_in(repo.path())
         .args([
             "info",
             "--source",
@@ -156,7 +160,7 @@ fn info_missing_file() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    waft()
+    waft_in(repo.path())
         .args([
             "info",
             "--source",
@@ -167,6 +171,115 @@ fn info_missing_file() {
         .success()
         .stdout(predicate::str::contains("source_exists: no"))
         .stdout(predicate::str::contains("eligible_to_copy: no"));
+}
+
+#[test]
+fn wt_glob_negation_explanation_matches_effective_selection() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", "*.tmp\n");
+    write_file(repo.path(), ".worktreeinclude", "!*.tmp\n");
+    write_file(repo.path(), "cache.tmp", "selected");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "configure wt glob negation"]);
+
+    waft_in(repo.path())
+        .args([
+            "info",
+            "--compat-profile",
+            "wt",
+            "--source",
+            repo.path().to_str().unwrap(),
+            "cache.tmp",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("eligible_to_copy: yes"))
+        .stdout(predicate::str::contains(
+            "worktreeinclude: selected (effective wt-0.39 policy",
+        ))
+        .stdout(predicate::str::contains("worktreeinclude: excluded").not());
+
+    waft_in(repo.path())
+        .args([
+            "list",
+            "--verbose",
+            "--compat-profile",
+            "wt",
+            "--source",
+            repo.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cache.tmp"))
+        .stdout(predicate::str::contains(
+            "selected (effective wt-0.39 policy",
+        ));
+}
+
+#[test]
+fn wt_literal_negation_explanation_reports_effective_exclusion() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", "*.tmp\n");
+    write_file(repo.path(), ".worktreeinclude", "!cache.tmp\n");
+    write_file(repo.path(), "cache.tmp", "excluded");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(
+        repo.path(),
+        &["commit", "-m", "configure wt literal negation"],
+    );
+
+    waft_in(repo.path())
+        .args([
+            "info",
+            "--compat-profile",
+            "wt",
+            "--source",
+            repo.path().to_str().unwrap(),
+            "cache.tmp",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("eligible_to_copy: no"))
+        .stdout(predicate::str::contains("worktreeinclude: excluded"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn info_agrees_with_list_for_native_case_alias_when_ignore_case_is_false() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", "*.env\n");
+    write_file(repo.path(), ".worktreeinclude", "*.env\n");
+    write_file(repo.path(), "Secret.env", "selected");
+    assert!(
+        repo.path().join("secret.env").exists(),
+        "macOS safety regression requires a case-insensitive test volume"
+    );
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "configure case alias"]);
+    git(repo.path(), &["config", "core.ignoreCase", "false"]);
+
+    for backend in ["gix", "cli"] {
+        let output = waft_in(repo.path())
+            .env("WAFT_GIT_BACKEND", backend)
+            .args([
+                "info",
+                "--source",
+                repo.path().to_str().unwrap(),
+                "secret.env",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{backend} info failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("eligible_to_copy: yes"),
+            "{backend} info contradicted the canonical eligible alias: {stdout}"
+        );
+    }
 }
 
 // --- Destination classification tests ---
@@ -221,7 +334,7 @@ fn info_dest_tracked_conflict() {
     git(&wt_path, &["add", "-f", ".env"]);
     git(&wt_path, &["commit", "-m", "track env in dest"]);
 
-    waft()
+    waft_in(main_dir.path())
         .args([
             "info",
             "--source",
@@ -249,7 +362,7 @@ fn info_dest_untracked_conflict() {
     // .env exists in dest but is NOT tracked (just written, not git-added)
     write_file(&wt_path, ".env", "DIFFERENT_SECRET=bar");
 
-    waft()
+    waft_in(main_dir.path())
         .args([
             "info",
             "--source",
@@ -276,7 +389,7 @@ fn info_dest_up_to_date() {
     write_file(main_dir.path(), ".env", "SAME_SECRET=foo");
     write_file(&wt_path, ".env", "SAME_SECRET=foo");
 
-    waft()
+    waft_in(main_dir.path())
         .args([
             "info",
             "--source",
@@ -302,7 +415,7 @@ fn info_dest_type_conflict() {
     // In dest, "config" is a directory, not a file
     fs::create_dir_all(wt_path.join("config")).unwrap();
 
-    waft()
+    waft_in(main_dir.path())
         .args([
             "info",
             "--source",
@@ -333,7 +446,7 @@ fn info_dest_unsafe_path() {
     let symlink_target = tempfile::TempDir::new().unwrap();
     std::os::unix::fs::symlink(symlink_target.path(), wt_path.join("nested")).unwrap();
 
-    waft()
+    waft_in(main_dir.path())
         .args([
             "info",
             "--source",
@@ -359,7 +472,7 @@ fn info_dest_missing() {
 
     write_file(main_dir.path(), ".env", "SECRET=foo");
 
-    waft()
+    waft_in(main_dir.path())
         .args([
             "info",
             "--source",
@@ -385,7 +498,7 @@ fn info_dest_with_missing_source() {
     // .env exists in dest but NOT in source
     write_file(&wt_path, ".env", "DEST_ONLY=bar");
 
-    waft()
+    waft_in(main_dir.path())
         .args([
             "info",
             "--source",
@@ -415,7 +528,7 @@ fn info_fails_when_validation_has_errors() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    waft()
+    waft_in(repo.path())
         .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
         .assert()
         .failure()
@@ -434,7 +547,7 @@ fn info_succeeds_when_validation_passes() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    waft()
+    waft_in(repo.path())
         .args(["info", "--source", repo.path().to_str().unwrap(), ".env"])
         .assert()
         .success()
@@ -451,7 +564,7 @@ fn info_multiple_paths() {
     git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
     git(repo.path(), &["commit", "-m", "setup"]);
 
-    let output = waft()
+    let output = waft_in(repo.path())
         .args([
             "info",
             "--source",
@@ -467,4 +580,163 @@ fn info_multiple_paths() {
     assert!(stdout.contains("path: .env"));
     // debug.log is ignored but not in .worktreeinclude, so not eligible
     assert!(stdout.contains("path: debug.log"));
+}
+
+#[test]
+fn info_uses_effective_wt_fallback_eligibility() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), ".env", "secret");
+    git(repo.path(), &["add", ".gitignore"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    waft_in(repo.path())
+        .args([
+            "info",
+            "--isolated",
+            "--compat-profile",
+            "wt",
+            "--source",
+            repo.path().to_str().unwrap(),
+            ".env",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "worktreeinclude: selected (effective policy)",
+        ))
+        .stdout(predicate::str::contains("eligible_to_copy: yes"));
+}
+
+#[test]
+fn info_honors_post_selection_excludes() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), ".worktreeinclude", ".env\n");
+    write_file(repo.path(), ".env", "secret");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    waft_in(repo.path())
+        .args([
+            "info",
+            "--isolated",
+            "--extra-exclude",
+            ".env",
+            "--source",
+            repo.path().to_str().unwrap(),
+            ".env",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("worktreeinclude: included"))
+        .stdout(predicate::str::contains("eligible_to_copy: no"));
+}
+
+#[test]
+fn info_relative_paths_honor_c_directory() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", "sub/.env\n");
+    write_file(repo.path(), ".worktreeinclude", "sub/.env\n");
+    write_file(repo.path(), "sub/.env", "secret");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    waft_in(repo.path())
+        .args([
+            "info",
+            "--isolated",
+            "-C",
+            repo.path().join("sub").to_str().unwrap(),
+            "--source",
+            repo.path().to_str().unwrap(),
+            ".env",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("path: sub/.env"))
+        .stdout(predicate::str::contains("eligible_to_copy: yes"));
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_sources_are_never_reported_as_eligible() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", "linked.env\n");
+    write_file(repo.path(), ".worktreeinclude", "linked.env\n");
+    write_file(repo.path(), "target.env", "secret");
+    std::os::unix::fs::symlink("target.env", repo.path().join("linked.env")).unwrap();
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    waft_in(repo.path())
+        .args([
+            "info",
+            "--isolated",
+            "--source",
+            repo.path().to_str().unwrap(),
+            "linked.env",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("source_kind: symlink"))
+        .stdout(predicate::str::contains("eligible_to_copy: no"));
+
+    waft_in(repo.path())
+        .args([
+            "list",
+            "--isolated",
+            "--source",
+            repo.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn quiet_info_suppresses_non_error_output() {
+    let repo = make_repo();
+    write_file(repo.path(), "README.md", "fixture");
+    git(repo.path(), &["add", "README.md"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    waft_in(repo.path())
+        .args([
+            "info",
+            "--isolated",
+            "--quiet",
+            "--source",
+            repo.path().to_str().unwrap(),
+            "README.md",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn info_rejects_relative_path_when_c_is_outside_source() {
+    let repo = make_repo();
+    write_file(repo.path(), "README.md", "source");
+    git(repo.path(), &["add", "README.md"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+
+    let outside = TempDir::new().unwrap();
+    write_file(outside.path(), "README.md", "outside");
+
+    waft()
+        .args([
+            "info",
+            "--isolated",
+            "-C",
+            outside.path().to_str().unwrap(),
+            "--source",
+            repo.path().to_str().unwrap(),
+            "README.md",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("outside the repository root"));
 }

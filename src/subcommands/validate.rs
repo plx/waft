@@ -6,8 +6,8 @@ use crate::cli::Cli;
 use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
-use crate::git::default_git_backend;
-use crate::model::ValidationSeverity;
+use crate::git::{GitBackend, default_git_backend};
+use crate::model::{RepoContext, ValidationSeverity};
 use crate::validate;
 
 /// Arguments for the validate command.
@@ -26,9 +26,22 @@ pub fn run_validate(cli: &Cli, policy: &ResolvedPolicy, _args: &ValidateArgs) ->
         CommandKind::Validate,
     )?;
 
-    let report = validate::validate(&ctx, git.as_ref(), policy.symlink_policy);
+    run_validate_with_context(cli, policy, _args, &ctx, git.as_ref())
+}
+
+pub(crate) fn run_validate_with_context(
+    cli: &Cli,
+    policy: &ResolvedPolicy,
+    _args: &ValidateArgs,
+    ctx: &RepoContext,
+    git: &dyn GitBackend,
+) -> Result<()> {
+    let report = validate::validate(ctx, git, policy.symlink_policy);
 
     for issue in &report.issues {
+        if cli.quiet && matches!(issue.severity, ValidationSeverity::Warning) {
+            continue;
+        }
         let severity = match issue.severity {
             ValidationSeverity::Warning => "warning",
             ValidationSeverity::Error => "error",

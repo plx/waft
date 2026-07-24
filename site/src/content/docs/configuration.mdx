@@ -10,13 +10,22 @@ win for scalar values.
 
 1. Built-in defaults.
 2. User config: `~/.config/waft/config.toml`.
-3. Project configs: each `.waft.toml` from repo root down to the current
-   directory.
+3. Project configs: each `.waft.toml` in the resolved source worktree, from
+   its repo root down to the invocation directory's equivalent source path.
 4. Environment variables using the `WAFT_*` prefix.
 5. CLI flags.
 
-Explicit knob settings always beat preset values from a higher-precedence
-profile layer.
+Project configs must be regular files. Symlinked configs fail closed, and
+discovery stops at nested repositories and registered submodules.
+
+Selecting a profile resets all profile-owned knobs at that layer. Explicit
+knobs in that layer, or in a later layer, can override it; lower-layer knobs
+cannot silently alter a higher-precedence profile.
+
+For managed or reproducible operation, pass `--isolated`. It omits user
+configuration, `WAFT_CONFIG_PATH`, and `WAFT_*` policy environment variables;
+built-in defaults, source-project configuration, and CLI overrides still
+apply. Operational selection of the Git backend remains available.
 
 ## Example `.waft.toml`
 
@@ -42,3 +51,4 @@ extra = ["*.bak"]
 | `--extra-exclude <GLOB>`                                     | Repeatable additional excludes.                   |
 | `--replace-extra-excludes`                                   | Drop inherited `extra-exclude` values.            |
 | `--config <PATH>`                                            | Use this file instead of the default user config. |
+| `--isolated`                                                 | Omit user and environment policy layers.          |

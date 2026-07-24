@@ -11,8 +11,8 @@ use crate::error::Result;
 use crate::fs::FileSystem;
 use crate::git::GitBackend;
 use crate::model::{
-    CopyDirOp, CopyOp, CopyPlan, DestinationState, NoOpEntry, NoOpReason, PlannedEntry,
-    RepoContext, SkipEntry, SkipReason, ValidationReport,
+    CopyOp, CopyPlan, DestinationExpectation, DestinationState, NoOpEntry, NoOpReason,
+    PlannedEntry, RepoContext, SkipEntry, SkipReason, ValidationReport,
 };
 use crate::path::RepoRelPath;
 
@@ -54,24 +54,11 @@ pub fn plan(
     let mut entries: Vec<PlannedEntry> = Vec::new();
     let mut per_file_paths = groups.remaining_files;
 
+    // Always execute the selected manifest as individual checked file
+    // operations. A whole-directory clone observes the live source tree and
+    // can therefore copy files that appeared after candidate selection.
     for dir in groups.full_dirs {
-        let dst_abs = dir.rel_path.to_path(dest_root);
-        let has_tracked_dest = dir.files.iter().any(|file| dest_tracked.contains(file));
-        if has_tracked_dest
-            || fs.parent_has_symlink(&dst_abs)
-            || fs.exists(&dst_abs)
-            || fs.is_symlink(&dst_abs)
-        {
-            per_file_paths.extend(dir.files);
-            continue;
-        }
-
-        entries.push(PlannedEntry::CopyDir(CopyDirOp {
-            src_abs: dir.rel_path.to_path(&ctx.source_root),
-            dst_abs,
-            rel_path: dir.rel_path,
-            files: dir.files,
-        }));
+        per_file_paths.extend(dir.files);
     }
 
     per_file_paths.sort();
@@ -111,10 +98,18 @@ pub fn plan(
                         reason: SkipReason::UnsafePath,
                     }));
                 } else {
+                    let expected_source =
+                        fs.file_snapshot(&src_abs)
+                            .map_err(|source| crate::error::Error::Io {
+                                context: format!("failed to snapshot source {}", src_abs.display()),
+                                source,
+                            })?;
                     entries.push(PlannedEntry::Copy(CopyOp {
                         rel_path,
                         src_abs,
                         dst_abs,
+                        expected_source,
+                        expected_destination: DestinationExpectation::Missing,
                     }));
                 }
             }
@@ -126,11 +121,11 @@ pub fn plan(
             }
             DestinationState::UntrackedConflict => {
                 if overwrite {
-                    entries.push(PlannedEntry::Copy(CopyOp {
-                        rel_path,
-                        src_abs,
-                        dst_abs,
-                    }));
+                    // POSIX has no atomic "replace this pathname only if it
+                    // still names inode X" operation. Reject the complete plan
+                    // before execution rather than risk clobbering a file that
+                    // changed after a best-effort snapshot.
+                    return Err(crate::error::Error::UnsafeOverwrite { path: dst_abs });
                 } else {
                     entries.push(PlannedEntry::Skip(SkipEntry {
                         rel_path,
@@ -193,17 +188,15 @@ pub(crate) fn classify_destination(
     }
 
     // Destination exists
-    if !fs.is_file(dst_abs) {
+    if fs.is_symlink(dst_abs) || !fs.is_file(dst_abs) {
         return DestinationState::TypeConflict;
     }
 
-    // It's a regular file — check if identical
-    let src_data = fs.read(src_abs);
-    let dst_data = fs.read(dst_abs);
-
-    match (src_data, dst_data) {
-        (Ok(s), Ok(d)) if s == d => DestinationState::UpToDate,
-        _ => DestinationState::UntrackedConflict,
+    // It's a regular file — compare content and relevant permissions without
+    // retaining both complete files in memory.
+    match fs.files_equal(src_abs, dst_abs) {
+        Ok(true) => DestinationState::UpToDate,
+        Ok(false) | Err(_) => DestinationState::UntrackedConflict,
     }
 }
 
@@ -213,9 +206,6 @@ pub fn render_dry_run(plan: &CopyPlan) {
         match entry {
             PlannedEntry::Copy(op) => {
                 println!("copy: {}", op.rel_path);
-            }
-            PlannedEntry::CopyDir(op) => {
-                println!("copy-dir: {} ({} files)", op.rel_path, op.file_count());
             }
             PlannedEntry::NoOp(entry) => {
                 println!("no-op: {} ({:?})", entry.rel_path, entry.reason);
@@ -231,7 +221,6 @@ pub fn render_dry_run(plan: &CopyPlan) {
         .iter()
         .fold(0usize, |count, entry| match entry {
             PlannedEntry::Copy(_) => count + 1,
-            PlannedEntry::CopyDir(op) => count + op.file_count(),
             _ => count,
         });
     let skips = plan
@@ -334,34 +323,20 @@ mod tests {
             false
         }
 
-        fn create_dir_all(&self, path: &Path) -> io::Result<()> {
-            self.dirs.borrow_mut().insert(path.to_path_buf());
-            Ok(())
-        }
-
         fn copy_file(
             &self,
-            src: &Path,
-            dst: &Path,
-            _strategy: crate::config::CopyStrategy,
+            request: crate::fs::CopyFileRequest<'_>,
+            _before_publish: &mut dyn FnMut() -> io::Result<()>,
         ) -> io::Result<()> {
+            let src = request.rel_path.to_path(request.source_root);
+            let dst = request.rel_path.to_path(request.destination_root);
             let data = self
                 .files
                 .borrow()
-                .get(src)
+                .get(&src)
                 .cloned()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "not found"))?;
-            self.files.borrow_mut().insert(dst.to_path_buf(), data);
-            Ok(())
-        }
-
-        fn copy_dir_exact(
-            &self,
-            _src: &Path,
-            _dst: &Path,
-            _expected_files: &[PathBuf],
-            _strategy: crate::config::CopyStrategy,
-        ) -> io::Result<()> {
+            self.files.borrow_mut().insert(dst, data);
             Ok(())
         }
     }
@@ -483,7 +458,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.entries.len(), 1);
-        assert!(matches!(plan.entries[0], PlannedEntry::Copy(_)));
+        assert!(matches!(
+            plan.entries[0],
+            PlannedEntry::Copy(CopyOp {
+                expected_destination: DestinationExpectation::Missing,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -538,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_untracked_conflict_copies_with_overwrite() {
+    fn plan_untracked_conflict_fails_closed_with_overwrite() {
         let fs = MockFs::new();
         fs.add_file("/source/.env", b"source");
         fs.add_file("/dest/.env", b"different");
@@ -547,7 +528,7 @@ mod tests {
         let ctx = test_ctx();
         let paths = vec![RepoRelPath::from_normalized(".env".to_string())];
 
-        let plan = plan(
+        let error = plan(
             &ctx,
             ValidationReport::default(),
             EligibilityGroups::from_files(paths),
@@ -556,9 +537,12 @@ mod tests {
             true,
             false,
         )
-        .unwrap();
-        assert_eq!(plan.entries.len(), 1);
-        assert!(matches!(plan.entries[0], PlannedEntry::Copy(_)));
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::Error::UnsafeOverwrite { path }
+                if path == PathBuf::from("/dest/.env")
+        ));
     }
 
     #[test]
@@ -617,8 +601,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_emits_copydir_for_missing_untracked_dst() {
+    fn plan_expands_full_directory_to_checked_file_operations() {
         let fs = MockFs::new();
+        fs.add_file("/source/cfg/a.conf", b"a");
+        fs.add_file("/source/cfg/b.conf", b"b");
         let git = MockPlannerGit::new(vec![]);
         let ctx = test_ctx();
 
@@ -633,7 +619,16 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(plan.entries[0], PlannedEntry::CopyDir(_)));
+        assert_eq!(plan.entries.len(), 2);
+        assert!(plan.entries.iter().all(|entry| {
+            matches!(
+                entry,
+                PlannedEntry::Copy(CopyOp {
+                    expected_destination: DestinationExpectation::Missing,
+                    ..
+                })
+            )
+        }));
     }
 
     #[test]
@@ -724,6 +719,7 @@ mod tests {
     fn plan_mixed_full_and_partial() {
         let fs = MockFs::new();
         fs.add_file("/source/.env", b"x");
+        fs.add_file("/source/cfg/a.conf", b"a");
         let git = MockPlannerGit::new(vec![]);
         let ctx = test_ctx();
 
@@ -742,17 +738,12 @@ mod tests {
         assert!(
             plan.entries
                 .iter()
-                .any(|entry| matches!(entry, PlannedEntry::CopyDir(_)))
-        );
-        assert!(
-            plan.entries
-                .iter()
-                .any(|entry| matches!(entry, PlannedEntry::Copy(_)))
+                .all(|entry| matches!(entry, PlannedEntry::Copy(_)))
         );
     }
 
     #[test]
-    fn plan_copydir_skips_source_file_type_checks_for_dir_itself() {
+    fn plan_full_directory_still_checks_each_source_file_type() {
         let fs = MockFs::new();
         let git = MockPlannerGit::new(vec![]);
         let ctx = test_ctx();
@@ -768,12 +759,20 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(plan.entries[0], PlannedEntry::CopyDir(_)));
+        assert!(matches!(
+            plan.entries[0],
+            PlannedEntry::Skip(SkipEntry {
+                reason: SkipReason::UnsupportedSourceType,
+                ..
+            })
+        ));
     }
 
     #[test]
-    fn plan_counts_copydir_by_manifest_size_in_dry_run() {
+    fn plan_counts_expanded_manifest_files_in_dry_run() {
         let fs = MockFs::new();
+        fs.add_file("/source/cfg/a.conf", b"a");
+        fs.add_file("/source/cfg/b.conf", b"b");
         let git = MockPlannerGit::new(vec![]);
         let ctx = test_ctx();
 
@@ -787,7 +786,8 @@ mod tests {
             true,
         )
         .unwrap();
-        let report = crate::executor::execute(&plan, &fs, crate::config::CopyStrategy::SimpleCopy);
+        let report =
+            crate::executor::execute(&plan, &fs, &git, crate::config::CopyStrategy::SimpleCopy);
 
         assert_eq!(report.copied, 2);
     }

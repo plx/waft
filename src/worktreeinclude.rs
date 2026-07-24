@@ -47,9 +47,11 @@ fn build_file_match_context(
 
     for (line_num_0, line_text) in content.lines().enumerate() {
         let line_1based = line_num_0 + 1;
-        let trimmed = line_text.trim();
+        let pattern_text = line_text.trim_end();
 
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        // Git only treats `#` in the first column as a comment. Leading
+        // whitespace is significant and may be part of a valid filename.
+        if pattern_text.is_empty() || line_text.starts_with('#') {
             continue;
         }
 
@@ -57,7 +59,7 @@ fn build_file_match_context(
             .add_line(Some(file_path.to_path_buf()), line_text)
             .is_ok()
         {
-            line_info.push((line_1based, trimmed.to_string()));
+            line_info.push((line_1based, pattern_text.to_string()));
         }
     }
 
@@ -240,17 +242,14 @@ fn cross_file_ancestor_check(
 /// Map a matched `Glob` back to its line number and pattern text.
 ///
 /// Searches `line_info` (populated in add-order parallel to the builder's
-/// glob list) for the entry whose trimmed text matches `glob.original()`.
+/// glob list) for the entry whose text matches `glob.original()`.
 fn glob_line_info(
     glob: &ignore::gitignore::Glob,
     line_info: &[(usize, String)],
 ) -> (usize, String) {
     let original = glob.original();
-    // The original in the Glob has trailing whitespace stripped but may
-    // retain leading whitespace. Our line_info stores trimmed text.
-    let original_trimmed = original.trim();
     for (line, pattern) in line_info.iter().rev() {
-        if pattern == original_trimmed {
+        if pattern == original {
             return (*line, pattern.clone());
         }
     }
@@ -347,6 +346,27 @@ mod tests {
 
         let result = explain(dir.path(), "README.md", false, false, SymlinkPolicy::Follow);
         assert!(matches!(result, WorktreeincludeStatus::NoMatch));
+    }
+
+    #[test]
+    fn leading_space_before_hash_is_a_literal_pattern() {
+        let dir = setup_repo();
+        fs::write(dir.path().join(".worktreeinclude"), " #literal.env\n").unwrap();
+
+        let result = explain(
+            dir.path(),
+            " #literal.env",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
+        match result {
+            WorktreeincludeStatus::Included { pattern, line, .. } => {
+                assert_eq!(pattern, " #literal.env");
+                assert_eq!(line, 1);
+            }
+            other => panic!("expected literal leading-space pattern, got {other:?}"),
+        }
     }
 
     #[test]

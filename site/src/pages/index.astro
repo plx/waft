@@ -160,7 +160,7 @@ const docsHref = siteConfig.docs.pages[0]?.href || "docs/";
             </div>
             <div class="transfer-rule">
               <strong>Never:</strong>
-              <span>tracked files or symlinks. Existing files require <code>--overwrite</code>.</span>
+              <span>tracked files, symlinks, or existing destination conflicts. <code>--overwrite</code> remains fail-closed.</span>
             </div>
           </div>
         </div>

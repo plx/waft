@@ -31,14 +31,17 @@ Backend parity tests keep both implementations aligned.
 All commands follow a read-only planning pipeline before writes are possible.
 
 1. Parse CLI arguments.
-2. Resolve layered policy.
-3. Resolve source and destination worktree context.
+2. Resolve source and destination worktree context.
+3. Resolve layered policy against that source worktree.
 4. Validate ignore files.
 5. Select candidate files.
 6. Apply policy filters.
 7. Confirm ignored status through Git.
 8. Build a copy plan.
-9. Execute only for `copy` without `--dry-run`.
+9. On Unix, traverse source and destination components relative to canonical
+   worktree directory descriptors, verify planned source state, hold Git's
+   cooperative index lock across the final tracked check, and publish without
+   replacing any existing pathname.
 
 `list`, `info`, and `validate` never enter the execute phase.
 

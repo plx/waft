@@ -1,20 +1,17 @@
 //! Profile-driven fixture integration tests.
 //!
 //! Each fixture from the worktreeinclude config matrix is exercised under
-//! every supported `--compat-profile` value. Currently covers F2; later PRs
-//! extend coverage as semantics engines and exclude filters land.
+//! every supported `--compat-profile` value and Git backend.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
-use std::process;
 
-use assert_cmd::Command;
 use tempfile::TempDir;
 
-fn waft() -> Command {
-    Command::cargo_bin("waft").unwrap()
-}
+mod support;
+
+use support::waft;
 
 fn make_repo() -> TempDir {
     let dir = TempDir::new().unwrap();
@@ -25,7 +22,7 @@ fn make_repo() -> TempDir {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let output = process::Command::new("git")
+    let output = support::git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -47,19 +44,33 @@ fn write_file(dir: &Path, rel_path: &str, content: &str) {
     fs::write(&path, content).unwrap();
 }
 
-/// Run `waft list` with the given extra args, returning the set of listed
-/// paths (one per stdout line, blank lines trimmed).
+/// Run `waft list` through every supported backend, assert parity, and return
+/// the set of listed paths (one per stdout line, blank lines trimmed).
 fn list_paths(source: &Path, extra_args: &[&str]) -> BTreeSet<String> {
-    let mut cmd = waft();
-    cmd.args(["list", "--source"]).arg(source);
-    cmd.args(extra_args);
-    let assert = cmd.assert().success();
-    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    stdout
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect()
+    let outputs: Vec<(String, BTreeSet<String>)> = ["gix", "cli"]
+        .into_iter()
+        .map(|backend| {
+            let mut cmd = waft();
+            cmd.env("WAFT_GIT_BACKEND", backend)
+                .args(["list", "--source"])
+                .arg(source)
+                .args(extra_args);
+            let assert = cmd.assert().success();
+            let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+            let paths = stdout
+                .lines()
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect();
+            (backend.to_string(), paths)
+        })
+        .collect();
+    assert_eq!(
+        outputs[0].1, outputs[1].1,
+        "{} and {} backend results differ",
+        outputs[0].0, outputs[1].0
+    );
+    outputs[0].1.clone()
 }
 
 // --- Scenario F2: no-worktreeinclude ---
@@ -166,6 +177,31 @@ fn f7_wt_profile_drops_conductor_key() {
     assert!(
         paths.is_empty(),
         "wt profile should drop .conductor/* via tooling-v1 builtin set; got {paths:?}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn tooling_filter_protects_native_case_alias_with_ignore_case_false() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".Conductor/\n");
+    write_file(repo.path(), ".worktreeinclude", ".Conductor/**/*.key\n");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(
+        repo.path(),
+        &["commit", "-m", "configure mixed-case tool state"],
+    );
+    write_file(repo.path(), ".Conductor/state/dev.key", "key-data\n");
+    assert!(
+        repo.path().join(".conductor/state/dev.key").exists(),
+        "macOS safety regression requires a case-insensitive test volume"
+    );
+    git(repo.path(), &["config", "core.ignoreCase", "false"]);
+
+    let paths = list_paths(repo.path(), &["--compat-profile", "wt"]);
+    assert!(
+        paths.is_empty(),
+        "tooling-v1 must follow the native filesystem's case aliases; got {paths:?}"
     );
 }
 
@@ -428,6 +464,32 @@ fn f5_wt_profile_literal_negation_drops_file() {
     let repo = setup_f5();
     let paths = list_paths(repo.path(), &["--compat-profile", "wt"]);
     assert!(paths.is_empty(), "f5 wt should be empty; got {paths:?}");
+}
+
+#[test]
+fn wt_ignores_literal_negations_inside_nested_repositories() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", "victim.env\n");
+    write_file(
+        repo.path(),
+        ".worktreeinclude",
+        "# activate explicit mode\n",
+    );
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "outer rules"]);
+    write_file(repo.path(), "victim.env", "outer secret\n");
+
+    let nested = repo.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    git(&nested, &["init"]);
+    write_file(&nested, ".worktreeinclude", "!../victim.env\n");
+
+    let paths = list_paths(repo.path(), &["--compat-profile", "wt"]);
+    assert_eq!(
+        paths,
+        ["victim.env".to_string()].into_iter().collect(),
+        "a nested repository must not change the outer wt selection"
+    );
 }
 
 // --- F6: nested-worktree-in-repo (all profiles agree) ---

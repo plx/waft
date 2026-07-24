@@ -1,15 +1,13 @@
 //! Integration tests with real Git repos in temp directories.
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
-use std::process;
 use tempfile::TempDir;
 
-fn waft() -> Command {
-    Command::cargo_bin("waft").unwrap()
-}
+mod support;
+
+use support::waft;
 
 /// Create a git repo in a temp dir, returning the TempDir handle.
 fn make_repo() -> TempDir {
@@ -21,7 +19,7 @@ fn make_repo() -> TempDir {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let output = process::Command::new("git")
+    let output = support::git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -406,6 +404,32 @@ fn validate_passes_with_valid_files() {
         .assert()
         .success()
         .stderr(predicate::str::contains("validation passed"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn validate_discovers_mixed_case_worktreeinclude_alias() {
+    let repo = make_repo();
+    write_file(repo.path(), ".WorktreeInclude", "\\\n");
+    assert!(
+        repo.path().join(".worktreeinclude").exists(),
+        "macOS safety regression requires a case-insensitive test volume"
+    );
+
+    for backend in ["gix", "cli"] {
+        waft()
+            .env("WAFT_GIT_BACKEND", backend)
+            .args([
+                "validate",
+                "--isolated",
+                "--source",
+                repo.path().to_str().unwrap(),
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(".WorktreeInclude"))
+            .stderr(predicate::str::contains("invalid pattern"));
+    }
 }
 
 #[cfg(unix)]

@@ -10,13 +10,57 @@ classification happen before any filesystem mutation.
 
 ## Guarantees
 
-- **Tracked files are never overwritten.** Destination trackedness is checked
-  before copy execution.
-- **Symlink traversal is blocked.** `waft` refuses to follow symlinks in source
-  files or write through symlinked destination parents.
-- **Atomic writes.** Files are written to a temporary path and then renamed into
-  place.
+- **Tracked-file protection.** Destination trackedness is checked during
+  planning and again under Git's cooperative index lock immediately before
+  publication.
+- **No replacement.** Every destination uses no-clobber publication. Existing
+  pathnames are preserved, including when `--overwrite` is supplied.
+- **Descriptor-anchored traversal on Unix.** `waft` opens each source and
+  destination component relative to canonical worktree directory handles with
+  `O_NOFOLLOW`, compares the source to its planning snapshot, and revalidates
+  the destination parent before publication.
+- **Durable atomic visibility.** File contents are synced to a temporary path
+  before publication, and parent directories are synced on Unix.
 - **Dry runs are mutation-free.** `waft copy --dry-run` reads and reports only.
+
+Normal Git writers honor the index lock and cannot change trackedness across
+the final check and publication. A process that edits the index directly while
+ignoring Git's lock protocol remains outside that guarantee. Unix directory
+handles prevent a symlink or name swap from redirecting publication to a
+different directory object. An already-open authorized directory can still be
+relocated by another process after final revalidation; avoid concurrent
+directory relocation when the destination pathname itself must remain stable.
+
+waft reacquires Git's index lock and rechecks trackedness for every published
+file so the check remains immediately adjacent to publication without holding
+the lock during content preparation. The cost scales with selected files times
+index size. Keep automatic manifests narrow and benchmark large cache
+manifests in monorepos.
+
+## Hook trust boundary
+
+Only install the optional post-checkout hook from a revision you have
+reviewed. `just install-hooks` copies the hook and a pinned `waft` binary into
+Git's common metadata directory and configures an absolute hook path. It also
+chains the previously effective trusted hooks, but refuses symlinked prior
+hooks and worktree-scoped hook overrides in any extant linked worktree.
+
+The installed hook always invokes its pinned sibling binary and runs
+`waft --isolated`. User config, ambient `WAFT`, and ambient `WAFT_*` policy
+variables therefore cannot replace the executable or broaden or narrow an
+automatic copy; trusted project config from the resolved source worktree still
+applies.
+
+Do not set `core.hooksPath` to a directory inside a checked-out worktree.
+Branches can replace tracked hook content before Git invokes it.
+
+## Secrets remain secrets
+
+`waft` creates another filesystem copy of every selected file. Copies may be
+visible to backup software, indexers, local agents, and anyone who can read
+the linked worktree. Prefer short-lived credentials or secret injection for
+high-value secrets, keep selections narrow, and inspect a dry run before
+enabling automation.
 
 ## Preview before writing
 
@@ -28,11 +72,15 @@ Use dry-run output to confirm which files would move and why.
 
 ## Overwrite behavior
 
-Existing destination files are preserved by default. Use `--overwrite` only when
-you intentionally want untracked destination files replaced.
+Existing destination files are always preserved. `--overwrite` remains parsed
+for command-line compatibility, but if an untracked conflict exists, planning
+fails before filesystem mutation with instructions to review and remove the
+file explicitly.
 
 ```sh
-waft copy --overwrite
+rm path/to/reviewed-conflict
+waft copy
 ```
 
-`--overwrite` does not change the rule that tracked files are protected.
+Removing a conflict is an explicit user action; `waft` itself never replaces
+the existing pathname.

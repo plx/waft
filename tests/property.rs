@@ -8,8 +8,10 @@ use tempfile::TempDir;
 
 use proptest::prelude::*;
 
+mod support;
+
 fn git(dir: &Path, args: &[&str]) -> bool {
-    process::Command::new("git")
+    support::git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -39,7 +41,8 @@ fn waft_list(dir: &Path) -> BTreeSet<String> {
     // --exclude-per-directory=.worktreeinclude`, so pin the git profile
     // explicitly. The default `claude` profile uses different semantics
     // (covered by `tests/modes_profile_integration.rs`).
-    let output = process::Command::new(env!("CARGO_BIN_EXE_waft"))
+    let mut command = support::std_command(env!("CARGO_BIN_EXE_waft"));
+    command
         .args([
             "list",
             "--compat-profile",
@@ -47,8 +50,22 @@ fn waft_list(dir: &Path) -> BTreeSet<String> {
             "--source",
             dir.to_str().unwrap(),
         ])
-        .output()
-        .unwrap();
+        .env("XDG_CONFIG_HOME", dir.join(".waft-test-config"));
+    for key in [
+        "WAFT_CONFIG_PATH",
+        "WAFT_COMPAT_PROFILE",
+        "WAFT_WHEN_MISSING_WORKTREEINCLUDE",
+        "WAFT_WORKTREEINCLUDE_SEMANTICS",
+        "WAFT_WORKTREEINCLUDE_SYMLINK_POLICY",
+        "WAFT_BUILTIN_EXCLUDE_SET",
+        "WAFT_EXTRA_EXCLUDE",
+        "WAFT_REPLACE_EXTRA_EXCLUDES",
+        "WAFT_COPY_STRATEGY",
+        "WAFT_GIT_BACKEND",
+    ] {
+        command.env_remove(key);
+    }
+    let output = command.output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     stdout
         .lines()
@@ -61,7 +78,7 @@ fn waft_list(dir: &Path) -> BTreeSet<String> {
 /// git check-ignore — the same algorithm waft uses internally.
 fn git_oracle_eligible(dir: &Path) -> BTreeSet<String> {
     // Step 1: get worktreeinclude candidates
-    let output = process::Command::new("git")
+    let output = support::git_command()
         .arg("-C")
         .arg(dir)
         .args([
@@ -86,7 +103,7 @@ fn git_oracle_eligible(dir: &Path) -> BTreeSet<String> {
     }
 
     // Step 2: batch through check-ignore
-    let mut child = process::Command::new("git")
+    let mut child = support::git_command()
         .arg("-C")
         .arg(dir)
         .args(["check-ignore", "--stdin", "-z", "-v", "-n"])
@@ -112,11 +129,12 @@ fn git_oracle_eligible(dir: &Path) -> BTreeSet<String> {
     while i + 3 < fields.len() {
         let source = String::from_utf8_lossy(fields[i]).to_string();
         let _linenum = String::from_utf8_lossy(fields[i + 1]).to_string();
-        let _pattern = String::from_utf8_lossy(fields[i + 2]).to_string();
+        let pattern = String::from_utf8_lossy(fields[i + 2]).to_string();
         let pathname = String::from_utf8_lossy(fields[i + 3]).to_string();
 
-        // Non-empty source means it matched an ignore rule
-        if !source.is_empty() {
+        // A negated match explains why the path is included; it is not an
+        // ignored path and therefore is not eligible.
+        if !source.is_empty() && !pattern.starts_with('!') {
             eligible.insert(pathname);
         }
         i += 4;
@@ -251,26 +269,52 @@ fn safe_filename() -> impl Strategy<Value = String> {
     prop::string::string_regex("[a-z][a-z0-9]{0,5}\\.(env|log|key|tmp|secret)").unwrap()
 }
 
-/// Generate a simple gitignore-compatible pattern.
-fn simple_pattern() -> impl Strategy<Value = String> {
+fn safe_relative_path() -> impl Strategy<Value = String> {
     prop_oneof![
-        safe_filename().prop_map(|f| f),
+        safe_filename(),
+        safe_filename().prop_map(|name| format!("sub/{name}")),
+        safe_filename().prop_map(|name| format!("deep/nested/{name}")),
+        Just("sub/café.env".to_string()),
+        Just("deep/δ.key".to_string()),
+    ]
+}
+
+/// Generate representative gitignore-compatible patterns, including nested
+/// paths, recursive globs, and negation.
+fn git_pattern() -> impl Strategy<Value = String> {
+    prop_oneof![
+        safe_filename(),
         Just("*.env".to_string()),
         Just("*.log".to_string()),
         Just("*.key".to_string()),
         Just("*.tmp".to_string()),
         Just("*.secret".to_string()),
+        Just("**/*.env".to_string()),
+        Just("**/*.key".to_string()),
+        Just("sub/*.log".to_string()),
+        Just("deep/".to_string()),
+    ]
+}
+
+fn selection_pattern() -> impl Strategy<Value = String> {
+    prop_oneof![
+        git_pattern(),
+        Just("!debug.env".to_string()),
+        Just("!*.tmp".to_string()),
+        Just("!nested.secret".to_string()),
+        Just("!sub/private.key".to_string()),
     ]
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(10))]
+    #![proptest_config(ProptestConfig::with_cases(48))]
 
     #[test]
     fn prop_waft_matches_git_oracle(
-        gitignore_patterns in prop::collection::vec(simple_pattern(), 1..4),
-        wti_patterns in prop::collection::vec(simple_pattern(), 1..4),
-        files in prop::collection::vec(safe_filename(), 1..6),
+        gitignore_patterns in prop::collection::vec(git_pattern(), 1..5),
+        wti_patterns in prop::collection::vec(selection_pattern(), 1..5),
+        nested_wti_patterns in prop::collection::vec(selection_pattern(), 0..4),
+        files in prop::collection::vec(safe_relative_path(), 1..9),
     ) {
         let repo = make_repo();
 
@@ -281,6 +325,13 @@ proptest! {
         // Write .worktreeinclude
         let wti_content = wti_patterns.join("\n") + "\n";
         write_file(repo.path(), ".worktreeinclude", &wti_content);
+        if !nested_wti_patterns.is_empty() {
+            write_file(
+                repo.path(),
+                "sub/.worktreeinclude",
+                &(nested_wti_patterns.join("\n") + "\n"),
+            );
+        }
 
         // Create files
         for file in &files {
@@ -288,6 +339,9 @@ proptest! {
         }
 
         git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+        if !nested_wti_patterns.is_empty() {
+            git(repo.path(), &["add", "sub/.worktreeinclude"]);
+        }
         git(repo.path(), &["commit", "-m", "setup"]);
 
         let waft_result = waft_list(repo.path());
@@ -328,8 +382,12 @@ fn parse_waft_info_explanation(stdout: &str, path: &str) -> Option<ExplanationTu
         if !in_block {
             continue;
         }
-        // Look for: gitignore: ignored (<source>:<line>: <pattern>)
-        if let Some(rest) = line.strip_prefix("gitignore: ignored (") {
+        // Preserve the effective matching rule for both ignored and
+        // explicitly unignored paths.
+        if let Some(rest) = line
+            .strip_prefix("gitignore: ignored (")
+            .or_else(|| line.strip_prefix("gitignore: not ignored ("))
+        {
             let rest = rest.trim_end_matches(')');
             // Format: <source_file>:<line>: <pattern>
             let first_colon = rest.find(':')?;
@@ -362,7 +420,7 @@ fn git_check_ignore_explanations(dir: &Path, paths: &[&str]) -> BTreeMap<String,
         return BTreeMap::new();
     }
 
-    let mut child = process::Command::new("git")
+    let mut child = support::git_command()
         .arg("-C")
         .arg(dir)
         .args(["check-ignore", "--stdin", "-z", "-v", "-n"])
@@ -414,7 +472,8 @@ fn git_check_ignore_explanations(dir: &Path, paths: &[&str]) -> BTreeMap<String,
 
 /// Run `waft info` for multiple paths and return the full stdout.
 fn waft_info(dir: &Path, paths: &[&str]) -> String {
-    let mut cmd = process::Command::new(env!("CARGO_BIN_EXE_waft"));
+    let mut cmd = support::std_command(env!("CARGO_BIN_EXE_waft"));
+    cmd.current_dir(dir);
     cmd.args(["info", "--source", dir.to_str().unwrap()]);
     for p in paths {
         cmd.arg(p);

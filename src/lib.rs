@@ -8,11 +8,12 @@
 //!
 //! The tool follows a strict plan/execute design:
 //!
-//! 1. **Policy resolution** ([`config`]) — merges built-in defaults, user
-//!    config, project `.waft.toml` files, environment variables, and CLI
-//!    flags into a single [`config::ResolvedPolicy`].
-//! 2. **Context resolution** ([`context`]) — determines source and destination
+//! 1. **Context resolution** ([`context`]) — determines source and destination
 //!    worktrees from CLI args and Git state.
+//! 2. **Policy resolution** ([`config`]) — merges built-in defaults, user
+//!    config, project `.waft.toml` files, environment variables, and CLI
+//!    flags into a single [`config::ResolvedPolicy`], with project files
+//!    bounded to the resolved source worktree.
 //! 3. **Validation** ([`validate`]) — checks all `.gitignore`, `.worktreeinclude`,
 //!    and exclude files for syntax errors.
 //! 4. **Candidate selection** (in [`subcommands`]) — dispatches on whether
@@ -23,8 +24,9 @@
 //!    active built-in or extra exclusion patterns.
 //! 5. **Planning** ([`planner`]) — classifies each destination path (missing,
 //!    up-to-date, conflict, etc.) and produces a [`model::CopyPlan`].
-//! 6. **Execution** ([`executor`]) — applies copy operations atomically via
-//!    temp files, with symlink safety checks.
+//! 6. **Execution** ([`executor`]) — anchors Unix traversal to directory
+//!    handles, holds Git's cooperative index lock across the final tracked
+//!    check, and publishes synced temp files without replacing pathnames.
 //!
 //! # Key Design Decisions
 //!
@@ -60,7 +62,6 @@ pub mod planner;
 pub mod policy_filter;
 /// Subcommand argument types and command handlers.
 pub mod subcommands;
-mod sys;
 pub mod validate;
 mod walk;
 pub mod worktreeinclude;

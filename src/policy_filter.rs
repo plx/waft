@@ -13,10 +13,9 @@
 //!   layer on top of the builtin set.
 //!
 //! Both contribute to a single [`ignore::gitignore::Gitignore`] matcher
-//! rooted at `source_root`. The filter is applied AFTER `check_ignore` so
-//! list/copy already saw the eligible set; this lets us drop a strict
-//! subset rather than re-deriving the union with the worktreeinclude
-//! matcher.
+//! rooted at `source_root`. The filter narrows the selection candidate set;
+//! Git ignore/tracked membership is still checked by the command's canonical
+//! eligibility pass.
 
 use std::path::Path;
 
@@ -47,12 +46,37 @@ pub const TOOLING_V1_PATTERNS: &[&str] = &[
     ".pi/",
 ];
 
+/// Whether exclusion matching must be conservative about case aliases.
+///
+/// A repository may explicitly set `core.ignoreCase=false` even though its
+/// macOS or Windows worktree still aliases differently-cased names. Built-in
+/// safety exclusions must follow the filesystem threat model, not trust that
+/// configuration bit alone.
+pub fn effective_case_insensitive(core_ignore_case: bool) -> bool {
+    core_ignore_case || cfg!(any(target_os = "macos", windows))
+}
+
 /// Build the exclusion matcher implied by the active policy.
 ///
 /// Returns `Ok(None)` when neither the builtin set nor `extra_excludes`
 /// contribute any pattern, i.e. nothing would ever be filtered.
 pub fn build_excluder(policy: &ResolvedPolicy, source_root: &Path) -> Result<Option<Gitignore>> {
+    build_excluder_with_case(policy, source_root, false)
+}
+
+/// Build the exclusion matcher, honoring the repository's
+/// `core.ignoreCase` setting.
+pub fn build_excluder_with_case(
+    policy: &ResolvedPolicy,
+    source_root: &Path,
+    case_insensitive: bool,
+) -> Result<Option<Gitignore>> {
     let mut builder = GitignoreBuilder::new(source_root);
+    if case_insensitive {
+        builder.case_insensitive(true).map_err(|e| Error::Config {
+            message: format!("failed to enable case-insensitive excludes: {e}"),
+        })?;
+    }
     let mut any = false;
 
     let builtin_patterns = match policy.builtin_exclude_set {
@@ -92,7 +116,17 @@ pub fn filter_paths(
     policy: &ResolvedPolicy,
     source_root: &Path,
 ) -> Result<()> {
-    let matcher = match build_excluder(policy, source_root)? {
+    filter_paths_with_case(candidates, policy, source_root, false)
+}
+
+/// Apply exclusions using the repository's effective case-sensitivity.
+pub fn filter_paths_with_case(
+    candidates: &mut Vec<RepoRelPath>,
+    policy: &ResolvedPolicy,
+    source_root: &Path,
+    case_insensitive: bool,
+) -> Result<()> {
+    let matcher = match build_excluder_with_case(policy, source_root, case_insensitive)? {
         Some(m) => m,
         None => return Ok(()),
     };
@@ -182,5 +216,23 @@ mod tests {
         let mut candidates = vec![rel("a")];
         let err = filter_paths(&mut candidates, &policy, tmp.path()).unwrap_err();
         assert!(err.to_string().contains("exclude pattern"));
+    }
+
+    #[test]
+    fn tooling_excludes_follow_core_ignore_case() {
+        let policy = policy_with(None, BuiltinExcludeSet::ToolingV1);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut candidates = vec![rel(".Conductor/state/key"), rel(".env")];
+        filter_paths_with_case(&mut candidates, &policy, tmp.path(), true).unwrap();
+        assert_eq!(candidates, vec![rel(".env")]);
+    }
+
+    #[test]
+    fn native_case_alias_platforms_are_conservative() {
+        assert_eq!(
+            effective_case_insensitive(false),
+            cfg!(any(target_os = "macos", windows))
+        );
+        assert!(effective_case_insensitive(true));
     }
 }

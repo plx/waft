@@ -58,6 +58,15 @@ pub enum Error {
         total: usize,
     },
 
+    /// Replacing an existing pathname cannot be made race-safe portably.
+    #[error(
+        "--overwrite cannot safely replace existing untracked destination {path}; review and remove that file, then rerun"
+    )]
+    UnsafeOverwrite {
+        /// Existing destination that blocked the copy.
+        path: PathBuf,
+    },
+
     /// The source and destination are the same.
     #[error("source and destination are the same: {path}")]
     SameSourceAndDest {

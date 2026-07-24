@@ -6,6 +6,20 @@ description: "Copy ignored files selected by .worktreeinclude between Git worktr
 ---
 
 `waft` copies `.worktreeinclude`-selected ignored files between Git worktrees.
+
+## Installation
+
+`waft` is not currently published to crates.io. Install a reviewed commit
+directly from Git:
+
+```sh
+cargo install --git https://github.com/plx/waft \
+  --rev REVIEWED_COMMIT_SHA --locked waft
+```
+
+Replace `REVIEWED_COMMIT_SHA` with the full revision you reviewed. Managed
+environments should not omit `--rev`.
+
 It is intended for local configuration, caches, and tool state that Git should
 not track but that developers often need in more than one linked worktree.
 
@@ -52,10 +66,10 @@ waft validate
 
 ## Copy options
 
-| Option          | Description                                             |
-| --------------- | ------------------------------------------------------- |
-| `-n, --dry-run` | Show what would be done without copying.                |
-| `--overwrite`   | Allow overwriting existing untracked destination files. |
+| Option          | Description                                                  |
+| --------------- | ------------------------------------------------------------ |
+| `-n, --dry-run` | Show what would be done without copying.                     |
+| `--overwrite`   | Compatibility flag; fails on existing destination conflicts. |
 
 ## Typical flow
 
@@ -64,3 +78,26 @@ waft validate
 3. Inspect the plan.
 4. Run `waft copy`.
 5. Use `waft info <path>` when a file is missing or skipped.
+
+## Optional post-checkout hook
+
+From a reviewed source checkout:
+
+```sh
+just install-hooks
+```
+
+This builds `waft` and snapshots both the binary and post-checkout hook under
+the repository's common Git directory. The absolute managed hook directory
+chains the previously effective trusted Git hooks; checked-out branches
+cannot replace the installed snapshot. Automatic copies use `--isolated`, so
+the pinned sibling binary cannot be replaced through ambient `WAFT`, and user
+config or `WAFT_*` policy variables cannot alter selection. The installer
+refuses symlinked prior hooks and worktree-scoped hook overrides in every
+extant linked worktree. Trusted project config from the source worktree still
+applies. Re-run the command after upgrading.
+
+Never point `core.hooksPath` directly at the tracked `hooks/` directory.
+Branch-controlled content in that directory may execute during checkout.
+
+Restore the prior hook configuration with `just uninstall-hooks`.

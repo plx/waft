@@ -1,0 +1,30 @@
+#!/bin/sh
+# A branch-independent dispatcher installed under Git's common directory.
+# Every supported Git hook name points at this script. Non-post-checkout hooks
+# are passed through to the hooks directory that was effective before waft was
+# installed. post-checkout runs that prior hook first, then waft's reviewed
+# hook snapshot.
+
+set -u
+
+managed_dir="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)"
+hook_name="${0##*/}"
+prior_dir_file="${managed_dir}/.prior-hooks-dir"
+prior_dir=""
+
+if [ -r "${prior_dir_file}" ]; then
+  IFS= read -r prior_dir <"${prior_dir_file}" || true
+fi
+
+if [ -n "${prior_dir}" ]; then
+  prior_hook="${prior_dir}/${hook_name}"
+  if [ -x "${prior_hook}" ]; then
+    "${prior_hook}" "$@" || exit $?
+  fi
+fi
+
+if [ "${hook_name}" = "post-checkout" ]; then
+  exec "${managed_dir}/.waft-post-checkout" "$@"
+fi
+
+exit 0

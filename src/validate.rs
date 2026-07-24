@@ -4,6 +4,7 @@
 //! `.git/info/exclude` files using [`ignore::gitignore::GitignoreBuilder`].
 //! Reports errors for in-repo files and warnings for global excludes.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,18 @@ pub fn validate(
     symlink_policy: SymlinkPolicy,
 ) -> ValidationReport {
     let mut report = ValidationReport::default();
+    let gitlinks = match git.gitlinks(&ctx.source_root) {
+        Ok(gitlinks) => gitlinks,
+        Err(error) => {
+            report.issues.push(ValidationIssue {
+                severity: ValidationSeverity::Error,
+                file: ctx.source_root.clone(),
+                line: None,
+                message: format!("cannot determine nested repository boundaries: {error}"),
+            });
+            HashSet::new()
+        }
+    };
 
     // Discover and validate .gitignore files
     discover_and_validate(
@@ -28,6 +41,7 @@ pub fn validate(
         ctx.core_ignore_case,
         ValidationSeverity::Error,
         symlink_policy,
+        &gitlinks,
         &mut report,
     );
 
@@ -38,6 +52,7 @@ pub fn validate(
         ctx.core_ignore_case,
         ValidationSeverity::Error,
         symlink_policy,
+        &gitlinks,
         &mut report,
     );
 
@@ -76,9 +91,10 @@ fn discover_and_validate(
     case_insensitive: bool,
     severity: ValidationSeverity,
     symlink_policy: SymlinkPolicy,
+    gitlinks: &HashSet<String>,
     report: &mut ValidationReport,
 ) {
-    let walker = walkdir(root);
+    let walker = walkdir(root, gitlinks);
     for entry in walker {
         let entry = match entry {
             Ok(e) => e,
@@ -93,7 +109,7 @@ fn discover_and_validate(
             }
         };
 
-        if entry.file_name().to_string_lossy() != filename {
+        if !crate::walk::special_filename_matches(entry.file_name(), filename) {
             continue;
         }
 
@@ -276,9 +292,13 @@ fn find_global_excludes(source_root: &Path, git: &dyn GitBackend) -> Option<Path
         return Some(path);
     }
 
-    // Fall back to default location
-    if let Some(home) = home_dir() {
-        let default_path = home.join(".config/git/ignore");
+    // Fall back to Git's XDG-aware default only for real backends that read
+    // ambient global excludes. Test/specialized backends are hermetic unless
+    // they explicitly return core.excludesFile above.
+    if git.reads_default_global_excludes()
+        && let Some(config_home) = xdg_config_home()
+    {
+        let default_path = config_home.join("git/ignore");
         if default_path.exists() {
             return Some(default_path);
         }
@@ -304,14 +324,23 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Walk a directory tree, skipping `.git` directories.
-fn walkdir(
-    root: &Path,
-) -> impl Iterator<Item = std::result::Result<walkdir::DirEntry, walkdir::Error>> {
-    walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
-        // Skip .git directories
-        !(e.file_type().is_dir() && e.file_name().to_string_lossy() == ".git")
-    })
+fn xdg_config_home() -> Option<PathBuf> {
+    match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(path) if !path.is_empty() => Some(PathBuf::from(path)),
+        _ => home_dir().map(|home| home.join(".config")),
+    }
+}
+
+/// Walk a directory tree without entering nested repositories or submodules.
+fn walkdir<'a>(
+    root: &'a Path,
+    gitlinks: &'a HashSet<String>,
+) -> impl Iterator<Item = std::result::Result<walkdir::DirEntry, walkdir::Error>> + 'a {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_entry(move |entry| {
+            !crate::walk::is_git_boundary_dir(entry.path(), entry.depth(), root, gitlinks)
+        })
 }
 
 #[cfg(test)]
@@ -323,25 +352,53 @@ mod tests {
     use std::collections::HashSet;
     use tempfile::TempDir;
 
+    fn git_command() -> std::process::Command {
+        let mut command = std::process::Command::new("git");
+        command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "GIT_CONFIG_GLOBAL",
+                if cfg!(windows) { "NUL" } else { "/dev/null" },
+            )
+            .env("GIT_CONFIG_COUNT", "0");
+        for key in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        ] {
+            command.env_remove(key);
+        }
+        command
+    }
+
     fn make_repo() -> TempDir {
         let dir = TempDir::new().unwrap();
         // Init a git repo so .git exists
-        std::process::Command::new("git")
-            .arg("init")
-            .arg(dir.path())
-            .output()
-            .unwrap();
+        git_command().arg("init").arg(dir.path()).output().unwrap();
         dir
     }
 
     /// Mock GitBackend that returns a configurable value for `core.excludesFile`.
     struct MockGit {
         excludes_file: Option<String>,
+        gitlinks: HashSet<String>,
     }
 
     impl MockGit {
         fn new(excludes_file: Option<String>) -> Self {
-            Self { excludes_file }
+            Self {
+                excludes_file,
+                gitlinks: HashSet::new(),
+            }
+        }
+
+        fn with_gitlink(mut self, path: &str) -> Self {
+            self.gitlinks.insert(path.to_string());
+            self
         }
     }
 
@@ -361,7 +418,7 @@ mod tests {
         }
 
         fn gitlinks(&self, _source_root: &Path) -> Result<HashSet<String>> {
-            unimplemented!()
+            Ok(self.gitlinks.clone())
         }
 
         fn check_ignore(
@@ -472,6 +529,51 @@ mod tests {
             .filter(|i| matches!(i.severity, ValidationSeverity::Error))
             .collect();
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn nested_repository_rule_files_are_not_validated() {
+        let dir = make_repo();
+        let nested = dir.path().join("vendor/checkout");
+        fs::create_dir_all(&nested).unwrap();
+        git_command().arg("init").arg(&nested).output().unwrap();
+        fs::write(nested.join(".worktreeinclude"), "\\\n").unwrap();
+
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .all(|issue| !issue.file.starts_with(&nested)),
+            "nested repository findings leaked into outer validation: {:?}",
+            report.issues
+        );
+    }
+
+    #[test]
+    fn registered_gitlink_rule_files_are_not_validated() {
+        let dir = make_repo();
+        let submodule = dir.path().join("vendor/submodule");
+        fs::create_dir_all(&submodule).unwrap();
+        fs::write(submodule.join(".worktreeinclude"), "\\\n").unwrap();
+
+        let ctx = make_ctx(&dir);
+        // Deliberately use a different spelling: repository boundaries are
+        // matched conservatively on filesystems with case aliases.
+        let git = MockGit::new(None).with_gitlink("VENDOR/SUBMODULE");
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .all(|issue| !issue.file.starts_with(&submodule)),
+            "registered submodule findings leaked into outer validation: {:?}",
+            report.issues
+        );
     }
 
     #[test]
