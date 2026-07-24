@@ -1,0 +1,35 @@
+@import "./theme.css";
+
+:root {
+  --sl-font: var(--tool-font-sans);
+  --sl-font-mono: var(--tool-font-mono);
+  --sl-color-accent-low: var(--tool-accent-soft);
+  --sl-color-accent: var(--tool-accent-dark);
+  --sl-color-accent-high: var(--tool-accent-dark);
+  --sl-color-white: var(--tool-ink);
+  --sl-color-gray-1: var(--tool-ink);
+  --sl-color-gray-2: var(--tool-ink-soft);
+  --sl-color-gray-3: var(--tool-muted);
+  --sl-color-gray-4: #98a0aa;
+  --sl-color-gray-5: var(--tool-line-strong);
+  --sl-color-gray-6: var(--tool-line);
+  --sl-color-black: var(--tool-surface);
+}
+
+.site-title {
+  font-weight: 800;
+}
+
+.sl-markdown-content a {
+  font-weight: 700;
+}
+
+.sl-markdown-content code {
+  border-radius: var(--tool-radius-sm);
+}
+
+.sl-markdown-content pre,
+.sl-markdown-content pre code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

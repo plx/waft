@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Components" name="nav-header" subtitle="Sticky header w/ theme toggle" viewport="700x120" -->
+<html data-theme="auto"><head><meta charset="utf-8"><title>Header & nav</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--waft-surface);color:var(--waft-ink);font-family:var(--waft-font-sans)}
+  .header{position:relative;border-bottom:1px solid var(--waft-line);background:color-mix(in srgb,var(--waft-surface) 88%,transparent);backdrop-filter:blur(14px)}
+  .inner{display:flex;align-items:center;gap:20px;min-height:56px;padding:0 22px}
+  .brand{display:flex;align-items:center;gap:10px;font-size:22px;font-weight:800;text-decoration:none;color:var(--waft-ink)}
+  .brand svg{width:28px;height:28px;display:block}
+  .links{display:flex;gap:4px;margin-left:auto}
+  .links a{position:relative;display:inline-flex;align-items:center;min-height:32px;padding:0 10px;color:var(--waft-muted);font-size:13.5px;font-weight:700;text-decoration:none;transition:color .12s}
+  .links a::after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:2px;border-radius:2px;background:var(--waft-accent);opacity:0;transform:scaleX(.4);transform-origin:center;transition:opacity .14s,transform .14s}
+  .links a:hover{color:var(--waft-ink)}
+  .links a.active{color:var(--waft-ink)}
+  .links a.active::after{opacity:1;transform:scaleX(1)}
+  .actions{display:flex;align-items:center;gap:10px;margin-left:4px}
+
+  /* ── Theme toggle ── */
+  .theme-toggle{display:inline-flex;gap:2px;padding:3px;border:1px solid var(--waft-line);border-radius:999px;background:var(--waft-subtle)}
+  .theme-toggle__btn{position:relative;display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;padding:0;border:0;border-radius:999px;background:transparent;color:var(--waft-muted);cursor:pointer;transition:color .12s,background .12s}
+  .theme-toggle__btn:hover{color:var(--waft-ink)}
+  .theme-toggle__btn[aria-checked="true"]{background:var(--waft-panel);color:var(--waft-accent-dark);box-shadow:var(--waft-shadow)}
+  .theme-toggle__btn svg{width:16px;height:16px;display:block}
+  .theme-toggle__btn:focus-visible{outline:2px solid var(--waft-focus);outline-offset:2px}
+  /* hover tooltip */
+  .theme-toggle__btn::after{content:attr(data-tip);position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);padding:4px 8px;border-radius:5px;background:var(--waft-ink);color:var(--waft-surface);font-size:11px;font-weight:600;line-height:1;white-space:nowrap;letter-spacing:.01em;opacity:0;pointer-events:none;transition:opacity .12s;z-index:5}
+  .theme-toggle__btn:hover::after,.theme-toggle__btn:focus-visible::after{opacity:1}
+
+  .btn{min-height:36px;display:inline-flex;align-items:center;padding:0 12px;border:1px solid var(--waft-line);border-radius:4px;background:var(--waft-panel);color:var(--waft-ink);font-weight:700;font-size:13.5px;text-decoration:none}
+  .btn--primary{background:var(--waft-accent-dark);border-color:var(--waft-accent-dark);color:var(--waft-surface)}
+</style></head><body><header class="header"><div class="inner">
+  <a href="#" class="brand"><svg viewBox="0 0 80 80" role="img" aria-label="waft mark"><g transform="translate(40,40) scale(0.82) translate(-40,-40)"><path fill="var(--waft-accent)" d="M7,67c0,3.309,2.691,6,6,6h54c3.309,0,6-2.691,6-6V13c0-3.309-2.691-6-6-6H13c-3.309,0-6,2.691-6,6V67z M11,13c0-1.103,0.897-2,2-2h54c1.103,0,2,0.897,2,2v54c0,1.103-0.897,2-2,2H13c-1.103,0-2-0.897-2-2V13z"></path><path fill="var(--waft-accent)" d="M40,67c14.888,0,27-12.112,27-27S54.888,13,40,13S13,25.112,13,40S25.112,67,40,67z M40,17c12.683,0,23,10.318,23,23S52.683,63,40,63S17,52.682,17,40S27.317,17,40,17z"></path><path fill="var(--waft-mark-2)" d="M32.091,41.143c0.097,0.675,0.271,1.325,0.526,1.935c-4.379,1.837-7.345,6.126-7.345,11.065c0,1.104,0.896,2,2,2s2-0.896,2-2c0-3.677,2.461-6.82,5.945-7.744c0.534,0.4,1.114,0.739,1.738,0.997c-1.798,4.396-0.863,9.526,2.63,13.019C39.977,60.805,40.488,61,41,61s1.023-0.195,1.414-0.585c0.781-0.781,0.781-2.047,0-2.829c-2.599-2.599-3.082-6.56-1.273-9.677c0.675-0.097,1.326-0.271,1.936-0.526c1.837,4.379,6.126,7.345,11.065,7.345c1.104,0,2-0.896,2-2s-0.896-2-2-2c-3.675,0-6.816-2.457-7.744-5.947c0.398-0.531,0.736-1.108,0.993-1.729c1.458,0.597,2.997,0.893,4.53,0.893c3.091,0,6.158-1.197,8.492-3.531c0.781-0.781,0.781-2.047,0-2.829c-0.781-0.78-2.047-0.781-2.828,0c-2.596,2.596-6.553,3.081-9.677,1.271c-0.097-0.675-0.271-1.325-0.526-1.935c4.379-1.837,7.345-6.126,7.345-11.065c0-1.104-0.896-2-2-2s-2,0.896-2,2c0,3.677-2.461,6.82-5.945,7.744c-0.534-0.4-1.114-0.739-1.738-0.997c1.798-4.396,0.863-9.526-2.63-13.019c-0.781-0.781-2.047-0.781-2.828,0c-0.781,0.781-0.781,2.047,0,2.829c2.599,2.599,3.082,6.56,1.273,9.677c-0.675,0.097-1.326,0.271-1.936,0.526c-1.837-4.379-6.126-7.345-11.065-7.345c-1.104,0-2,0.896-2,2s0.896,2,2,2c3.675,0,6.816,2.457,7.744,5.947c-0.4,0.533-0.739,1.114-0.997,1.738c-4.396-1.799-9.527-0.863-13.019,2.629c-0.781,0.781-0.781,2.047,0,2.829C19.977,42.805,20.488,43,21,43s1.023-0.195,1.414-0.586C25.012,39.817,28.967,39.333,32.091,41.143z M40,36c2.206,0,4,1.794,4,4s-1.794,4-4,4s-4-1.794-4-4S37.794,36,40,36z"></path><circle cx="15" cy="15" r="2" fill="var(--waft-accent)"></circle><circle cx="65" cy="15" r="2" fill="var(--waft-accent)"></circle><circle cx="15" cy="65" r="2" fill="var(--waft-accent)"></circle><circle cx="65" cy="65" r="2" fill="var(--waft-accent)"></circle></g></svg>waft</a>
+  <nav class="links">
+    <a href="#">Overview</a>
+    <a href="#" class="active">Usage</a>
+    <a href="#">Include Format</a>
+    <a href="#">Safety</a>
+    <a href="#">Profiles</a>
+  </nav>
+  <div class="actions">
+    <div class="theme-toggle" role="radiogroup" aria-label="Color theme">
+      <button type="button" class="theme-toggle__btn" role="radio" data-theme-choice="light" data-tip="Light" aria-label="Light">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4.5"></circle><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"></path></svg>
+      </button>
+      <button type="button" class="theme-toggle__btn" role="radio" data-theme-choice="dark" data-tip="Dark" aria-label="Dark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a7 7 0 1 0 10.5 10.5z"></path></svg>
+      </button>
+      <button type="button" class="theme-toggle__btn" role="radio" data-theme-choice="auto" data-tip="Follow system" aria-label="Follow system">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="12.5" rx="1.5"></rect><path d="M8.5 20.5h7M12 16.5v4"></path></svg>
+      </button>
+    </div>
+    <a class="btn" href="#">GitHub</a><a class="btn btn--primary" href="#">Read the docs</a>
+  </div>
+</div></header>
+<script>
+(function(){
+  var KEY="waft-theme";
+  var root=document.documentElement;
+  var btns=[].slice.call(document.querySelectorAll(".theme-toggle__btn"));
+  function get(){try{return localStorage.getItem(KEY)}catch(e){return null}}
+  function apply(choice){
+    if(choice==="light"||choice==="dark"){root.setAttribute("data-theme",choice)}
+    else{choice="auto";root.setAttribute("data-theme","auto")}
+    btns.forEach(function(b){
+      var selected=b.dataset.themeChoice===choice;
+      b.setAttribute("aria-checked",String(selected));
+      b.setAttribute("tabindex",selected?"0":"-1");
+    });
+  }
+  apply(get()||"auto");
+  btns.forEach(function(b,index){b.addEventListener("click",function(){
+    var c=b.dataset.themeChoice;try{localStorage.setItem(KEY,c)}catch(e){}apply(c);
+  });b.addEventListener("keydown",function(event){
+    var keys=["ArrowLeft","ArrowRight","ArrowUp","ArrowDown","Home","End"];
+    if(keys.indexOf(event.key)===-1)return;
+    event.preventDefault();
+    var offset=event.key==="ArrowRight"||event.key==="ArrowDown"?1:-1;
+    var nextIndex=event.key==="Home"?0:event.key==="End"?btns.length-1:(index+offset+btns.length)%btns.length;
+    var next=btns[nextIndex];var c=next.dataset.themeChoice;
+    try{localStorage.setItem(KEY,c)}catch(e){}apply(c);next.focus();
+  })});
+})();
+</script>
+</body></html>

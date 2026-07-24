@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Components" name="interaction-states" subtitle="Rest / hover / focus link wash" viewport="700x190" -->
+<html><head><meta charset="utf-8"><title>Hover & focus</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--waft-surface);color:var(--waft-ink);font-family:var(--waft-font-sans)}
+  .wrap{padding:22px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  .col{display:flex;flex-direction:column;gap:8px}
+  .label{font-family:var(--waft-font-mono);font-size:10.5px;color:var(--waft-muted);text-transform:uppercase;font-weight:700;letter-spacing:.04em}
+  .link{position:relative;display:inline-flex;align-items:center;min-height:32px;padding:0 10px;font-weight:700;font-size:13.5px;color:var(--waft-muted);text-decoration:none;width:fit-content}
+  .link::after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:2px;border-radius:2px;background:var(--waft-accent);opacity:0;transform:scaleX(.4);transform-origin:center}
+  .link.hover{color:var(--waft-ink)}
+  .link.focus{color:var(--waft-ink);border-radius:6px;outline:2px solid var(--waft-focus);outline-offset:2px}
+  .link.focus::after{opacity:0}
+  .swatch{padding:9px;border:1px solid var(--waft-line);border-radius:8px;background:#fff;font-family:var(--waft-font-mono);font-size:11.5px;color:var(--waft-muted)}
+  .swatch b{display:block;color:var(--waft-ink);font-family:var(--waft-font-sans);font-weight:700;margin-bottom:3px;font-size:12.5px}
+</style></head><body><div class="wrap">
+  <div class="col"><span class="label">rest</span><a class="link">Usage</a><div class="swatch"><b>color</b>muted · transparent bg</div></div>
+  <div class="col"><span class="label">hover</span><a class="link hover">Usage</a><div class="swatch"><b>color</b>ink</div></div>
+  <div class="col"><span class="label">focus-visible</span><a class="link focus">Usage</a><div class="swatch"><b>ring only</b>opaque focus token · keyboard only</div></div>
+</div></body></html>

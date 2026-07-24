@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Type" name="type-mono" subtitle="Eyebrow, badges, code" viewport="700x260" -->
+<html><head><meta charset="utf-8"><title>Mono & eyebrow</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--waft-surface);color:var(--waft-ink);font-family:var(--waft-font-sans)}
+  .wrap{padding:22px;display:flex;flex-direction:column;gap:16px}
+  .eyebrow{margin:0;color:#0f6e61;font-size:11.2px;font-weight:800;text-transform:uppercase}
+  .badges{display:flex;gap:8px;flex-wrap:wrap}
+  .badge{font-family:var(--waft-font-mono);font-size:12px;font-weight:600;color:var(--waft-muted);padding:4px 9px;border:1px solid var(--waft-line);border-radius:4px;background:var(--waft-panel)}
+  .code{font-family:var(--waft-font-mono);font-size:14px;background:var(--waft-code-bg);color:var(--waft-code-fg);border:1px solid var(--waft-line);padding:10px 14px;border-radius:8px}
+  .code .accent::first-letter{color:var(--waft-accent-dark)}
+  .label{font-family:var(--waft-font-mono);font-size:10.5px;color:var(--waft-muted);text-transform:uppercase;font-weight:700;letter-spacing:.04em;margin-bottom:6px;display:block}
+</style></head><body><div class="wrap">
+  <div><span class="label">eyebrow · Inter 800 · 0.7rem</span><p class="eyebrow">Quick start</p></div>
+  <div><span class="label">badges · JetBrains Mono 600 · 0.75rem</span><div class="badges"><span class="badge">Rust</span><span class="badge">CLI</span><span class="badge">Git worktrees</span></div></div>
+  <div><span class="label">code · JetBrains Mono 400 · 0.875rem</span><div class="code"><span class="accent">$ waft copy --dry-run --source ../main</span></div></div>
+</div></body></html>

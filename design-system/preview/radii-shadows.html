@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Spacing" name="radii-shadows" subtitle="Radii + elevation" viewport="700x210" -->
+<html><head><meta charset="utf-8"><title>Radii & shadow</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--waft-surface);color:var(--waft-ink);font-family:var(--waft-font-sans)}
+  .wrap{padding:24px;display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+  .demo{aspect-ratio:1.4;background:var(--waft-panel);border:1px solid var(--waft-line);display:flex;align-items:flex-end;padding:10px;font-family:var(--waft-font-mono);font-size:11px;color:var(--waft-muted)}
+  .demo b{display:block;color:var(--waft-ink);font-size:12px;font-weight:700;margin-bottom:2px;font-family:var(--waft-font-sans)}
+  .r4{border-radius:4px}
+  .r8{border-radius:8px}
+  .sh-none{}
+  .sh-base{box-shadow:0 1px 2px rgb(16 24 40 / 6%)}
+  .sh-pop{box-shadow:0 8px 24px rgb(31 35 40 / 12%)}
+</style></head><body><div class="wrap">
+  <div class="demo r4 sh-base"><div><b>radius-sm</b>4px · buttons, badges</div></div>
+  <div class="demo r8 sh-base"><div><b>radius</b>8px · cards, panels</div></div>
+  <div class="demo r8 sh-none" style="border-style:dashed;border-color:var(--waft-line-strong)"><div><b>divider</b>1px dashed</div></div>
+  <div class="demo r8 sh-pop"><div><b>shadow-pop</b>8/24 · mobile nav</div></div>
+</div></body></html>

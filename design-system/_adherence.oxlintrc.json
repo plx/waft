@@ -1,0 +1,201 @@
+{
+  "plugins": [
+    "react",
+    "import"
+  ],
+  "rules": {
+    "react/forbid-elements": [
+      "warn",
+      {
+        "forbid": []
+      }
+    ],
+    "no-restricted-imports": [
+      "warn",
+      {
+        "patterns": [
+          {
+            "group": [
+              "components/**",
+              "site/src/scripts/**",
+              "ui_kits/site/**"
+            ],
+            "message": "Import design-system components from 'index.js', not component internals."
+          }
+        ]
+      }
+    ],
+    "no-restricted-syntax": [
+      "warn",
+      {
+        "selector": "Literal[value=/#[0-9a-fA-F]{3,8}\\b/]",
+        "message": "Raw hex color — use a design-system color token via var()."
+      },
+      {
+        "selector": "Literal[value=/\\b\\d+px\\b/]",
+        "message": "Raw px value — use a design-system spacing token via var()."
+      },
+      {
+        "selector": "Literal[value=/font-family\\s*:\\s*(?!['\\\"]?(?:Inter|JetBrains Mono))/i]",
+        "message": "Font not provided by the design system. Available: Inter, JetBrains Mono."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Badge'] > JSXAttribute > JSXIdentifier[name!=/^(?:tone|children|key|ref|className|style|children)$/]",
+        "message": "<Badge> doesn't accept that prop. Declared props: tone, children."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute > JSXIdentifier[name!=/^(?:variant|href|type|disabled|children|key|ref|className|style|children)$/]",
+        "message": "<Button> doesn't accept that prop. Declared props: variant, href, type, disabled, children."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute[name.name='type'] > Literal[value!=/^(?:button|submit|reset)$/]",
+        "message": "<Button> type must be one of 'button' | 'submit' | 'reset'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='TerminalCard'] > JSXAttribute > JSXIdentifier[name!=/^(?:title|meta|lines|copyText|key|ref|className|style|children)$/]",
+        "message": "<TerminalCard> doesn't accept that prop. Declared props: title, meta, lines, copyText."
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "**/index.js"
+      ],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ],
+  "x-omelette": {
+    "components": {
+      "Badge": {
+        "replaces": []
+      },
+      "Button": {
+        "replaces": []
+      },
+      "TerminalCard": {
+        "replaces": []
+      }
+    },
+    "tokens": [
+      "--container-max",
+      "--fs-body",
+      "--fs-display",
+      "--fs-eyebrow",
+      "--fs-h2",
+      "--fs-h3",
+      "--fs-lede",
+      "--fs-sm",
+      "--fs-xs",
+      "--fw-black",
+      "--fw-bold",
+      "--fw-medium",
+      "--fw-regular",
+      "--fw-semi",
+      "--lh-base",
+      "--lh-relaxed",
+      "--lh-snug",
+      "--lh-tight",
+      "--sp-1",
+      "--sp-2",
+      "--sp-3",
+      "--sp-4",
+      "--sp-5",
+      "--sp-6",
+      "--sp-7",
+      "--sp-8",
+      "--sp-9",
+      "--waft-accent",
+      "--waft-accent-2",
+      "--waft-accent-dark",
+      "--waft-accent-soft",
+      "--waft-air-soft",
+      "--waft-code",
+      "--waft-code-bg",
+      "--waft-code-btn",
+      "--waft-code-fg",
+      "--waft-code-neg",
+      "--waft-error",
+      "--waft-error-bg",
+      "--waft-focus",
+      "--waft-font-mono",
+      "--waft-font-sans",
+      "--waft-ink",
+      "--waft-ink-soft",
+      "--waft-line",
+      "--waft-line-strong",
+      "--waft-mark-2",
+      "--waft-muted",
+      "--waft-panel",
+      "--waft-radius",
+      "--waft-radius-sm",
+      "--waft-shadow",
+      "--waft-shadow-pop",
+      "--waft-subtle",
+      "--waft-surface"
+    ],
+    "tokenKinds": {
+      "--waft-accent": "color",
+      "--waft-accent-dark": "color",
+      "--waft-accent-2": "color",
+      "--waft-accent-soft": "color",
+      "--waft-air-soft": "color",
+      "--waft-ink": "color",
+      "--waft-ink-soft": "color",
+      "--waft-muted": "color",
+      "--waft-surface": "color",
+      "--waft-panel": "color",
+      "--waft-subtle": "color",
+      "--waft-line": "color",
+      "--waft-line-strong": "color",
+      "--waft-code": "color",
+      "--waft-code-bg": "color",
+      "--waft-code-fg": "color",
+      "--waft-code-btn": "color",
+      "--waft-code-neg": "color",
+      "--waft-mark-2": "color",
+      "--waft-error": "color",
+      "--waft-error-bg": "color",
+      "--waft-focus": "color",
+      "--waft-radius": "radius",
+      "--waft-radius-sm": "radius",
+      "--waft-shadow": "shadow",
+      "--waft-shadow-pop": "shadow",
+      "--waft-font-sans": "font",
+      "--waft-font-mono": "font",
+      "--fs-display": "font",
+      "--fs-h2": "font",
+      "--fs-h3": "font",
+      "--fs-lede": "font",
+      "--fs-body": "font",
+      "--fs-sm": "font",
+      "--fs-xs": "font",
+      "--fs-eyebrow": "font",
+      "--lh-tight": "font",
+      "--lh-snug": "font",
+      "--lh-base": "font",
+      "--lh-relaxed": "font",
+      "--fw-regular": "font",
+      "--fw-medium": "font",
+      "--fw-semi": "font",
+      "--fw-bold": "font",
+      "--fw-black": "font",
+      "--sp-1": "spacing",
+      "--sp-2": "spacing",
+      "--sp-3": "spacing",
+      "--sp-4": "spacing",
+      "--sp-5": "spacing",
+      "--sp-6": "spacing",
+      "--sp-7": "spacing",
+      "--sp-8": "spacing",
+      "--sp-9": "spacing",
+      "--container-max": "spacing"
+    },
+    "fontFamilies": [
+      "Inter",
+      "JetBrains Mono"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   Waft Design System — single entrypoint.
+   Consumers link THIS file; it pulls in the token + semantic layer.
+   Component styles are inline in each component (see components/).
+   ────────────────────────────────────────────────────────────────────── */
+
+@import "./colors_and_type.css";

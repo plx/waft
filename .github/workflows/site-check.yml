@@ -4,14 +4,22 @@ on:
   pull_request:
     paths:
       - "site/**"
+      - "design-system/**"
       - "site-template.json"
+      - "AGENTS.md"
+      - "README.md"
+      - "site/README.md"
       - ".github/workflows/site-check.yml"
       - ".github/workflows/site-publish.yml"
   push:
     branches: ["main"]
     paths:
       - "site/**"
+      - "design-system/**"
       - "site-template.json"
+      - "AGENTS.md"
+      - "README.md"
+      - "site/README.md"
       - ".github/workflows/site-check.yml"
       - ".github/workflows/site-publish.yml"
 

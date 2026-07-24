@@ -5,7 +5,11 @@ on:
     branches: ["main"]
     paths:
       - "site/**"
+      - "design-system/**"
       - "site-template.json"
+      - "AGENTS.md"
+      - "README.md"
+      - "site/README.md"
       - ".github/workflows/site-publish.yml"
   workflow_dispatch:
 

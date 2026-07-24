@@ -1,0 +1,207 @@
+<waft-theme-toggle>
+  <div class="theme-toggle" role="radiogroup" aria-label="Color theme">
+    <button
+      class="theme-toggle__btn"
+      type="button"
+      role="radio"
+      aria-checked="false"
+      aria-label="Light"
+      data-theme-choice="light"
+      data-tip="Light"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="4.5"></circle>
+        <path
+          d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+        ></path>
+      </svg>
+    </button>
+    <button
+      class="theme-toggle__btn"
+      type="button"
+      role="radio"
+      aria-checked="false"
+      aria-label="Dark"
+      data-theme-choice="dark"
+      data-tip="Dark"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M20 14.5A8 8 0 0 1 9.5 4a7 7 0 1 0 10.5 10.5z"></path>
+      </svg>
+    </button>
+    <button
+      class="theme-toggle__btn"
+      type="button"
+      role="radio"
+      aria-checked="false"
+      aria-label="System"
+      data-theme-choice="auto"
+      data-tip="Follow system"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="2.5" y="4" width="19" height="12.5" rx="1.5"></rect>
+        <path d="M8.5 20.5h7M12 16.5v4"></path>
+      </svg>
+    </button>
+  </div>
+</waft-theme-toggle>
+
+<script>
+  type ThemeChoice = "light" | "dark" | "auto";
+
+  declare global {
+    interface Window {
+      WaftThemeProvider: {
+        apply: (choice?: ThemeChoice, persist?: boolean) => ThemeChoice;
+        current: () => ThemeChoice;
+        updateControls: (choice: ThemeChoice) => void;
+      };
+    }
+  }
+
+  const choices: ThemeChoice[] = ["light", "dark", "auto"];
+
+  class WaftThemeToggle extends HTMLElement {
+    connectedCallback(): void {
+      if (this.dataset.ready === "true") return;
+      this.dataset.ready = "true";
+
+      const buttons = Array.from(
+        this.querySelectorAll<HTMLButtonElement>("[data-theme-choice]"),
+      );
+
+      const select = (choice: ThemeChoice): void => {
+        window.WaftThemeProvider.apply(choice, true);
+      };
+
+      buttons.forEach((button, index) => {
+        button.addEventListener("click", () => {
+          const choice = button.dataset.themeChoice as ThemeChoice | undefined;
+          if (choice && choices.includes(choice)) select(choice);
+        });
+        button.addEventListener("keydown", (event) => {
+          if (
+            ![
+              "ArrowLeft",
+              "ArrowRight",
+              "ArrowUp",
+              "ArrowDown",
+              "Home",
+              "End",
+            ].includes(event.key)
+          ) {
+            return;
+          }
+          event.preventDefault();
+          const offset =
+            event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1;
+          const next =
+            event.key === "Home"
+              ? buttons[0]
+              : event.key === "End"
+                ? buttons.at(-1)
+                : buttons[(index + offset + buttons.length) % buttons.length];
+          const choice = next?.dataset.themeChoice as ThemeChoice | undefined;
+          if (next && choice && choices.includes(choice)) {
+            select(choice);
+            next.focus();
+          }
+        });
+      });
+
+      window.WaftThemeProvider.updateControls(
+        window.WaftThemeProvider.current(),
+      );
+    }
+  }
+
+  if (!customElements.get("waft-theme-toggle")) {
+    customElements.define("waft-theme-toggle", WaftThemeToggle);
+  }
+
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+    if (window.WaftThemeProvider.current() === "auto") {
+      window.WaftThemeProvider.apply("auto");
+    }
+  });
+</script>
+
+<style>
+  waft-theme-toggle {
+    display: inline-flex;
+  }
+
+  .theme-toggle {
+    display: inline-flex;
+    gap: 2px;
+    padding: 3px;
+    border: 1px solid var(--waft-line);
+    border-radius: 999px;
+    background: var(--waft-subtle);
+  }
+
+  .theme-toggle__btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--waft-muted);
+    cursor: pointer;
+  }
+
+  .theme-toggle__btn:hover {
+    color: var(--waft-ink);
+  }
+
+  .theme-toggle__btn[aria-checked="true"] {
+    background: var(--waft-panel);
+    color: var(--waft-accent-dark);
+    box-shadow: var(--waft-shadow);
+  }
+
+  .theme-toggle__btn svg {
+    width: 16px;
+    height: 16px;
+    display: block;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .theme-toggle__btn:focus-visible {
+    outline: 2px solid var(--waft-focus);
+    outline-offset: 2px;
+  }
+
+  .theme-toggle__btn::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 50%;
+    z-index: 50;
+    padding: 4px 8px;
+    transform: translateX(-50%);
+    border-radius: 5px;
+    background: var(--waft-ink);
+    color: var(--waft-surface);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .theme-toggle__btn:hover::after,
+  .theme-toggle__btn:focus-visible::after {
+    opacity: 1;
+  }
+</style>

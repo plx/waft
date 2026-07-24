@@ -1,0 +1,28 @@
+<!-- @dsCard group="Components" viewport="700x220" name="TerminalCard" subtitle="Theme-aware command block with Copy — exported component" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="../styles.css" />
+<style>
+  html,body{margin:0;background:var(--waft-surface);font-family:var(--waft-font-sans)}
+  #root{padding:22px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="../_ds_bundle.js"></script>
+<script>
+  const { TerminalCard } = window.WaftDesignSystem_bb1143;
+  const e = React.createElement;
+  ReactDOM.createRoot(document.getElementById("root")).render(
+    e(TerminalCard, {
+      lines: ["$ waft copy --dry-run", "$ waft copy --source ../main --dest ."],
+      copyText: "waft copy --dry-run\nwaft copy --source ../main --dest ."
+    })
+  );
+</script>
+</body>
+</html>

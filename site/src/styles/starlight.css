@@ -1,23 +1,40 @@
 @import "./theme.css";
 
 :root {
-  --sl-font: var(--tool-font-sans);
-  --sl-font-mono: var(--tool-font-mono);
-  --sl-color-accent-low: var(--tool-accent-soft);
-  --sl-color-accent: var(--tool-accent-dark);
-  --sl-color-accent-high: var(--tool-accent-dark);
-  --sl-color-white: var(--tool-ink);
-  --sl-color-gray-1: var(--tool-ink);
-  --sl-color-gray-2: var(--tool-ink-soft);
-  --sl-color-gray-3: var(--tool-muted);
+  --sl-font: var(--waft-font-sans);
+  --sl-font-mono: var(--waft-font-mono);
+  --sl-color-accent-low: var(--waft-accent-soft);
+  --sl-color-accent: var(--waft-accent-dark);
+  --sl-color-accent-high: var(--waft-accent-dark);
+  --sl-color-white: var(--waft-ink);
+  --sl-color-gray-1: var(--waft-ink);
+  --sl-color-gray-2: var(--waft-ink-soft);
+  --sl-color-gray-3: var(--waft-muted);
   --sl-color-gray-4: #98a0aa;
-  --sl-color-gray-5: var(--tool-line-strong);
-  --sl-color-gray-6: var(--tool-line);
-  --sl-color-black: var(--tool-surface);
+  --sl-color-gray-5: var(--waft-line-strong);
+  --sl-color-gray-6: var(--waft-code-bg);
+  --sl-color-gray-7: var(--waft-code-bg);
+  --sl-color-black: var(--waft-surface);
+
+  --sl-color-text: var(--waft-ink);
+  --sl-color-text-accent: var(--waft-accent-dark);
+  --sl-color-text-invert: var(--waft-surface);
+  --sl-color-bg: var(--waft-surface);
+  --sl-color-bg-nav: var(--waft-panel);
+  --sl-color-bg-sidebar: var(--waft-surface);
+  --sl-color-bg-inline-code: var(--waft-code-bg);
+  --sl-color-bg-accent: var(--waft-accent-dark);
+  --sl-color-hairline-light: var(--waft-line);
+  --sl-color-hairline: var(--waft-line);
+  --sl-color-hairline-shade: var(--waft-line);
+  --sl-shadow-sm: var(--waft-shadow);
+  --sl-shadow-md: var(--waft-shadow-pop);
 }
 
-.site-title {
-  font-weight: 800;
+header.header {
+  border-bottom-color: var(--waft-line);
+  background: color-mix(in srgb, var(--waft-surface) 88%, transparent);
+  backdrop-filter: blur(14px);
 }
 
 .sl-markdown-content a {
@@ -25,11 +42,49 @@
 }
 
 .sl-markdown-content code {
-  border-radius: var(--tool-radius-sm);
+  border-radius: var(--waft-radius-sm);
+}
+
+.sl-markdown-content h1,
+.sl-markdown-content h2 {
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.sl-markdown-content h2 {
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--waft-line);
 }
 
 .sl-markdown-content pre,
 .sl-markdown-content pre code {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.sl-markdown-content pre {
+  border-color: var(--waft-line);
+  border-radius: var(--waft-radius);
+  background: var(--waft-code-bg);
+  color: var(--waft-code-fg);
+  box-shadow: none;
+}
+
+.sl-markdown-content table {
+  font-size: 0.875rem;
+}
+
+.sl-markdown-content table:focus-visible {
+  border-radius: var(--waft-radius-sm);
+  outline: 2px solid var(--waft-focus);
+  outline-offset: 3px;
+}
+
+.sl-markdown-content th {
+  background: var(--waft-subtle);
+  color: var(--waft-ink-soft);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }

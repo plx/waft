@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Colors" name="colors-semantic" subtitle="Code surface + error states" viewport="700x190" -->
+<html><head><meta charset="utf-8"><title>Code & semantic</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--waft-surface);font-family:var(--waft-font-sans);color:var(--waft-ink)}
+  .wrap{padding:20px;display:grid;grid-template-columns:1.5fr 1fr 1fr;gap:14px}
+  .sw{border:1px solid var(--waft-line);border-radius:var(--waft-radius);background:var(--waft-panel);overflow:hidden;box-shadow:var(--waft-shadow)}
+  .chip{height:90px;display:flex;align-items:center;justify-content:center;font-family:var(--waft-font-mono);font-size:13px;font-weight:600}
+  .meta{padding:10px 12px;font-size:11px;line-height:1.4}
+  .meta b{display:block;font-weight:700;font-size:12.5px;color:var(--waft-ink);margin-bottom:2px}
+  .meta code{font-family:var(--waft-font-mono);color:var(--waft-muted);font-size:11px}
+  .meta em{display:block;color:var(--waft-muted);font-style:normal;margin-top:3px;font-size:10.5px}
+</style></head><body><div class="wrap">
+  <div class="sw"><div class="chip" style="background:var(--waft-code-bg);color:var(--waft-code-fg)">$ waft copy --dry-run</div><div class="meta"><b>code</b><code>--waft-code-bg</code><em>theme-aware code surface</em></div></div>
+  <div class="sw"><div class="chip" style="background:#b42323;color:#fff">!test.key</div><div class="meta"><b>error</b><code>#b42323</code><em>negation, danger</em></div></div>
+  <div class="sw"><div class="chip" style="background:#fce4e4;color:#b42323;border:1px dashed #b42323">excluded</div><div class="meta"><b>error-bg</b><code>#fce4e4</code><em>warning tint</em></div></div>
+</div></body></html>

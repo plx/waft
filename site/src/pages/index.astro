@@ -1,5 +1,7 @@
 ---
-import markUrl from "../assets/tool-mark.svg?url";
+import ThemeProvider from "../components/ThemeProvider.astro";
+import ThemeToggle from "../components/ThemeToggle.astro";
+import WaftMark from "../components/WaftMark.astro";
 import { siteConfig } from "../site.config.mjs";
 import "../styles/theme.css";
 import "../styles/landing.css";
@@ -14,11 +16,17 @@ const resolveHref = (href: string) =>
 const externalRel = (href: string) => (isExternal(href) ? "noopener noreferrer" : undefined);
 const externalTarget = (href: string) => (isExternal(href) ? "_blank" : undefined);
 const docsHref = siteConfig.docs.pages[0]?.href || "docs/";
+const primaryNavLinks = siteConfig.landing.nav.filter((link) => !isExternal(link.href));
+const githubHref =
+  siteConfig.landing.nav.find((link) => isExternal(link.href))?.href ||
+  siteConfig.repository.url;
+const attributionHref = `${siteConfig.repository.url}/blob/${siteConfig.repository.defaultBranch}/design-system/ATTRIBUTION.md`;
 ---
 
 <!doctype html>
 <html lang={siteConfig.site.language}>
   <head>
+    <ThemeProvider />
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{siteConfig.project.title} | {siteConfig.project.tagline}</title>
@@ -31,52 +39,62 @@ const docsHref = siteConfig.docs.pages[0]?.href || "docs/";
     <link rel="icon" href={sitePath("favicon.svg")} type="image/svg+xml" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap"
-    />
   </head>
   <body class="landing-page">
     <a class="skip-link" href="#main">Skip to content</a>
 
     <header class="site-header" data-site-header>
-      <nav class="site-nav" aria-label="Primary navigation">
-        <a class="site-nav__brand" href={sitePath()} aria-label={`${siteConfig.project.title} home`}>
-          <img src={markUrl} alt="" width="36" height="36" />
-          <span>{siteConfig.project.title}</span>
-        </a>
+      <div class="section-shell">
+        <nav class="site-nav" aria-label="Primary navigation">
+          <a class="site-nav__brand" href={sitePath()} aria-label={`${siteConfig.project.title} home`}>
+            <WaftMark label="waft mark" />
+            <span>{siteConfig.project.title}</span>
+          </a>
 
-        <div class="site-nav__links">
-          {siteConfig.landing.nav.map((link) => (
+          <div class="site-nav__links">
+            {primaryNavLinks.map((link) => (
+              <a
+                class:list={["site-nav__link", { "is-active": link.href.startsWith("#") }]}
+                href={resolveHref(link.href)}
+                aria-current={link.href.startsWith("#") ? "page" : undefined}
+              >
+                {link.label}
+              </a>
+            ))}
+          </div>
+
+          <div class="site-nav__actions">
+            <ThemeToggle />
             <a
-              class="site-nav__link"
-              href={resolveHref(link.href)}
-              target={externalTarget(link.href)}
-              rel={externalRel(link.href)}
+              class="button button--secondary"
+              href={githubHref}
+              target="_blank"
+              rel="noopener noreferrer">GitHub</a
             >
-              {link.label}
-            </a>
-          ))}
-        </div>
+            <a class="button button--primary" href={resolveHref(docsHref)}>Read the docs</a>
+            <button
+              class="site-nav__toggle"
+              type="button"
+              aria-label="Open navigation"
+              aria-controls="mobile-nav"
+              aria-expanded="false"
+              data-nav-toggle
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 7h16M4 12h16M4 17h16"></path>
+              </svg>
+            </button>
+          </div>
+        </nav>
+      </div>
 
-        <div class="site-nav__actions">
-          <a class="button button--ghost button--sm" href={resolveHref(docsHref)}>Docs</a>
-          <button
-            class="site-nav__toggle"
-            type="button"
-            aria-label="Open navigation"
-            aria-controls="mobile-nav"
-            aria-expanded="false"
-            data-nav-toggle
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M4 7h16M4 12h16M4 17h16"></path>
-            </svg>
-          </button>
-        </div>
-      </nav>
-
-      <div class="mobile-nav" id="mobile-nav" data-nav-panel hidden>
+      <nav
+        class="mobile-nav"
+        id="mobile-nav"
+        aria-label="Mobile navigation"
+        data-nav-panel
+        hidden
+      >
         {siteConfig.landing.nav.map((link) => (
           <a
             class="mobile-nav__link"
@@ -88,19 +106,20 @@ const docsHref = siteConfig.docs.pages[0]?.href || "docs/";
             {link.label}
           </a>
         ))}
-      </div>
+      </nav>
     </header>
 
     <main id="main">
       <section class="hero section-shell" aria-labelledby="hero-title">
         <div class="hero__copy">
           <p class="eyebrow">{siteConfig.project.category}</p>
-          <div class="hero__brand-line">
-            <img src={markUrl} alt="" width="64" height="64" />
-            <h1 id="hero-title">{siteConfig.project.title}</h1>
-          </div>
-          <p class="hero__lede">{siteConfig.project.tagline}</p>
-          <p class="hero__body">{siteConfig.project.description}</p>
+          <h1 id="hero-title">{siteConfig.landing.headline}</h1>
+          <p class="hero__lede">
+            {siteConfig.landing.lede.map((part) =>
+              part.code ? <code>{part.text}</code> : part.text
+            )}
+          </p>
+          <p class="hero__body">{siteConfig.landing.body}</p>
 
           <div class="badge-row" aria-label="Project highlights">
             {siteConfig.landing.badges.map((badge) => <span class="badge">{badge}</span>)}
@@ -150,17 +169,17 @@ const docsHref = siteConfig.docs.pages[0]?.href || "docs/";
           </div>
 
           <div class="transfer-panel">
-            <h2>What moves?</h2>
-            <p>Ignored, untracked regular files selected by <code>.worktreeinclude</code>.</p>
+            <h2>{siteConfig.landing.transfer.title}</h2>
+            <p>
+              <code>.worktreeinclude</code>
+              {siteConfig.landing.transfer.description.replace(".worktreeinclude", "")}
+            </p>
             <div class="transfer-list">
-              <span>.env.local</span>
-              <span>target/.cache/</span>
-              <span>.idea/</span>
-              <span>logs/</span>
+              {siteConfig.landing.transfer.includes.map((pattern) => <span>{pattern}</span>)}
             </div>
             <div class="transfer-rule">
-              <strong>Never:</strong>
-              <span>tracked files, symlinks, or existing destination conflicts. <code>--overwrite</code> remains fail-closed.</span>
+              <strong>{siteConfig.landing.transfer.negation}</strong>
+              <span>{siteConfig.landing.transfer.negationDescription}</span>
             </div>
           </div>
         </div>
@@ -169,8 +188,7 @@ const docsHref = siteConfig.docs.pages[0]?.href || "docs/";
       <section class="section section--muted" id="features" aria-labelledby="features-title">
         <div class="section-shell">
           <div class="section-heading">
-            <p class="eyebrow">Core workflow</p>
-            <h2 id="features-title">Copy ignored worktree state without touching tracked files.</h2>
+            <h2 id="features-title">A plan-then-execute file tool for worktrees.</h2>
           </div>
           <div class="feature-grid">
             {siteConfig.landing.features.map((feature, index) => (
@@ -188,8 +206,7 @@ const docsHref = siteConfig.docs.pages[0]?.href || "docs/";
 
       <section class="section section-shell docs-preview" aria-labelledby="docs-title">
         <div class="section-heading">
-          <p class="eyebrow">Documentation</p>
-          <h2 id="docs-title">Usage, profile behavior, and implementation notes.</h2>
+          <h2 id="docs-title">Documentation</h2>
         </div>
         <div class="docs-grid">
           {siteConfig.docs.pages.map((page) => (
@@ -205,13 +222,14 @@ const docsHref = siteConfig.docs.pages[0]?.href || "docs/";
 
     <footer class="site-footer">
       <div class="section-shell site-footer__inner">
-        <p>{siteConfig.project.title} / {siteConfig.project.category}</p>
+        <p>{siteConfig.project.title} / MIT / plx/waft</p>
         <nav aria-label="Footer">
           {siteConfig.landing.footerLinks.map((link) => (
             <a href={resolveHref(link.href)} target={externalTarget(link.href)} rel={externalRel(link.href)}>
               {link.label}
             </a>
           ))}
+          <a href={attributionHref} target="_blank" rel="noopener noreferrer">Icon attribution</a>
         </nav>
       </div>
     </footer>

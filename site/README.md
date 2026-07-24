@@ -1,7 +1,44 @@
 # waft site
 
-Static Astro/Starlight site generated from `static-tool-page-template`.
-The renderer input for this project is tracked at `../site-template.json`.
+This directory contains the production Astro/Starlight site. The renderer input
+for its content and information architecture is tracked at
+`../site-template.json`.
+
+## Source-of-truth hierarchy
+
+Use these sources in order:
+
+1. `../design-system/README.md` defines the canonical visual language, content
+   voice, interaction rules, and asset usage.
+2. `../design-system/colors_and_type.css` defines canonical tokens.
+   `../design-system/ui_kits/site/` is the component and page-composition
+   reference.
+3. `../design-system/assets/` contains the canonical brand assets. Preserve the
+   attribution in `../design-system/ATTRIBUTION.md`.
+4. `../site-template.json` defines shared copy and information architecture,
+   while this directory is the deployable Astro/Starlight implementation.
+
+`../design-system/site/` is a reference snapshot, not production code.
+`../.maquette/` is an archived, superseded exploration. Neither should
+override the canonical design-system files above.
+
+## Migration and change rules
+
+- Read `../design-system/SKILL.md` and `../design-system/README.md` before
+  changing the site.
+- Import the canonical token contract through `src/styles/theme.css` and use
+  the `--waft-*` names directly. Do not duplicate token values in production
+  CSS or content configuration.
+- Port patterns from the UI kit into Astro. Do not copy its React/Babel router
+  or replace Starlight, mobile navigation, accessibility behavior, syntax
+  highlighting, or base-path handling with reference-only implementations.
+- Keep terminal, code, footer, and on-page brand surfaces theme-aware. Use
+  `--waft-code-bg`, `--waft-code-fg`, and related light/dark values rather than
+  the legacy fixed-dark `--waft-code` chip token.
+- Update both `../site-template.json` and the production implementation when a
+  shared content or information-architecture contract changes.
+- Record intentional design-system exceptions in the design-system guidance in
+  the same change.
 
 ## Common commands
 
