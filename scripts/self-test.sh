@@ -166,13 +166,14 @@ chmod +x "$COMMON_HOOKS/post-checkout"
 WAFT="$WAFT" bash "$REPO_ROOT/scripts/install-hooks.sh"
 
 INSTALLED_HOOKS="$(git config --local --get core.hooksPath)"
+COMMON_DIR="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
 case "$INSTALLED_HOOKS" in
   /*) ok "core.hooksPath is absolute" ;;
   *) fail "core.hooksPath is not absolute: $INSTALLED_HOOKS" ;;
 esac
 case "$INSTALLED_HOOKS/" in
-  "$MAIN/"*) fail "installed hooks are inside the checked-out worktree" ;;
-  *) ok "installed hooks are outside the checked-out worktree" ;;
+  "$COMMON_DIR/"*) ok "installed hooks are inside common Git metadata" ;;
+  *) fail "installed hooks are outside common Git metadata" ;;
 esac
 
 # Reinstall through a relative alias of the same managed directory. This must
@@ -303,7 +304,6 @@ git config --local --unset-all core.hooksPath
 # -----------------------------------------------------------------------
 section "Test 7: hook installer rejects a symlinked managed directory"
 
-COMMON_DIR="$(cd "$(git rev-parse --git-common-dir)" && pwd -P)"
 MANAGED_DIR="$COMMON_DIR/waft-hooks"
 SYMLINK_TARGET="$LINKED1/managed-hooks"
 mkdir -p "$SYMLINK_TARGET"

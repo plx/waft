@@ -247,31 +247,12 @@ impl GitGix {
     }
 }
 
-/// Canonicalize a repo-root path and strip the Windows `\\?\` UNC prefix
+/// Canonicalize a repo-root path and strip the Windows `\\?\` verbatim prefix
 /// so both backends produce paths in the same form (critical for
 /// `strip_prefix` and display parity between backends).
 fn normalize_repo_path(path: &Path) -> PathBuf {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    strip_unc_prefix(&canonical)
-}
-
-#[cfg(windows)]
-fn strip_unc_prefix(path: &Path) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\") {
-        if let Some(unc_rest) = rest.strip_prefix(r"UNC\") {
-            PathBuf::from(format!(r"\\{unc_rest}"))
-        } else {
-            PathBuf::from(rest)
-        }
-    } else {
-        path.to_path_buf()
-    }
-}
-
-#[cfg(not(windows))]
-fn strip_unc_prefix(path: &Path) -> PathBuf {
-    path.to_path_buf()
+    crate::path::without_windows_verbatim_prefix(&canonical)
 }
 
 /// Convert Git's raw path bytes without changing their spelling.
@@ -717,17 +698,12 @@ impl GitBackend for GitGix {
                 continue;
             }
 
-            let rel_path =
-                entry
-                    .path()
-                    .strip_prefix(source_root)
-                    .map_err(|error| Error::InvalidPath {
-                        message: format!(
-                            "{} is outside repository root {}: {error}",
-                            entry.path().display(),
-                            source_root.display()
-                        ),
-                    })?;
+            #[cfg(unix)]
+            let rel_path = native_repo_relative_path(entry.path(), source_root)?;
+            #[cfg(not(unix))]
+            let rel = RepoRelPath::normalize(entry.path(), source_root)?;
+            #[cfg(not(unix))]
+            let rel_path = Path::new(rel.as_str());
 
             // Git paths are raw bytes on Unix. Check trackedness and
             // worktreeinclude selection before crossing the UTF-8-only
@@ -752,6 +728,7 @@ impl GitBackend for GitGix {
             // Selected non-UTF-8 names still fail closed here: downstream
             // policy, planning, and copy operations require an unambiguous
             // normalized repository path.
+            #[cfg(unix)]
             let rel = RepoRelPath::normalize(entry.path(), source_root)?;
             if tracked_paths.contains(source_root, rel.as_str().as_bytes()) {
                 continue;
@@ -814,17 +791,12 @@ impl GitBackend for GitGix {
             // an unrelated, unignored non-UTF-8 Unix name remain outside the
             // candidate set just as it does with `git ls-files`; selected
             // names still fail closed when converted to RepoRelPath below.
-            let rel_path =
-                entry
-                    .path()
-                    .strip_prefix(source_root)
-                    .map_err(|error| Error::InvalidPath {
-                        message: format!(
-                            "{} is outside repository root {}: {error}",
-                            entry.path().display(),
-                            source_root.display()
-                        ),
-                    })?;
+            #[cfg(unix)]
+            let rel_path = native_repo_relative_path(entry.path(), source_root)?;
+            #[cfg(not(unix))]
+            let rel = RepoRelPath::normalize(entry.path(), source_root)?;
+            #[cfg(not(unix))]
+            let rel_path = Path::new(rel.as_str());
             let platform = excludes.at_path(rel_path, None).map_err(|e| Error::Io {
                 context: format!("matching ignore patterns for {}", entry.path().display()),
                 source: e,
@@ -834,6 +806,7 @@ impl GitBackend for GitGix {
                 continue;
             }
 
+            #[cfg(unix)]
             let rel = RepoRelPath::normalize(entry.path(), source_root)?;
             if tracked_paths.contains(source_root, rel.as_str().as_bytes()) {
                 continue;
@@ -990,17 +963,12 @@ fn cli_list_candidates_with_engine(
         if entry.file_type().is_dir() {
             continue;
         }
-        let rel_path =
-            entry
-                .path()
-                .strip_prefix(source_root)
-                .map_err(|error| Error::InvalidPath {
-                    message: format!(
-                        "{} is outside repository root {}: {error}",
-                        entry.path().display(),
-                        source_root.display()
-                    ),
-                })?;
+        #[cfg(unix)]
+        let rel_path = native_repo_relative_path(entry.path(), source_root)?;
+        #[cfg(not(unix))]
+        let rel = RepoRelPath::normalize(entry.path(), source_root)?;
+        #[cfg(not(unix))]
+        let rel_path = Path::new(rel.as_str());
 
         #[cfg(unix)]
         {
@@ -1018,6 +986,7 @@ fn cli_list_candidates_with_engine(
             continue;
         }
 
+        #[cfg(unix)]
         let rel = RepoRelPath::normalize(entry.path(), source_root)?;
         if tracked.contains(source_root, rel.as_str().as_bytes()) {
             continue;
@@ -1027,6 +996,22 @@ fn cli_list_candidates_with_engine(
 
     candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     Ok(candidates)
+}
+
+/// Return a byte-preserving repository-relative path for Unix discovery.
+///
+/// Windows paths are normalized through `RepoRelPath` before matching, which
+/// also reconciles canonical `\\?\` spellings with Git's ordinary roots.
+#[cfg(unix)]
+fn native_repo_relative_path<'a>(path: &'a Path, source_root: &Path) -> Result<&'a Path> {
+    path.strip_prefix(source_root)
+        .map_err(|error| Error::InvalidPath {
+            message: format!(
+                "{} is outside repository root {}: {error}",
+                path.display(),
+                source_root.display()
+            ),
+        })
 }
 
 /// Compare normalized repository paths using the same case semantics as

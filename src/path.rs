@@ -52,10 +52,10 @@ impl RepoRelPath {
         };
 
         // Logical normalization (resolve `.` and `..` without touching the filesystem)
-        let normalized = logical_normalize(&abs);
+        let normalized = logical_normalize(&without_windows_verbatim_prefix(&abs));
 
         // Must be under repo_root
-        let repo_normalized = logical_normalize(repo_root);
+        let repo_normalized = logical_normalize(&without_windows_verbatim_prefix(repo_root));
         let rel = normalized
             .strip_prefix(&repo_normalized)
             .map_err(|_| Error::InvalidPath {
@@ -101,6 +101,31 @@ impl RepoRelPath {
     pub fn to_path(&self, root: &Path) -> PathBuf {
         root.join(self.inner.replace('/', std::path::MAIN_SEPARATOR_STR))
     }
+}
+
+/// Remove the extended-length prefix returned by Windows canonicalization.
+///
+/// Windows considers `C:\repo` and `\\?\C:\repo` the same path, but
+/// `Path::strip_prefix` does not. Normalizing both spellings at repository
+/// boundaries keeps containment checks byte-preserving on Unix while making
+/// canonicalized Windows inputs comparable with Git's ordinary paths.
+#[cfg(windows)]
+pub(crate) fn without_windows_verbatim_prefix(path: &Path) -> PathBuf {
+    let Some(path) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(ordinary) = path.strip_prefix(r"\\?\") {
+        PathBuf::from(ordinary)
+    } else {
+        PathBuf::from(path)
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn without_windows_verbatim_prefix(path: &Path) -> PathBuf {
+    path.to_path_buf()
 }
 
 fn validate_text_path(value: &str) -> Result<()> {
@@ -264,5 +289,23 @@ mod tests {
         let invalid = std::ffi::OsStr::from_bytes(b"bad-\xff.env");
         let err = RepoRelPath::normalize(Path::new(invalid), root).unwrap_err();
         assert!(err.to_string().contains("not valid UTF-8"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalize_accepts_verbatim_path_under_ordinary_root() {
+        let root = Path::new(r"C:\repo");
+        let path = Path::new(r"\\?\C:\repo\config\.env");
+        let normalized = RepoRelPath::normalize(path, root).unwrap();
+        assert_eq!(normalized.as_str(), "config/.env");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn normalize_accepts_verbatim_unc_path_under_ordinary_root() {
+        let root = Path::new(r"\\server\share\repo");
+        let path = Path::new(r"\\?\UNC\server\share\repo\.env");
+        let normalized = RepoRelPath::normalize(path, root).unwrap();
+        assert_eq!(normalized.as_str(), ".env");
     }
 }

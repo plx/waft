@@ -358,12 +358,22 @@ fn unrelated_unignored_invalid_utf8_name_does_not_break_fallback_parity() {
 }
 
 #[test]
-fn candidate_filename_whitespace_is_preserved_for_both_backends() {
+fn candidate_filename_whitespace_matches_filesystem_spelling_for_both_backends() {
     let repo = make_repo();
     std::fs::write(repo.path().join(".gitignore"), "*\n").unwrap();
     git(repo.path(), &["add", "-f", ".gitignore"]);
     git(repo.path(), &["commit", "-m", "ignore fixture files"]);
-    std::fs::write(repo.path().join(" secret.env "), "x").unwrap();
+    let requested_name = " secret.env ";
+    std::fs::write(repo.path().join(requested_name), "x").unwrap();
+    let actual_name = std::fs::read_dir(repo.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .find(|name| name.to_string_lossy().starts_with(" secret.env"))
+        .and_then(|name| name.into_string().ok())
+        .expect("candidate should exist with a representable filesystem name");
+    #[cfg(not(windows))]
+    assert_eq!(actual_name, requested_name);
+    let expected = format!("{actual_name}\n");
 
     let source = repo.path().to_string_lossy().to_string();
     for backend in ["gix", "cli"] {
@@ -379,8 +389,8 @@ fn candidate_filename_whitespace_is_preserved_for_both_backends() {
         );
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            " secret.env \n",
-            "{backend} backend changed filename whitespace"
+            expected,
+            "{backend} backend did not report the filesystem's filename spelling"
         );
     }
 }
