@@ -21,7 +21,14 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
         with:
-          tool: actionlint,shellcheck
+          tool: shellcheck
+      - name: Install actionlint
+        env:
+          GOBIN: ${{ runner.temp }}/actionlint-bin
+        run: |
+          mkdir -p "$GOBIN"
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          printf '%s\n' "$GOBIN" >> "$GITHUB_PATH"
       - name: Validate workflow syntax
         run: actionlint
       - name: Validate security-critical shell scripts
