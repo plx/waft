@@ -286,12 +286,14 @@ impl Cli {
     }
 
     fn map_worktree_path_to_source(&self, path: &Path, ctx: &RepoContext) -> Option<PathBuf> {
+        let path = crate::path::without_windows_verbatim_prefix(path);
         ctx.known_worktrees
             .iter()
             .filter_map(|worktree| {
-                path.strip_prefix(worktree)
+                let worktree = crate::path::without_windows_verbatim_prefix(worktree);
+                path.strip_prefix(&worktree)
                     .ok()
-                    .map(|relative| (worktree.components().count(), relative))
+                    .map(|relative| (worktree.components().count(), relative.to_path_buf()))
             })
             // Worktrees should not overlap, but choosing the deepest match
             // makes the mapping deterministic if they do.
@@ -335,5 +337,30 @@ fn canonicalize_parent(path: &Path) -> PathBuf {
             return path.to_path_buf();
         };
         cursor = next;
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_verbatim_linked_worktree_path_to_source() {
+        let cli = Cli::parse_from(["waft"]);
+        let ctx = RepoContext {
+            source_root: PathBuf::from(r"C:\repos\main"),
+            dest_root: None,
+            main_worktree: PathBuf::from(r"C:\repos\main"),
+            known_worktrees: vec![
+                PathBuf::from(r"C:\repos\main"),
+                PathBuf::from(r"C:\worktrees\linked"),
+            ],
+            core_ignore_case: true,
+        };
+
+        let mapped =
+            cli.map_worktree_path_to_source(Path::new(r"\\?\C:\worktrees\linked\nested"), &ctx);
+
+        assert_eq!(mapped, Some(PathBuf::from(r"C:\repos\main\nested")));
     }
 }
