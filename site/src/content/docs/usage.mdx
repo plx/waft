@@ -2,47 +2,52 @@
 title: "Usage"
 sidebar:
   label: "Usage"
-description: "Copy ignored files selected by .worktreeinclude between Git worktrees."
+description: "Install waft and run its copy, list, info, and validate commands."
 ---
 
-`waft` copies `.worktreeinclude`-selected ignored files between Git worktrees.
+`waft` copies selected ignored files from one Git worktree to another. Use it
+for local configuration, caches, and tool state that you need in more than one
+worktree but do not want to commit.
 
 ## Installation
 
-`waft` is not currently published to crates.io. Install a reviewed commit
-directly from Git:
+`waft` is not published to crates.io. Install a reviewed commit from Git:
 
 ```sh
 cargo install --git https://github.com/plx/waft \
   --rev REVIEWED_COMMIT_SHA --locked waft
 ```
 
-Replace `REVIEWED_COMMIT_SHA` with the full revision you reviewed. Managed
-environments should not omit `--rev`.
-
-It is intended for local configuration, caches, and tool state that Git should
-not track but that developers often need in more than one linked worktree.
+Set `REVIEWED_COMMIT_SHA` to the full commit SHA. Keep `--rev` in managed
+environments.
 
 ## Quick start
 
+1. Add `.worktreeinclude` to the source worktree:
+
+   ```text
+   .env
+   *.env.local
+   ```
+
+2. From a linked worktree, preview the copy:
+
+   ```sh
+   waft copy --dry-run
+   ```
+
+3. Review the plan, then copy:
+
+   ```sh
+   waft copy
+   ```
+
+When run from a linked worktree, `waft` uses the main worktree as the source
+and the current worktree as the destination. Pass both paths to override that
+resolution:
+
 ```sh
-# In a linked worktree, copy from the main worktree automatically.
-waft
-
-# Explicit source and destination.
 waft copy --source /path/to/main --dest /path/to/linked
-
-# See what would be copied without writing files.
-waft copy --dry-run
-
-# List eligible files.
-waft list
-
-# Inspect specific files.
-waft info .env
-
-# Validate ignore files.
-waft validate
 ```
 
 ## Commands
@@ -52,17 +57,19 @@ waft validate
 | `waft` / `waft copy`  | Copy eligible files. This is the default command. |
 | `waft list`           | List eligible files without copying.              |
 | `waft info <PATH>...` | Show detailed status for specific files.          |
-| `waft validate`       | Check ignore files for syntax errors.             |
+| `waft validate`       | Check `.worktreeinclude` and Git ignore syntax.   |
 
 ## Global options
 
-| Option            | Description                                    |
-| ----------------- | ---------------------------------------------- |
-| `--source <PATH>` | Source, usually the main worktree path.        |
-| `--dest <PATH>`   | Destination, usually the linked worktree path. |
-| `-C <PATH>`       | Operate as if started in `PATH`.               |
-| `-q, --quiet`     | Suppress non-error output.                     |
-| `-v, --verbose`   | Increase output verbosity.                     |
+| Option                                          | Description                                                 |
+| ----------------------------------------------- | ----------------------------------------------------------- |
+| `--source <PATH>`                               | Source, usually the main worktree path.                     |
+| `--dest <PATH>`                                 | Destination, usually the linked worktree path.              |
+| `-C <PATH>`                                     | Operate as if started in `PATH`.                            |
+| `-q, --quiet`                                   | Suppress non-error output.                                  |
+| `-v, --verbose`                                 | Increase output verbosity.                                  |
+| `--copy-strategy <auto\|simple-copy\|cow-copy>` | Select plain-copy or copy-on-write behavior.                |
+| `--isolated`                                    | Omit user config and `WAFT_*` policy environment variables. |
 
 ## Copy options
 
@@ -71,33 +78,37 @@ waft validate
 | `-n, --dry-run` | Show what would be done without copying.                     |
 | `--overwrite`   | Compatibility flag; fails on existing destination conflicts. |
 
-## Typical flow
+## Inspect selection
 
-1. Add `.worktreeinclude` to the source repo.
-2. Run `waft copy --dry-run`.
-3. Inspect the plan.
-4. Run `waft copy`.
-5. Use `waft info <path>` when a file is missing or skipped.
+```sh
+waft list
+waft info .env
+waft validate
+```
+
+`list` prints eligible files. `info` explains why specific paths are selected
+or skipped. `validate` checks rule files without copying.
 
 ## Optional post-checkout hook
 
-From a reviewed source checkout:
+Install the repository's post-checkout hook from a reviewed source checkout:
 
 ```sh
 just install-hooks
 ```
 
-This builds `waft` and snapshots both the binary and post-checkout hook under
-the repository's common Git directory. The absolute managed hook directory
-chains the previously effective trusted Git hooks; checked-out branches
-cannot replace the installed snapshot. Automatic copies use `--isolated`, so
-the pinned sibling binary cannot be replaced through ambient `WAFT`, and user
-config or `WAFT_*` policy variables cannot alter selection. The installer
-refuses symlinked prior hooks and worktree-scoped hook overrides in every
-extant linked worktree. Trusted project config from the source worktree still
-applies. Re-run the command after upgrading.
+The installer builds `waft`, copies the binary and hook into the repository's
+common Git directory, and configures an absolute `core.hooksPath`. The hook
+uses the pinned binary with `--isolated`; source-project configuration still
+applies. The installer refuses symlinked prior hooks and worktree-specific
+hook overrides.
 
-Never point `core.hooksPath` directly at the tracked `hooks/` directory.
-Branch-controlled content in that directory may execute during checkout.
+Reinstall the hook after upgrading `waft`. Remove it and restore the previous
+hook configuration with:
 
-Restore the prior hook configuration with `just uninstall-hooks`.
+```sh
+just uninstall-hooks
+```
+
+Do not point `core.hooksPath` at the tracked `hooks/` directory. A checked-out
+branch can replace that directory before Git runs the hook.

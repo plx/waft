@@ -2,11 +2,11 @@
 title: ".worktreeinclude"
 sidebar:
   label: ".worktreeinclude"
-description: "The include file format used by waft."
+description: "Define file selection with .gitignore syntax."
 ---
 
-`.worktreeinclude` uses familiar `.gitignore` syntax to select ignored files
-that `waft` should copy between worktrees.
+`.worktreeinclude` patterns use `.gitignore` syntax. They select ignored files
+for `waft` to copy.
 
 ```text
 # Include environment files
@@ -16,7 +16,7 @@ that `waft` should copy between worktrees.
 # Include all secret keys recursively
 **/*.key
 
-# But not test keys
+# Exclude this test key
 !test.key
 ```
 
@@ -28,24 +28,24 @@ A file is eligible for copying only when all of these are true:
 2. It is a regular file, not a symlink, directory, or special file.
 3. It is selected by the active compatibility profile.
 4. Git confirms it is ignored and untracked.
-5. It is not dropped by the active exclusion set.
+5. It is not removed by a built-in or configured exclusion.
 
 ## Profile-dependent matching
 
-By default, the `claude` profile only consults the root-level
-`.worktreeinclude`.
+The default `claude` profile reads only the repository root
+`.worktreeinclude`. The `git` profile composes nested `.worktreeinclude` files
+like nested `.gitignore` files. The `wt` profile starts with every ignored,
+untracked file and applies worktrunk-compatible exclusions.
 
-Use `--compat-profile git` when you want nested `.worktreeinclude` files to
-compose like nested `.gitignore` files. Use `--compat-profile wt` when you want
-worktrunk-compatible all-ignored behavior.
+Select a profile with:
+
+```sh
+waft copy --compat-profile git
+```
+
+See [Profiles](../profiles/) for the full behavior matrix.
 
 ## Validation
 
-Run:
-
-```sh
-waft validate
-```
-
-Validation parses ignore files before copy execution. Copy planning remains
-read-only until the command enters the execute phase.
+`waft validate` parses `.worktreeinclude` and Git ignore files and reports
+syntax errors. It does not copy files.

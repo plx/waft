@@ -2,33 +2,34 @@
 title: "Architecture"
 sidebar:
   label: "Architecture"
-description: "How waft plans and executes safe worktree file copies."
+description: "How waft resolves policy, selects files, and publishes copies."
 ---
 
-`waft` is built around a few invariant design decisions.
+Each command resolves worktree context and policy, classifies files, and stops
+at the last phase it needs.
 
 ## Git is authoritative
 
-`waft` does not reimplement Git's ignore logic for final ignored/tracked
-decisions. Those checks go through the `GitBackend` trait.
+The `GitBackend` trait supplies final ignored and tracked status. `waft` does
+not infer either status from `.gitignore` parsing alone.
 
 - `GitGix` is the default in-process backend built on the `gix` crate.
-- `GitCli` shells out to Git and is selected with `WAFT_GIT_BACKEND=cli`.
+- `GitCli` runs Git commands. Select it with `WAFT_GIT_BACKEND=cli`.
 
 Backend parity tests keep both implementations aligned.
 
 ## `.worktreeinclude` matching is pluggable
 
-`.worktreeinclude` files use `.gitignore` syntax, but selection is handled by
-`worktreeinclude_engine`. Current engines are:
+`worktreeinclude_engine` applies `.worktreeinclude` rules independently of the
+Git backend. It provides three matchers:
 
 - `claude-2026-04`, the default root-rule-file behavior.
 - `git`, Git-style per-directory exclude semantics.
 - `wt-0.39`, worktrunk-compatible subtractive behavior.
 
-## Commands plan before executing
+## Command pipeline
 
-All commands follow a read-only planning pipeline before writes are possible.
+The pipeline is read-only through copy planning.
 
 1. Parse CLI arguments.
 2. Resolve source and destination worktree context.
@@ -38,15 +39,14 @@ All commands follow a read-only planning pipeline before writes are possible.
 6. Apply policy filters.
 7. Confirm ignored status through Git.
 8. Build a copy plan.
-9. On Unix, traverse source and destination components relative to canonical
-   worktree directory descriptors, verify planned source state, hold Git's
-   cooperative index lock across the final tracked check, and publish without
-   replacing any existing pathname.
+9. For `copy` without `--dry-run`, verify planned state and publish each file
+   without replacing an existing pathname.
 
-`list`, `info`, and `validate` never enter the execute phase.
+`validate` stops after rule parsing. `list` and `info` stop after
+classification. `copy --dry-run` stops after planning.
 
 ## Testing strategy
 
-The test suite combines unit tests, integration tests against real Git repos,
-profile coverage tests, backend parity tests, and differential/property tests
-against a Git oracle for `git` semantics.
+Tests cover pure policy and matching logic, real Git repositories, each
+profile, backend parity, and differential checks against Git for `git`
+semantics.

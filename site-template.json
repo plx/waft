@@ -8,10 +8,10 @@
     "name": "waft",
     "title": "waft",
     "package_name": "waft-site",
-    "category": "worktree-aware file tool",
-    "tagline": "Copy .worktreeinclude-selected ignored files between Git worktrees.",
-    "description": "waft is a small Rust CLI for copying selected ignored files between Git worktrees.",
-    "install_command": "cargo install waft"
+    "category": "Git worktree file copier",
+    "tagline": "Copy selected ignored files between Git worktrees.",
+    "description": "waft copies ignored, untracked files selected by .worktreeinclude between Git worktrees.",
+    "install_command": "cargo install --git https://github.com/plx/waft --rev REVIEWED_COMMIT_SHA --locked waft"
   },
   "site": {
     "host": "https://plx.github.io",
@@ -20,45 +20,94 @@
     "language": "en"
   },
   "landing": {
-    "headline": "Plan before copying.",
+    "headline": "Copy ignored files.",
     "lede": [
-      { "text": "waft", "code": true },
-      { "text": " copies " },
-      { "text": ".worktreeinclude", "code": true },
       {
-        "text": "-selected ignored files between Git worktrees."
+        "text": "waft",
+        "code": true
+      },
+      {
+        "text": " copies ignored, untracked files selected by "
+      },
+      {
+        "text": ".worktreeinclude",
+        "code": true
+      },
+      {
+        "text": " from one Git worktree to another."
       }
     ],
-    "body": "A small Rust CLI for copying selected ignored files — env files, API keys, build caches — between linked worktrees, with a plan-then-execute safety model.",
+    "body": "Use it for local configuration, caches, and tool state that you need in more than one worktree but do not want to commit.",
     "transfer": {
       "title": "What gets copied",
-      "description": ".worktreeinclude selects files using familiar gitignore syntax.",
+      "description": ".worktreeinclude patterns follow .gitignore syntax.",
       "includes": [".env", "*.env.local", "**/*.key"],
       "negation": "!test.key",
       "negation_description": "Negations remove a path from the include set."
     },
     "nav": [
-      { "label": "Overview", "href": "#main" },
-      { "label": "Usage", "href": "usage/" },
-      { "label": "Include Format", "href": "worktreeinclude/" },
-      { "label": "Safety", "href": "safety/" },
-      { "label": "Profiles", "href": "profiles/" },
-      { "label": "GitHub", "href": "https://github.com/plx/waft" }
+      {
+        "label": "Overview",
+        "href": "#main"
+      },
+      {
+        "label": "Usage",
+        "href": "usage/"
+      },
+      {
+        "label": ".worktreeinclude",
+        "href": "worktreeinclude/"
+      },
+      {
+        "label": "Safety",
+        "href": "safety/"
+      },
+      {
+        "label": "Profiles",
+        "href": "profiles/"
+      },
+      {
+        "label": "GitHub",
+        "href": "https://github.com/plx/waft"
+      }
     ],
     "footer_links": [
-      { "label": "Usage", "href": "usage/" },
-      { "label": "Include Format", "href": "worktreeinclude/" },
-      { "label": "Safety Model", "href": "safety/" },
-      { "label": "Architecture", "href": "architecture/" },
-      { "label": "Configuration", "href": "configuration/" },
-      { "label": "GitHub", "href": "https://github.com/plx/waft" }
+      {
+        "label": "Usage",
+        "href": "usage/"
+      },
+      {
+        "label": ".worktreeinclude",
+        "href": "worktreeinclude/"
+      },
+      {
+        "label": "Safety",
+        "href": "safety/"
+      },
+      {
+        "label": "Architecture",
+        "href": "architecture/"
+      },
+      {
+        "label": "Configuration",
+        "href": "configuration/"
+      },
+      {
+        "label": "GitHub",
+        "href": "https://github.com/plx/waft"
+      }
     ],
-    "primary_cta": { "label": "Read the docs", "href": "usage/" },
-    "secondary_cta": { "label": "View on GitHub", "href": "https://github.com/plx/waft" },
-    "badges": ["Rust", "CLI", "Git worktrees"],
+    "primary_cta": {
+      "label": "Usage",
+      "href": "usage/"
+    },
+    "secondary_cta": {
+      "label": "Source",
+      "href": "https://github.com/plx/waft"
+    },
     "terminal": {
       "title": "waft",
-      "meta": "copy commands",
+      "meta": "preview and copy",
       "copy": "waft copy --dry-run\nwaft copy --source ../main --dest .",
       "lines": [
         "$ waft copy --dry-run",
@@ -67,21 +116,24 @@
     },
     "features": [
       {
-        "eyebrow": "Quick start",
-        "title": "Plan before copying",
-        "body": "Add .worktreeinclude, run waft copy --dry-run, inspect the plan, then run waft copy.",
+        "eyebrow": "Usage",
+        "title": "Preview, then copy",
+        "body": "Add .worktreeinclude. Run waft copy --dry-run to inspect the plan, then run waft copy.",
+        "link_label": "Read usage",
         "href": "usage/"
       },
       {
-        "eyebrow": "Include format",
-        "title": "Select ignored files with Gitignore-style patterns",
-        "body": ".worktreeinclude chooses the ignored, untracked regular files that should move between worktrees.",
+        "eyebrow": "File selection",
+        "title": "Select files with .worktreeinclude",
+        "body": "Patterns select ignored, untracked regular files. The compatibility profile controls exact matching behavior.",
+        "link_label": "Read file selection",
         "href": "worktreeinclude/"
       },
       {
         "eyebrow": "Safety",
-        "title": "Tracked files and symlinks stay protected",
-        "body": "waft refuses tracked overwrites, source symlinks, and symlinked destination parents. Existing files require --overwrite.",
+        "title": "Reject existing destinations",
+        "body": "waft rejects source symlinks and existing destination paths. On Unix, destination traversal does not follow symlinks.",
+        "link_label": "Read safety details",
         "href": "safety/"
       }
     ]
@@ -93,43 +145,43 @@
         "slug": "usage",
         "title": "Usage",
         "sidebar_label": "Usage",
-        "description": "Copy ignored files selected by .worktreeinclude between Git worktrees.",
-        "body": "`waft` copies `.worktreeinclude`-selected ignored files between Git worktrees.\nIt is intended for local configuration, caches, and tool state that Git should\nnot track but that developers often need in more than one linked worktree.\n\n## Quick start\n\n```sh\n# In a linked worktree, copy from the main worktree automatically.\nwaft\n\n# Explicit source and destination.\nwaft copy --source /path/to/main --dest /path/to/linked\n\n# See what would be copied without writing files.\nwaft copy --dry-run\n\n# List eligible files.\nwaft list\n\n# Inspect specific files.\nwaft info .env\n\n# Validate ignore files.\nwaft validate\n```\n\n## Commands\n\n| Command | Description |\n| --- | --- |\n| `waft` / `waft copy` | Copy eligible files. This is the default command. |\n| `waft list` | List eligible files without copying. |\n| `waft info <PATH>...` | Show detailed status for specific files. |\n| `waft validate` | Check ignore files for syntax errors. |\n\n## Global options\n\n| Option | Description |\n| --- | --- |\n| `--source <PATH>` | Source, usually the main worktree path. |\n| `--dest <PATH>` | Destination, usually the linked worktree path. |\n| `-C <PATH>` | Operate as if started in `PATH`. |\n| `-q, --quiet` | Suppress non-error output. |\n| `-v, --verbose` | Increase output verbosity. |\n\n## Copy options\n\n| Option | Description |\n| --- | --- |\n| `-n, --dry-run` | Show what would be done without copying. |\n| `--overwrite` | Allow overwriting existing untracked destination files. |\n\n## Typical flow\n\n1. Add `.worktreeinclude` to the source repo.\n2. Run `waft copy --dry-run`.\n3. Inspect the plan.\n4. Run `waft copy`.\n5. Use `waft info <path>` when a file is missing or skipped.\n"
+        "description": "Install waft and run its copy, list, info, and validate commands.",
+        "body": "`waft` copies selected ignored files from one Git worktree to another. Use it\nfor local configuration, caches, and tool state that you need in more than one\nworktree but do not want to commit.\n\n## Installation\n\n`waft` is not published to crates.io. Install a reviewed commit from Git:\n\n```sh\ncargo install --git https://github.com/plx/waft \\\n  --rev REVIEWED_COMMIT_SHA --locked waft\n```\n\nSet `REVIEWED_COMMIT_SHA` to the full commit SHA. Keep `--rev` in managed\nenvironments.\n\n## Quick start\n\n1. Add `.worktreeinclude` to the source worktree:\n\n   ```text\n   .env\n   *.env.local\n   ```\n\n2. From a linked worktree, preview the copy:\n\n   ```sh\n   waft copy --dry-run\n   ```\n\n3. Review the plan, then copy:\n\n   ```sh\n   waft copy\n   ```\n\nWhen run from a linked worktree, `waft` uses the main worktree as the source\nand the current worktree as the destination. Pass both paths to override that\nresolution:\n\n```sh\nwaft copy --source /path/to/main --dest /path/to/linked\n```\n\n## Commands\n\n| Command               | Description                                       |\n| --------------------- | ------------------------------------------------- |\n| `waft` / `waft copy`  | Copy eligible files. This is the default command. |\n| `waft list`           | List eligible files without copying.              |\n| `waft info <PATH>...` | Show detailed status for specific files.          |\n| `waft validate`       | Check `.worktreeinclude` and Git ignore syntax.   |\n\n## Global options\n\n| Option                                          | Description                                                 |\n| ----------------------------------------------- | ----------------------------------------------------------- |\n| `--source <PATH>`                               | Source, usually the main worktree path.                     |\n| `--dest <PATH>`                                 | Destination, usually the linked worktree path.              |\n| `-C <PATH>`                                     | Operate as if started in `PATH`.                            |\n| `-q, --quiet`                                   | Suppress non-error output.                                  |\n| `-v, --verbose`                                 | Increase output verbosity.                                  |\n| `--copy-strategy <auto\\|simple-copy\\|cow-copy>` | Select plain-copy or copy-on-write behavior.                |\n| `--isolated`                                    | Omit user config and `WAFT_*` policy environment variables. |\n\n## Copy options\n\n| Option          | Description                                                  |\n| --------------- | ------------------------------------------------------------ |\n| `-n, --dry-run` | Show what would be done without copying.                     |\n| `--overwrite`   | Compatibility flag; fails on existing destination conflicts. |\n\n## Inspect selection\n\n```sh\nwaft list\nwaft info .env\nwaft validate\n```\n\n`list` prints eligible files. `info` explains why specific paths are selected\nor skipped. `validate` checks rule files without copying.\n\n## Optional post-checkout hook\n\nInstall the repository's post-checkout hook from a reviewed source checkout:\n\n```sh\njust install-hooks\n```\n\nThe installer builds `waft`, copies the binary and hook into the repository's\ncommon Git directory, and configures an absolute `core.hooksPath`. The hook\nuses the pinned binary with `--isolated`; source-project configuration still\napplies. The installer refuses symlinked prior hooks and worktree-specific\nhook overrides.\n\nReinstall the hook after upgrading `waft`. Remove it and restore the previous\nhook configuration with:\n\n```sh\njust uninstall-hooks\n```\n\nDo not point `core.hooksPath` at the tracked `hooks/` directory. A checked-out\nbranch can replace that directory before Git runs the hook.\n"
       },
       {
         "slug": "worktreeinclude",
         "title": ".worktreeinclude",
         "sidebar_label": ".worktreeinclude",
-        "description": "The include file format used by waft.",
-        "body": "`.worktreeinclude` uses familiar `.gitignore` syntax to select ignored files\nthat `waft` should copy between worktrees.\n\n```text\n# Include environment files\n.env\n*.env.local\n\n# Include all secret keys recursively\n**/*.key\n\n# But not test keys\n!test.key\n```\n\n## Eligibility\n\nA file is eligible for copying only when all of these are true:\n\n1. It exists in the source worktree.\n2. It is a regular file, not a symlink, directory, or special file.\n3. It is selected by the active compatibility profile.\n4. Git confirms it is ignored and untracked.\n5. It is not dropped by the active exclusion set.\n\n## Profile-dependent matching\n\nBy default, the `claude` profile only consults the root-level\n`.worktreeinclude`.\n\nUse `--compat-profile git` when you want nested `.worktreeinclude` files to\ncompose like nested `.gitignore` files. Use `--compat-profile wt` when you want\nworktrunk-compatible all-ignored behavior.\n\n## Validation\n\nRun:\n\n```sh\nwaft validate\n```\n\nValidation parses ignore files before copy execution. Copy planning remains\nread-only until the command enters the execute phase.\n"
+        "description": "Define file selection with .gitignore syntax.",
+        "body": "`.worktreeinclude` patterns use `.gitignore` syntax. They select ignored files\nfor `waft` to copy.\n\n```text\n# Include environment files\n.env\n*.env.local\n\n# Include all secret keys recursively\n**/*.key\n\n# Exclude this test key\n!test.key\n```\n\n## Eligibility\n\nA file is eligible for copying only when all of these are true:\n\n1. It exists in the source worktree.\n2. It is a regular file, not a symlink, directory, or special file.\n3. It is selected by the active compatibility profile.\n4. Git confirms it is ignored and untracked.\n5. It is not removed by a built-in or configured exclusion.\n\n## Profile-dependent matching\n\nThe default `claude` profile reads only the repository root\n`.worktreeinclude`. The `git` profile composes nested `.worktreeinclude` files\nlike nested `.gitignore` files. The `wt` profile starts with every ignored,\nuntracked file and applies worktrunk-compatible exclusions.\n\nSelect a profile with:\n\n```sh\nwaft copy --compat-profile git\n```\n\nSee [Profiles](../profiles/) for the full behavior matrix.\n\n## Validation\n\n`waft validate` parses `.worktreeinclude` and Git ignore files and reports\nsyntax errors. It does not copy files.\n"
       },
       {
         "slug": "safety",
         "title": "Safety",
         "sidebar_label": "Safety",
-        "description": "The guarantees waft keeps while copying ignored worktree files.",
-        "body": "`waft` is designed around a plan-then-execute pipeline. Discovery and\nclassification happen before any filesystem mutation.\n\n## Guarantees\n\n- **Tracked files are never overwritten.** Destination trackedness is checked\n  before copy execution.\n- **Symlink traversal is blocked.** `waft` refuses to follow symlinks in source\n  files or write through symlinked destination parents.\n- **Atomic writes.** Files are written to a temporary path and then renamed into\n  place.\n- **Dry runs are mutation-free.** `waft copy --dry-run` reads and reports only.\n\n## Preview before writing\n\n```sh\nwaft copy --dry-run\n```\n\nUse dry-run output to confirm which files would move and why.\n\n## Overwrite behavior\n\nExisting destination files are preserved by default. Use `--overwrite` only when\nyou intentionally want untracked destination files replaced.\n\n```sh\nwaft copy --overwrite\n```\n\n`--overwrite` does not change the rule that tracked files are protected.\n"
+        "description": "Understand planning, conflicts, symlink handling, and hook trust boundaries.",
+        "body": "`waft` separates read-only planning from file publication. Only `copy`\nwithout `--dry-run` publishes files.\n\n## Guarantees\n\n- **Tracked files are not overwritten.** Tracked status is checked during\n  planning and again under Git's index lock before publication.\n- **Existing paths are not replaced.** Publication uses no-clobber semantics,\n  including when `--overwrite` is supplied.\n- **Symlink traversal is blocked on Unix.** Source and destination components\n  are opened relative to canonical worktree directory handles with\n  `O_NOFOLLOW`.\n- **Publication is atomic.** Contents are synced to a temporary file before\n  publication. Parent directories are synced on Unix.\n- **Dry runs are mutation-free.** `waft copy --dry-run` reads and reports only.\n\n## Concurrent changes\n\nNormal Git writers honor the index lock and cannot change trackedness across\nthe final check and publication. Direct index edits that ignore Git's lock\nprotocol are outside this guarantee.\n\nOn Unix, directory handles prevent symlink or name swaps from redirecting a\nwrite. Another process can still relocate an already-open destination\ndirectory after final revalidation. Avoid concurrent destination directory\nmoves when pathname stability matters.\n\n`waft` reacquires the index lock for each published file. The cost scales with\nthe number of selected files and index size. Keep automatic manifests narrow,\nespecially in monorepos.\n\n## Hook trust boundary\n\nInstall the optional post-checkout hook only from a reviewed revision.\n`just install-hooks` copies the hook and a pinned `waft` binary into Git's\ncommon metadata directory and configures an absolute hook path. It rejects\nsymlinked prior hooks and worktree-specific hook overrides.\n\nThe hook runs its pinned binary with `--isolated`. Ambient `WAFT`, user config,\nand `WAFT_*` policy variables cannot change automatic execution or selection.\nSource-project configuration still applies.\n\nDo not set `core.hooksPath` to a directory inside a checked-out worktree.\nBranches can replace tracked hook content before Git invokes it.\n\n## Secrets remain secrets\n\nEvery selected file becomes another filesystem copy. Backup software,\nindexers, local agents, and anyone who can read the linked worktree may see it.\nUse secret injection or short-lived credentials for high-value secrets.\n\n## Preview before writing\n\n```sh\nwaft copy --dry-run\n```\n\nReview the selected files and the reason for each decision.\n\n## Overwrite behavior\n\nExisting destination paths are always preserved. `--overwrite` is accepted for\ncommand-line compatibility but still fails on a conflict. Review and remove a\nconflicting path explicitly before copying:\n\n```sh\nrm path/to/reviewed-conflict\nwaft copy\n```\n\n`waft` does not remove the conflict.\n"
       },
       {
         "slug": "profiles",
         "title": "Profiles",
         "sidebar_label": "Profiles",
-        "description": "Compatibility profiles for different worktree workflows.",
-        "body": "`waft` ships with coordinated compatibility profiles. Each profile selects a\nbundle of matcher and safety behavior.\n\n| Profile | Missing `.worktreeinclude` | Matcher semantics | Symlinked rule files | Tool-state excludes |\n| --- | --- | --- | --- | --- |\n| `claude` | nothing selected | `claude-2026-04` | follow | none |\n| `git` | nothing selected | `git` | ignore | none |\n| `wt` | every git-ignored untracked file selected | `wt-0.39` | follow | `tooling-v1` |\n\n## `claude`\n\nThe default profile. It matches Claude Code's out-of-the-box behavior by using\nthe repository root `.worktreeinclude`.\n\n```sh\nwaft copy --compat-profile claude\n```\n\n## `git`\n\nUse this profile when you want Git-style per-directory exclude semantics, where\npatterns are relative to the directory containing the file and deeper files can\noverride shallower files.\n\n```sh\nwaft copy --compat-profile git\n```\n\n## `wt`\n\nUse this profile for worktrunk parity. It starts from every git-ignored\nuntracked file and removes paths matched by literal-name negations.\n\n```sh\nwaft copy --compat-profile wt\n```\n"
+        "description": "Choose claude, git, or wt file-selection behavior.",
+        "body": "`--compat-profile` sets the missing-file behavior, matcher, rule-file symlink\npolicy, and built-in exclusions together.\n\n<table tabindex=\"0\" aria-label=\"Compatibility profile comparison\">\n  <thead>\n    <tr>\n      <th>Profile</th>\n      <th>\n        Missing <code>.worktreeinclude</code>\n      </th>\n      <th>Matcher semantics</th>\n      <th>Symlinked rule files</th>\n      <th>Tool-state excludes</th>\n    </tr>\n  </thead>\n  <tbody>\n    <tr>\n      <td>\n        <code>claude</code>\n      </td>\n      <td>nothing selected</td>\n      <td>\n        <code>claude-2026-04</code>\n      </td>\n      <td>follow</td>\n      <td>none</td>\n    </tr>\n    <tr>\n      <td>\n        <code>git</code>\n      </td>\n      <td>nothing selected</td>\n      <td>\n        <code>git</code>\n      </td>\n      <td>ignore</td>\n      <td>none</td>\n    </tr>\n    <tr>\n      <td>\n        <code>wt</code>\n      </td>\n      <td>every git-ignored untracked file selected</td>\n      <td>\n        <code>wt-0.39</code>\n      </td>\n      <td>follow</td>\n      <td>\n        <code>tooling-v1</code>\n      </td>\n    </tr>\n  </tbody>\n</table>\n\n## `claude`\n\n`claude` is the default. It reads only the repository root\n`.worktreeinclude` and matches the observed Claude Code behavior identified by\n`claude-2026-04`.\n\n```sh\nwaft copy --compat-profile claude\n```\n\n## `git`\n\n`git` applies per-directory exclude semantics. Patterns are relative to the\ndirectory containing the rule file, and deeper rule files override shallower\nones.\n\n```sh\nwaft copy --compat-profile git\n```\n\n## `wt`\n\n`wt` matches the observed behavior identified by `wt-0.39`. It starts with\nevery ignored, untracked file and removes paths matched by literal-name\nnegations.\n\n```sh\nwaft copy --compat-profile wt\n```\n"
       },
       {
         "slug": "configuration",
         "title": "Configuration",
         "sidebar_label": "Configuration",
-        "description": "Layered configuration and per-knob overrides.",
-        "body": "`waft` resolves profile and policy settings from multiple layers. Later layers\nwin for scalar values.\n\n1. Built-in defaults.\n2. User config: `~/.config/waft/config.toml`.\n3. Project configs: each `.waft.toml` from repo root down to the current\n   directory.\n4. Environment variables using the `WAFT_*` prefix.\n5. CLI flags.\n\nExplicit knob settings always beat preset values from a higher-precedence\nprofile layer.\n\n## Example `.waft.toml`\n\n```toml\nversion = 1\n\n[compat]\nprofile = \"git\"\n\n[exclude]\nextra = [\"*.bak\"]\n```\n\n## Per-knob CLI flags\n\n| Option | Description |\n| --- | --- |\n| `--compat-profile <claude\\|git\\|wt>` | Coordinated preset selection. |\n| `--when-missing-worktreeinclude <blank\\|all-ignored>` | Behavior when no `.worktreeinclude` exists. |\n| `--worktreeinclude-semantics <claude-2026-04\\|git\\|wt-0.39>` | Matcher semantics version. |\n| `--worktreeinclude-symlink-policy <follow\\|ignore\\|error>` | How to handle symlinked rule files. |\n| `--builtin-exclude-set <none\\|tooling-v1>` | Curated tool-state exclusion set. |\n| `--extra-exclude <GLOB>` | Repeatable additional excludes. |\n| `--replace-extra-excludes` | Drop inherited `extra-exclude` values. |\n| `--config <PATH>` | Use this file instead of the default user config. |\n"
+        "description": "Set file-selection and copy policy through config, environment, or CLI options.",
+        "body": "`waft` applies configuration in the following order. Later scalar values\noverride earlier values.\n\n1. Built-in defaults.\n2. User config: `~/.config/waft/config.toml`.\n3. Project configs: each `.waft.toml` in the resolved source worktree, from\n   its repo root down to the invocation directory's equivalent source path.\n4. Environment variables using the `WAFT_*` prefix.\n5. CLI flags.\n\n`exclude.extra` arrays append across layers. Set\n`exclude.replace_extra = true` or pass `--replace-extra-excludes` to discard\nvalues from earlier layers.\n\nProject configs must be regular files. Symlinked configs fail closed, and\ndiscovery stops at nested repositories and registered submodules.\n\nSelecting a profile resets its four settings at that layer. Explicit settings\nin the same or a later layer can override it.\n\n`--isolated` omits user configuration, `WAFT_CONFIG_PATH`, and `WAFT_*` policy\nenvironment variables. Built-in defaults, source-project configuration, CLI\noverrides, and operational Git backend selection still apply.\n\n## Example `.waft.toml`\n\n```toml\nversion = 1\n\n[compat]\nprofile = \"git\"\n\n[exclude]\nextra = [\"*.bak\"]\n\n[copy]\nstrategy = \"auto\"\n```\n\n## CLI overrides\n\n| Option                                                       | Description                                               |\n| ------------------------------------------------------------ | --------------------------------------------------------- |\n| `--compat-profile <claude\\|git\\|wt>`                         | Set the four profile-owned options.                       |\n| `--when-missing-worktreeinclude <blank\\|all-ignored>`        | Set behavior when no `.worktreeinclude` exists.           |\n| `--worktreeinclude-semantics <claude-2026-04\\|git\\|wt-0.39>` | Select the matcher.                                       |\n| `--worktreeinclude-symlink-policy <follow\\|ignore\\|error>`   | Set handling for symlinked rule files.                    |\n| `--builtin-exclude-set <none\\|tooling-v1>`                   | Select a built-in exclusion set.                          |\n| `--extra-exclude <GLOB>`                                     | Add an exclusion. Repeat the option to add more than one. |\n| `--replace-extra-excludes`                                   | Discard exclusions inherited from earlier layers.         |\n| `--copy-strategy <auto\\|simple-copy\\|cow-copy>`              | Select plain-copy or copy-on-write behavior.              |\n| `--config <PATH>`                                            | Replace user-config discovery with the specified file.    |\n| `--isolated`                                                 | Omit user config and policy environment variables.        |\n"
       },
       {
         "slug": "architecture",
         "title": "Architecture",
         "sidebar_label": "Architecture",
-        "description": "How waft plans and executes safe worktree file copies.",
-        "body": "`waft` is built around a few invariant design decisions.\n\n## Git is authoritative\n\n`waft` does not reimplement Git's ignore logic for final ignored/tracked\ndecisions. Those checks go through the `GitBackend` trait.\n\n- `GitGix` is the default in-process backend built on the `gix` crate.\n- `GitCli` shells out to Git and is selected with `WAFT_GIT_BACKEND=cli`.\n\nBackend parity tests keep both implementations aligned.\n\n## `.worktreeinclude` matching is pluggable\n\n`.worktreeinclude` files use `.gitignore` syntax, but selection is handled by\n`worktreeinclude_engine`. Current engines are:\n\n- `claude-2026-04`, the default root-rule-file behavior.\n- `git`, Git-style per-directory exclude semantics.\n- `wt-0.39`, worktrunk-compatible subtractive behavior.\n\n## Commands plan before executing\n\nAll commands follow a read-only planning pipeline before writes are possible.\n\n1. Parse CLI arguments.\n2. Resolve layered policy.\n3. Resolve source and destination worktree context.\n4. Validate ignore files.\n5. Select candidate files.\n6. Apply policy filters.\n7. Confirm ignored status through Git.\n8. Build a copy plan.\n9. Execute only for `copy` without `--dry-run`.\n\n`list`, `info`, and `validate` never enter the execute phase.\n\n## Testing strategy\n\nThe test suite combines unit tests, integration tests against real Git repos,\nprofile coverage tests, backend parity tests, and differential/property tests\nagainst a Git oracle for `git` semantics.\n"
+        "description": "How waft resolves policy, selects files, and publishes copies.",
+        "body": "Each command resolves worktree context and policy, classifies files, and stops\nat the last phase it needs.\n\n## Git is authoritative\n\nThe `GitBackend` trait supplies final ignored and tracked status. `waft` does\nnot infer either status from `.gitignore` parsing alone.\n\n- `GitGix` is the default in-process backend built on the `gix` crate.\n- `GitCli` runs Git commands. Select it with `WAFT_GIT_BACKEND=cli`.\n\nBackend parity tests keep both implementations aligned.\n\n## `.worktreeinclude` matching is pluggable\n\n`worktreeinclude_engine` applies `.worktreeinclude` rules independently of the\nGit backend. It provides three matchers:\n\n- `claude-2026-04`, the default root-rule-file behavior.\n- `git`, Git-style per-directory exclude semantics.\n- `wt-0.39`, worktrunk-compatible subtractive behavior.\n\n## Command pipeline\n\nThe pipeline is read-only through copy planning.\n\n1. Parse CLI arguments.\n2. Resolve source and destination worktree context.\n3. Resolve layered policy against that source worktree.\n4. Validate ignore files.\n5. Select candidate files.\n6. Apply policy filters.\n7. Confirm ignored status through Git.\n8. Build a copy plan.\n9. For `copy` without `--dry-run`, verify planned state and publish each file\n   without replacing an existing pathname.\n\n`validate` stops after rule parsing. `list` and `info` stop after\nclassification. `copy --dry-run` stops after planning.\n\n## Testing strategy\n\nTests cover pure policy and matching logic, real Git repositories, each\nprofile, backend parity, and differential checks against Git for `git`\nsemantics.\n"
       }
     ]
   },

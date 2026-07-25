@@ -10,9 +10,9 @@ type DocsPage = {
 
 const origin = "http://127.0.0.1:4321";
 const projectTitle = "waft";
-const landingHeadline = "Plan before copying.";
+const landingHeadline = "Copy ignored files.";
 const projectDescription =
-  "waft is a small Rust CLI for copying selected ignored files between Git worktrees.";
+  "waft copies ignored, untracked files selected by .worktreeinclude between Git worktrees.";
 const themeStorageKey = "waft-theme";
 const repositoryUrl = "https://github.com/plx/waft";
 const basePath: string = "/waft";
@@ -21,37 +21,37 @@ const normalizedBasePath = basePath === "/" ? "" : basePath;
 const docsPages: DocsPage[] = [
     {
       "title": "Usage",
-      "description": "Copy ignored files selected by .worktreeinclude between Git worktrees.",
+      "description": "Install waft and run its copy, list, info, and validate commands.",
       "slug": "usage",
       "href": "usage/"
     },
     {
       "title": ".worktreeinclude",
-      "description": "The include file format used by waft.",
+      "description": "Define file selection with .gitignore syntax.",
       "slug": "worktreeinclude",
       "href": "worktreeinclude/"
     },
     {
       "title": "Safety",
-      "description": "The guarantees waft keeps while copying ignored worktree files.",
+      "description": "Understand planning, conflicts, symlink handling, and hook trust boundaries.",
       "slug": "safety",
       "href": "safety/"
     },
     {
       "title": "Profiles",
-      "description": "Compatibility profiles for different worktree workflows.",
+      "description": "Choose claude, git, or wt file-selection behavior.",
       "slug": "profiles",
       "href": "profiles/"
     },
     {
       "title": "Configuration",
-      "description": "Layered configuration and per-knob overrides.",
+      "description": "Set file-selection and copy policy through config, environment, or CLI options.",
       "slug": "configuration",
       "href": "configuration/"
     },
     {
       "title": "Architecture",
-      "description": "How waft plans and executes safe worktree file copies.",
+      "description": "How waft resolves policy, selects files, and publishes copies.",
       "slug": "architecture",
       "href": "architecture/"
     }

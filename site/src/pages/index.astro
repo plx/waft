@@ -71,7 +71,7 @@ const attributionHref = `${siteConfig.repository.url}/blob/${siteConfig.reposito
               target="_blank"
               rel="noopener noreferrer">GitHub</a
             >
-            <a class="button button--primary" href={resolveHref(docsHref)}>Read the docs</a>
+            <a class="button button--primary" href={resolveHref(docsHref)}>Usage</a>
             <button
               class="site-nav__toggle"
               type="button"
@@ -120,10 +120,6 @@ const attributionHref = `${siteConfig.repository.url}/blob/${siteConfig.reposito
             )}
           </p>
           <p class="hero__body">{siteConfig.landing.body}</p>
-
-          <div class="badge-row" aria-label="Project highlights">
-            {siteConfig.landing.badges.map((badge) => <span class="badge">{badge}</span>)}
-          </div>
 
           <div class="hero__actions" id="install">
             <a class="button button--primary" href={resolveHref(siteConfig.landing.primaryCta.href)}>
@@ -188,7 +184,7 @@ const attributionHref = `${siteConfig.repository.url}/blob/${siteConfig.reposito
       <section class="section section--muted" id="features" aria-labelledby="features-title">
         <div class="section-shell">
           <div class="section-heading">
-            <h2 id="features-title">A plan-then-execute file tool for worktrees.</h2>
+            <h2 id="features-title">How <code>waft</code> works</h2>
           </div>
           <div class="feature-grid">
             {siteConfig.landing.features.map((feature, index) => (
@@ -197,7 +193,7 @@ const attributionHref = `${siteConfig.repository.url}/blob/${siteConfig.reposito
                 <p class="feature-card__eyebrow">{feature.eyebrow}</p>
                 <h3>{feature.title}</h3>
                 <p>{feature.body}</p>
-                <a class="text-link" href={resolveHref(feature.href)}>Learn more</a>
+                <a class="text-link" href={resolveHref(feature.href)}>{feature.linkLabel}</a>
               </article>
             ))}
           </div>
@@ -213,7 +209,7 @@ const attributionHref = `${siteConfig.repository.url}/blob/${siteConfig.reposito
             <article class="doc-card">
               <h3>{page.title}</h3>
               <p>{page.description}</p>
-              <a class="text-link" href={resolveHref(page.href)}>Open page</a>
+              <a class="text-link" href={resolveHref(page.href)}>Read {page.title}</a>
             </article>
           ))}
         </div>

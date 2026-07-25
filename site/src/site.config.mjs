@@ -12,9 +12,9 @@ export const siteConfig = {
     "name": "waft",
     "title": "waft",
     "packageName": "waft-site",
-    "category": "worktree-aware file tool",
-    "tagline": "Copy .worktreeinclude-selected ignored files between Git worktrees.",
-    "description": "waft is a small Rust CLI for copying selected ignored files between Git worktrees.",
+    "category": "Git worktree file copier",
+    "tagline": "Copy selected ignored files between Git worktrees.",
+    "description": "waft copies ignored, untracked files selected by .worktreeinclude between Git worktrees.",
     "installCommand": "cargo install --git https://github.com/plx/waft --rev REVIEWED_COMMIT_SHA --locked waft"
   },
   "site": {
@@ -25,27 +25,27 @@ export const siteConfig = {
     "language": "en"
   },
   "landing": {
-    "headline": "Plan before copying.",
+    "headline": "Copy ignored files.",
     "lede": [
       {
         "text": "waft",
         "code": true
       },
       {
-        "text": " copies "
+        "text": " copies ignored, untracked files selected by "
       },
       {
         "text": ".worktreeinclude",
         "code": true
       },
       {
-        "text": "-selected ignored files between Git worktrees."
+        "text": " from one Git worktree to another."
       }
     ],
-    "body": "A small Rust CLI for copying selected ignored files — env files, API keys, build caches — between linked worktrees, with a plan-then-execute safety model.",
+    "body": "Use it for local configuration, caches, and tool state that you need in more than one worktree but do not want to commit.",
     "transfer": {
       "title": "What gets copied",
-      "description": ".worktreeinclude selects files using familiar gitignore syntax.",
+      "description": ".worktreeinclude patterns follow .gitignore syntax.",
       "includes": [
         ".env",
         "*.env.local",
@@ -64,7 +64,7 @@ export const siteConfig = {
         "href": "usage/"
       },
       {
-        "label": "Include Format",
+        "label": ".worktreeinclude",
         "href": "worktreeinclude/"
       },
       {
@@ -86,11 +86,11 @@ export const siteConfig = {
         "href": "usage/"
       },
       {
-        "label": "Include Format",
+        "label": ".worktreeinclude",
         "href": "worktreeinclude/"
       },
       {
-        "label": "Safety Model",
+        "label": "Safety",
         "href": "safety/"
       },
       {
@@ -107,41 +107,39 @@ export const siteConfig = {
       }
     ],
     "primaryCta": {
-      "label": "Read the docs",
+      "label": "Usage",
       "href": "usage/"
     },
     "secondaryCta": {
-      "label": "View on GitHub",
+      "label": "Source",
       "href": "https://github.com/plx/waft"
     },
-    "badges": [
-      "Rust",
-      "CLI",
-      "Git worktrees"
-    ],
     "features": [
       {
-        "eyebrow": "Quick start",
-        "title": "Plan before copying",
-        "body": "Add .worktreeinclude, run waft copy --dry-run, inspect the plan, then run waft copy.",
+        "eyebrow": "Usage",
+        "title": "Preview, then copy",
+        "body": "Add .worktreeinclude. Run waft copy --dry-run to inspect the plan, then run waft copy.",
+        "linkLabel": "Read usage",
         "href": "usage/"
       },
       {
-        "eyebrow": "Include format",
-        "title": "Select ignored files with Gitignore-style patterns",
-        "body": ".worktreeinclude chooses the ignored, untracked regular files that should move between worktrees.",
+        "eyebrow": "File selection",
+        "title": "Select files with .worktreeinclude",
+        "body": "Patterns select ignored, untracked regular files. The compatibility profile controls exact matching behavior.",
+        "linkLabel": "Read file selection",
         "href": "worktreeinclude/"
       },
       {
         "eyebrow": "Safety",
-        "title": "Tracked files and symlinks stay protected",
-        "body": "waft refuses tracked overwrites, source symlinks, symlinked destination parents, and every existing destination conflict. --overwrite is accepted only as a fail-closed compatibility flag.",
+        "title": "Reject existing destinations",
+        "body": "waft rejects source symlinks and existing destination paths. On Unix, destination traversal does not follow symlinks.",
+        "linkLabel": "Read safety details",
         "href": "safety/"
       }
     ],
     "terminal": {
       "title": "waft",
-      "meta": "copy commands",
+      "meta": "preview and copy",
       "copy": "waft copy --dry-run\nwaft copy --source ../main --dest .",
       "lines": [
         "$ waft copy --dry-run",
@@ -184,37 +182,37 @@ export const siteConfig = {
     "pages": [
       {
         "title": "Usage",
-        "description": "Copy ignored files selected by .worktreeinclude between Git worktrees.",
+        "description": "Install waft and run its copy, list, info, and validate commands.",
         "slug": "usage",
         "href": "usage/"
       },
       {
         "title": ".worktreeinclude",
-        "description": "The include file format used by waft.",
+        "description": "Define file selection with .gitignore syntax.",
         "slug": "worktreeinclude",
         "href": "worktreeinclude/"
       },
       {
         "title": "Safety",
-        "description": "The guarantees waft keeps while copying ignored worktree files.",
+        "description": "Understand planning, conflicts, symlink handling, and hook trust boundaries.",
         "slug": "safety",
         "href": "safety/"
       },
       {
         "title": "Profiles",
-        "description": "Compatibility profiles for different worktree workflows.",
+        "description": "Choose claude, git, or wt file-selection behavior.",
         "slug": "profiles",
         "href": "profiles/"
       },
       {
         "title": "Configuration",
-        "description": "Layered configuration and per-knob overrides.",
+        "description": "Set file-selection and copy policy through config, environment, or CLI options.",
         "slug": "configuration",
         "href": "configuration/"
       },
       {
         "title": "Architecture",
-        "description": "How waft plans and executes safe worktree file copies.",
+        "description": "How waft resolves policy, selects files, and publishes copies.",
         "slug": "architecture",
         "href": "architecture/"
       }
