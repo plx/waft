@@ -34,7 +34,7 @@ function TransferPanel() {
     <aside className="transfer-panel">
       <h2>What gets copied</h2>
       <p>
-        <code>.worktreeinclude</code> selects files using familiar gitignore
+        <code>.worktreeinclude</code> patterns follow <code>.gitignore</code>{" "}
         syntax.
       </p>
       <div className="transfer-list">
@@ -54,22 +54,16 @@ function Hero({ onNavigate }) {
   return (
     <section className="section-shell hero" id="overview">
       <div className="hero__copy">
-        <p className="eyebrow">Worktree-aware file tool</p>
-        <h1>Plan before copying.</h1>
+        <p className="eyebrow">Git worktree file copier</p>
+        <h1>Copy ignored files.</h1>
         <p className="hero__lede">
-          <code>waft</code> copies <code>.worktreeinclude</code>-selected ignored
-          files between Git worktrees.
+          <code>waft</code> copies ignored, untracked files selected by{" "}
+          <code>.worktreeinclude</code> from one Git worktree to another.
         </p>
         <p className="hero__body">
-          A small Rust CLI for copying selected ignored files — env files, API
-          keys, build caches — between linked worktrees, with a plan-then-execute
-          safety model.
+          Use it for local configuration, caches, and tool state that you need
+          in more than one worktree but do not want to commit.
         </p>
-        <div className="badge-row">
-          <span className="badge">Rust</span>
-          <span className="badge">CLI</span>
-          <span className="badge">Git worktrees</span>
-        </div>
         <div className="hero__actions">
           <a
             href="#usage"
@@ -79,18 +73,19 @@ function Hero({ onNavigate }) {
               onNavigate("usage");
             }}
           >
-            Read the docs
+            Usage
           </a>
           <a
             href="https://github.com/plx/waft"
             className="button button--secondary"
           >
-            View on GitHub
+            Source
           </a>
         </div>
       </div>
       <div className="hero__visual">
         <TerminalCard
+          meta="preview and copy"
           lines={[
             "$ waft copy --dry-run",
             "$ waft copy --source ../main --dest .",

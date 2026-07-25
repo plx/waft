@@ -1,4 +1,4 @@
-/* @ds-bundle: {"format":4,"namespace":"WaftDesignSystem_bb1143","components":[{"name":"Badge","sourcePath":"components/Badge.jsx"},{"name":"Button","sourcePath":"components/Button.jsx"},{"name":"TerminalCard","sourcePath":"components/TerminalCard.jsx"}],"sourceHashes":{"components/Badge.jsx":"e31ecb1f06db","components/Button.jsx":"0d700d33d393","components/TerminalCard.jsx":"7f92ea08ce25","site/src/scripts/landing.ts":"4d68bda2608d","ui_kits/site/Chrome.jsx":"9de05b95496b","ui_kits/site/DocsPage.jsx":"ad5ca294ef8c","ui_kits/site/Hero.jsx":"2b0b9f412948","ui_kits/site/Sections.jsx":"0ee34205b58e"},"inlinedExternals":[],"unexposedExports":[]} */
+/* @ds-bundle: {"format":4,"namespace":"WaftDesignSystem_bb1143","components":[{"name":"Badge","sourcePath":"components/Badge.jsx"},{"name":"Button","sourcePath":"components/Button.jsx"},{"name":"TerminalCard","sourcePath":"components/TerminalCard.jsx"}],"sourceHashes":{"components/Badge.jsx":"e31ecb1f06db","components/Button.jsx":"0d700d33d393","components/TerminalCard.jsx":"7f92ea08ce25","site/src/scripts/landing.ts":"4d68bda2608d","ui_kits/site/Chrome.jsx":"9de05b95496b","ui_kits/site/DocsPage.jsx":"ad5ca294ef8c","ui_kits/site/Hero.jsx":"56a208dccd90","ui_kits/site/Sections.jsx":"0ee34205b58e"},"inlinedExternals":[],"unexposedExports":[]} */
 
 (() => {
 
@@ -781,7 +781,7 @@ function TransferPanel() {
   const includes = [".env", "*.env.local", "**/*.key"];
   return /*#__PURE__*/React.createElement("aside", {
     className: "transfer-panel"
-  }, /*#__PURE__*/React.createElement("h2", null, "What gets copied"), /*#__PURE__*/React.createElement("p", null, /*#__PURE__*/React.createElement("code", null, ".worktreeinclude"), " selects files using familiar gitignore syntax."), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("h2", null, "What gets copied"), /*#__PURE__*/React.createElement("p", null, /*#__PURE__*/React.createElement("code", null, ".worktreeinclude"), " patterns follow ", /*#__PURE__*/React.createElement("code", null, ".gitignore"), " ", "syntax."), /*#__PURE__*/React.createElement("div", {
     className: "transfer-list"
   }, includes.map(s => /*#__PURE__*/React.createElement("span", {
     key: s
@@ -799,19 +799,11 @@ function Hero({
     className: "hero__copy"
   }, /*#__PURE__*/React.createElement("p", {
     className: "eyebrow"
-  }, "Worktree-aware file tool"), /*#__PURE__*/React.createElement("h1", null, "Plan before copying."), /*#__PURE__*/React.createElement("p", {
+  }, "Git worktree file copier"), /*#__PURE__*/React.createElement("h1", null, "Copy ignored files."), /*#__PURE__*/React.createElement("p", {
     className: "hero__lede"
-  }, /*#__PURE__*/React.createElement("code", null, "waft"), " copies ", /*#__PURE__*/React.createElement("code", null, ".worktreeinclude"), "-selected ignored files between Git worktrees."), /*#__PURE__*/React.createElement("p", {
+  }, /*#__PURE__*/React.createElement("code", null, "waft"), " copies ignored, untracked files selected by", " ", /*#__PURE__*/React.createElement("code", null, ".worktreeinclude"), " from one Git worktree to another."), /*#__PURE__*/React.createElement("p", {
     className: "hero__body"
-  }, "A small Rust CLI for copying selected ignored files \u2014 env files, API keys, build caches \u2014 between linked worktrees, with a plan-then-execute safety model."), /*#__PURE__*/React.createElement("div", {
-    className: "badge-row"
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "badge"
-  }, "Rust"), /*#__PURE__*/React.createElement("span", {
-    className: "badge"
-  }, "CLI"), /*#__PURE__*/React.createElement("span", {
-    className: "badge"
-  }, "Git worktrees")), /*#__PURE__*/React.createElement("div", {
+  }, "Use it for local configuration, caches, and tool state that you need in more than one worktree but do not want to commit."), /*#__PURE__*/React.createElement("div", {
     className: "hero__actions"
   }, /*#__PURE__*/React.createElement("a", {
     href: "#usage",
@@ -820,12 +812,13 @@ function Hero({
       e.preventDefault();
       onNavigate("usage");
     }
-  }, "Read the docs"), /*#__PURE__*/React.createElement("a", {
+  }, "Usage"), /*#__PURE__*/React.createElement("a", {
     href: "https://github.com/plx/waft",
     className: "button button--secondary"
-  }, "View on GitHub"))), /*#__PURE__*/React.createElement("div", {
+  }, "Source"))), /*#__PURE__*/React.createElement("div", {
     className: "hero__visual"
   }, /*#__PURE__*/React.createElement(TerminalCard, {
+    meta: "preview and copy",
     lines: ["$ waft copy --dry-run", "$ waft copy --source ../main --dest ."],
     copyText: "waft copy --dry-run\nwaft copy --source ../main --dest ."
   }), /*#__PURE__*/React.createElement(TransferPanel, null)));
