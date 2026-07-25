@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Brand" name="brand-voice" subtitle="Voice — on-brand vs off-brand" viewport="700x260" -->
+<html><head><meta charset="utf-8"><title>Voice samples</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--waft-surface);color:var(--waft-ink);font-family:var(--waft-font-sans);font-size:13.5px;line-height:1.5}
+  .wrap{padding:22px;display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .card{padding:14px 16px;border:1px solid var(--waft-line);border-radius:8px;background:#fff;box-shadow:0 1px 2px rgb(16 24 40 / 6%)}
+  .card.bad{border-color:color-mix(in srgb,#b42323 34%,#e2e5e9);background:#fef6f6}
+  h4{margin:0 0 8px;font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:#0f6e61}
+  .card.bad h4{color:#b42323}
+  p{margin:0;color:var(--waft-ink-soft)}
+  code{font-family:var(--waft-font-mono);font-size:12px;background:var(--waft-subtle);padding:1px 5px;border-radius:3px}
+</style></head><body><div class="wrap">
+  <div class="card"><h4>✓ on-brand</h4><p>Run <code>waft copy --dry-run</code> to see which files would move.</p></div>
+  <div class="card bad"><h4>✗ off-brand</h4><p>Just run our handy dry-run command and we'll show you what's about to happen! 🎉</p></div>
+  <div class="card"><h4>✓ on-brand</h4><p><b>Tracked files are never overwritten.</b> Existing destination files are preserved by default.</p></div>
+  <div class="card bad"><h4>✗ off-brand</h4><p>Don't worry — we've got your back when it comes to keeping your work safe from accidental overwrites.</p></div>
+</div></body></html>

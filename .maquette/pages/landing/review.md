@@ -1,3 +1,6 @@
+> **Archived:** This Maquette artifact is superseded by `design-system/` and
+> must not guide production site changes.
+
 # Landing Page Review
 
 ## Status

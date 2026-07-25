@@ -1,0 +1,40 @@
+# Configuration for `cargo about generate`, used to produce
+# THIRD_PARTY_LICENSES.md. Run `just regen-licenses` to refresh; the
+# `licenses` CI job fails if the committed file is stale.
+
+# Permissive licenses that combine cleanly with waft's MIT distribution.
+# Required by current deps: MIT, Apache-2.0, BSD-3-Clause (encoding_rs),
+# Unicode-3.0 (unicode-ident), MPL-2.0 (uluru), Zlib (foldhash, zlib-rs).
+# The remainder are accepted defensively so a routine dep update with a
+# compatibly-licensed new crate doesn't break CI.
+accepted = [
+    # Order matters: when a crate is dual-licensed, cargo-about picks the
+    # first match. Most-permissive first to keep the notices file uniform.
+    "MIT",
+    "MIT-0",
+    "Unlicense",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "CC0-1.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+
+# Build- and dev-only dependencies do not ship in the binary, so they
+# do not need attribution in the user-facing notices file.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# Don't fail on platform-specific deps that we never compile against
+# (e.g. redox_syscall on Redox); we still ship for the targets below.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]

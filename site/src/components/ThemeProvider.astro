@@ -1,0 +1,65 @@
+<script is:inline>
+  window.WaftThemeProvider =
+    window.WaftThemeProvider ||
+    (() => {
+      /** @typedef {"light" | "dark" | "auto"} ThemeChoice */
+      const storageKey = "waft-theme";
+      const legacyStorageKey = "starlight-theme";
+      /** @param {unknown} value @returns {ThemeChoice} */
+      const parseTheme = (value) =>
+        value === "light" || value === "dark" || value === "auto"
+          ? value
+          : "auto";
+      const readTheme = () => {
+        try {
+          const stored = localStorage.getItem(storageKey);
+          if (stored) return parseTheme(stored);
+          return parseTheme(localStorage.getItem(legacyStorageKey));
+        } catch {
+          return "auto";
+        }
+      };
+      const preferredTheme = () =>
+        matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+      /** @param {ThemeChoice} choice */
+      const resolveTheme = (choice) =>
+        choice === "auto" ? preferredTheme() : choice;
+      /** @param {ThemeChoice} choice */
+      const updateControls = (choice) => {
+        document.querySelectorAll("[data-theme-choice]").forEach((button) => {
+          if (!(button instanceof HTMLElement)) return;
+          const isSelected = button.dataset.themeChoice === choice;
+          button.setAttribute(
+            "aria-checked",
+            String(isSelected),
+          );
+          button.setAttribute("tabindex", isSelected ? "0" : "-1");
+        });
+      };
+      /** @param {ThemeChoice} [choice] @param {boolean} [persist] */
+      const apply = (choice = readTheme(), persist = false) => {
+        const parsed = parseTheme(choice);
+        document.documentElement.dataset.theme = resolveTheme(parsed);
+        updateControls(parsed);
+        if (persist) {
+          try {
+            localStorage.setItem(storageKey, parsed);
+            localStorage.setItem(
+              legacyStorageKey,
+              parsed === "auto" ? "" : parsed,
+            );
+          } catch {
+            // Theme persistence is best-effort.
+          }
+        }
+        return parsed;
+      };
+
+      const initialTheme = apply();
+      return {
+        apply,
+        current: () => readTheme() || initialTheme,
+        updateControls,
+      };
+    })();
+</script>

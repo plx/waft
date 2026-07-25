@@ -10,8 +10,11 @@ type DocsPage = {
 
 const origin = "http://127.0.0.1:4321";
 const projectTitle = "waft";
+const landingHeadline = "Plan before copying.";
 const projectDescription =
   "waft is a small Rust CLI for copying selected ignored files between Git worktrees.";
+const themeStorageKey = "waft-theme";
+const repositoryUrl = "https://github.com/plx/waft";
 const basePath: string = "/waft";
 const normalizedBasePath = basePath === "/" ? "" : basePath;
 // prettier-ignore
@@ -84,9 +87,168 @@ test.describe("rendered site", () => {
       page.getByRole("navigation", { name: /primary/i }),
     ).toBeVisible();
     await expect(
-      page.getByRole("heading", { level: 1, name: projectTitle }),
+      page.getByRole("heading", {
+        level: 1,
+        name: landingHeadline,
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(page.locator("svg.waft-mark").first()).toBeVisible();
+    await expect(
+      page.getByRole("img", { name: "waft mark", exact: true }).first(),
     ).toBeVisible();
     await expect(page.locator(".skip-link")).toHaveAttribute("href", "#main");
+  });
+
+  test("exposes accessible theme choices and persists a manual selection", async ({
+    page,
+  }) => {
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.goto(sitePath("/"));
+
+    const themeGroup = page.getByRole("radiogroup", {
+      name: "Color theme",
+      exact: true,
+    });
+    const lightChoice = themeGroup.locator('button[data-theme-choice="light"]');
+    const darkChoice = themeGroup.locator('button[data-theme-choice="dark"]');
+    const autoChoice = themeGroup.locator('button[data-theme-choice="auto"]');
+
+    await expect(themeGroup).toBeVisible();
+    await expect(lightChoice).toHaveAccessibleName("Light");
+    await expect(darkChoice).toHaveAccessibleName("Dark");
+    await expect(autoChoice).toHaveAccessibleName("System");
+    await expect(lightChoice).toHaveAttribute("role", "radio");
+    await expect(darkChoice).toHaveAttribute("role", "radio");
+    await expect(autoChoice).toHaveAttribute("role", "radio");
+    await expect(autoChoice).toHaveAttribute("aria-checked", "true");
+    await expect(autoChoice).toHaveAttribute("tabindex", "0");
+    await expect(lightChoice).toHaveAttribute("tabindex", "-1");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+
+    await autoChoice.press("ArrowLeft");
+
+    await expect(darkChoice).toHaveAttribute("aria-checked", "true");
+    await expect(darkChoice).toBeFocused();
+
+    await lightChoice.click();
+
+    await expect(lightChoice).toHaveAttribute("aria-checked", "true");
+    await expect(darkChoice).toHaveAttribute("aria-checked", "false");
+    await expect(autoChoice).toHaveAttribute("aria-checked", "false");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    expect(
+      await page.evaluate((key) => localStorage.getItem(key), themeStorageKey),
+    ).toBe("light");
+
+    await page.reload();
+
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await expect(
+      page
+        .getByRole("radiogroup", {
+          name: "Color theme",
+          exact: true,
+        })
+        .locator('button[data-theme-choice="light"]'),
+    ).toHaveAttribute("aria-checked", "true");
+  });
+
+  test("preserves Starlight search on documentation pages", async ({
+    page,
+  }) => {
+    await page.goto(sitePath(docsPages[0]?.href));
+
+    const search = page.getByRole("button", { name: "Search" });
+    await expect(search).toBeVisible();
+    await expect(search).toBeEnabled();
+    await expect(page.getByRole("link", { name: "Edit page" })).toHaveAttribute(
+      "href",
+      `${repositoryUrl}/edit/main/site/src/content/docs/usage.mdx`,
+    );
+  });
+
+  test("carries the selected theme from the landing page to docs", async ({
+    page,
+  }) => {
+    await page.emulateMedia({ colorScheme: "light" });
+    await page.goto(sitePath("/"));
+
+    const darkChoice = page
+      .getByRole("radiogroup", {
+        name: "Color theme",
+        exact: true,
+      })
+      .locator('button[data-theme-choice="dark"]');
+    await darkChoice.click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+
+    await page.goto(sitePath(docsPages[0]?.href));
+
+    await expect(page.getByRole("main")).toBeVisible();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    expect(
+      await page.evaluate((key) => localStorage.getItem(key), themeStorageKey),
+    ).toBe("dark");
+
+    await page.goto(sitePath("/"));
+
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expect(
+      page
+        .getByRole("radiogroup", {
+          name: "Color theme",
+          exact: true,
+        })
+        .locator('button[data-theme-choice="dark"]'),
+    ).toHaveAttribute("aria-checked", "true");
+  });
+
+  test("keeps focus-ring contrast above 3:1 in both themes", async ({
+    page,
+  }) => {
+    for (const theme of ["light", "dark"] as const) {
+      await page.goto(sitePath("/"));
+      await page.evaluate(
+        ({ key, value }) => localStorage.setItem(key, value),
+        { key: themeStorageKey, value: theme },
+      );
+      await page.reload();
+
+      const ratio = await page.evaluate(() => {
+        const styles = getComputedStyle(document.documentElement);
+        const parseHex = (value: string): number[] => {
+          const hex = value.trim().replace("#", "");
+          return [0, 2, 4].map((offset) =>
+            Number.parseInt(hex.slice(offset, offset + 2), 16),
+          );
+        };
+        const luminance = (rgb: number[]): number => {
+          const linear = rgb.map((channel) => {
+            const value = channel / 255;
+            return value <= 0.04045
+              ? value / 12.92
+              : ((value + 0.055) / 1.055) ** 2.4;
+          });
+          return (
+            0.2126 * (linear[0] ?? 0) +
+            0.7152 * (linear[1] ?? 0) +
+            0.0722 * (linear[2] ?? 0)
+          );
+        };
+        const focus = luminance(
+          parseHex(styles.getPropertyValue("--waft-focus")),
+        );
+        const surface = luminance(
+          parseHex(styles.getPropertyValue("--waft-surface")),
+        );
+        return (
+          (Math.max(focus, surface) + 0.05) / (Math.min(focus, surface) + 0.05)
+        );
+      });
+
+      expect(ratio, `${theme} focus ring contrast`).toBeGreaterThanOrEqual(3);
+    }
   });
 
   test("keeps primary pages inside the viewport", async ({ page }) => {
@@ -124,10 +286,46 @@ test.describe("rendered site", () => {
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-expanded", "true");
     await expect(panel).toBeVisible();
+    await expect(
+      page.getByRole("navigation", { name: "Mobile navigation" }),
+    ).toBeVisible();
 
+    const firstLink = panel.getByRole("link").first();
+    await firstLink.focus();
+    await expect(firstLink).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(toggle).toHaveAttribute("aria-expanded", "false");
     await expect(panel).toBeHidden();
+    await expect(toggle).toBeFocused();
+  });
+
+  test("keeps a theme control on the mobile 404 page", async ({ page }) => {
+    const response = await page.goto(sitePath("missing-page/"));
+    expect(response?.status()).toBe(404);
+    await expect(
+      page.getByRole("radiogroup", {
+        name: "Color theme",
+        exact: true,
+      }),
+    ).toBeVisible();
+  });
+
+  test("prints documentation with the light palette and no controls", async ({
+    page,
+  }) => {
+    await page.addInitScript(
+      (key) => localStorage.setItem(key, "dark"),
+      themeStorageKey,
+    );
+    await page.emulateMedia({ media: "print", colorScheme: "dark" });
+    await page.goto(sitePath(docsPages[0]?.href));
+
+    await expect(page.locator("html")).toHaveCSS("color-scheme", "light");
+    await expect(page.locator(".waft-doc-actions")).toBeHidden();
+    await expect(page.locator(".waft-doc-title")).toHaveCSS(
+      "color",
+      "rgb(31, 35, 40)",
+    );
   });
 
   test("validates rendered links and internal link targets", async ({
@@ -210,14 +408,25 @@ test.describe("rendered site", () => {
     expect(failures).toEqual([]);
   });
 
-  for (const pagePath of pagesToAudit) {
-    test(`has no detectable accessibility violations on ${pagePath}`, async ({
+  for (const theme of ["light", "dark"] as const) {
+    test(`has no detectable accessibility violations in ${theme} mode`, async ({
       page,
     }) => {
-      await page.goto(sitePath(pagePath));
+      await page.addInitScript(
+        ({ key, value }) => localStorage.setItem(key, value),
+        { key: themeStorageKey, value: theme },
+      );
 
-      const results = await new AxeBuilder({ page }).analyze();
-      expect(results.violations).toEqual([]);
+      for (const pagePath of pagesToAudit) {
+        await page.goto(sitePath(pagePath));
+        await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
+
+        const results = await new AxeBuilder({ page }).analyze();
+        expect(
+          results.violations,
+          `${pagePath} should have no Axe violations in ${theme} mode`,
+        ).toEqual([]);
+      }
     });
   }
 });

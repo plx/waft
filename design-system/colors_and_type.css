@@ -1,0 +1,252 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   Waft Design Tokens — colors, type, spacing, elevation
+   Canonical token contract for waft web surfaces
+   ────────────────────────────────────────────────────────────────────── */
+
+/* Fonts — pull from Google Fonts CDN (matches site/Astro build) */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+
+:root {
+  color-scheme: light;
+
+  /* ── Brand color tokens ── */
+  --waft-accent:        #16a085;  /* primary teal */
+  --waft-accent-dark:   #0f6e61;  /* primary teal — hover/text on light bg */
+  --waft-accent-2:      #d6c24a;  /* mustard accent — secondary stroke */
+  --waft-accent-soft:   #dff5f1;  /* tinted teal wash */
+  --waft-air-soft:      #fff8c9;  /* tinted mustard wash */
+  --waft-focus:         #0f6e61;  /* opaque keyboard-focus ring */
+
+  /* Neutrals */
+  --waft-ink:           #1f2328;  /* primary text */
+  --waft-ink-soft:      #3d4650;  /* secondary text */
+  --waft-muted:         #6b7280;  /* tertiary / meta */
+  --waft-surface:       #f7f8f6;  /* page background */
+  --waft-panel:         #ffffff;  /* cards, header, menus */
+  --waft-subtle:        #eef2f1;  /* inset/quiet fill */
+  --waft-line:          #e2e5e9;  /* hairline */
+  --waft-line-strong:   #c8cdd3;  /* divider */
+
+  /* Code / terminal surface — theme-aware (light in light mode, dark in dark) */
+  --waft-code:          #151a1f;  /* legacy dark chip value (favicon, fixed marks) */
+  --waft-code-bg:       #f3f5f4;  /* terminal + code-block surface */
+  --waft-code-fg:       #1f2328;  /* code text — mirrors --waft-ink */
+  --waft-code-btn:      #ffffff;  /* copy-button fill inside terminal */
+  --waft-code-neg:      #b42323;  /* negation / error token in code */
+
+  /* Brand mark — chip-less, theme-aware strokes */
+  --waft-mark-2:        #a8871f;  /* mustard Y, darkened for light surfaces */
+
+  /* Semantic */
+  --waft-error:         #b42323;
+  --waft-error-bg:      #fce4e4;
+
+  /* Shape */
+  --waft-radius:        8px;
+  --waft-radius-sm:     4px;
+
+  /* Elevation */
+  --waft-shadow:        0 1px 2px rgb(16 24 40 / 6%);
+  --waft-shadow-pop:    0 8px 24px rgb(31 35 40 / 12%);
+
+  /* ── Typography ── */
+  --waft-font-sans:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --waft-font-mono:
+    "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  /* Type scale (computed from landing.css usage) — @kind font */
+  --fs-display:   clamp(3rem, 8vw, 6rem);    /* @kind font */ /* hero h1 */
+  --fs-h2:        clamp(1.75rem, 4vw, 2.75rem); /* @kind font */
+  --fs-h3:        1.2rem;                     /* @kind font */ /* card headings */
+  --fs-lede:      1.125rem;                   /* @kind font */
+  --fs-body:      1rem;                       /* @kind font */
+  --fs-sm:        0.875rem;                   /* @kind font */ /* button / nav link */
+  --fs-xs:        0.75rem;                    /* @kind font */ /* badge, copy button */
+  --fs-eyebrow:   0.7rem;                     /* @kind font */ /* uppercase eyebrows */
+
+  --lh-tight:     0.95;     /* @kind font */ /* display */
+  --lh-snug:      1.08;     /* @kind font */ /* h2 */
+  --lh-base:      1.5;      /* @kind font */ /* body */
+  --lh-relaxed:   1.55;     /* @kind font */ /* lede */
+
+  --fw-regular:   400;      /* @kind font */
+  --fw-medium:    500;      /* @kind font */
+  --fw-semi:      600;      /* @kind font */
+  --fw-bold:      700;      /* @kind font */
+  --fw-black:     800;      /* @kind font */ /* brand/eyebrow/h1 */
+
+  /* Spacing — site uses informal rems; document the recurring beats */
+  --sp-1:  0.25rem;
+  --sp-2:  0.5rem;
+  --sp-3:  0.75rem;
+  --sp-4:  1rem;
+  --sp-5:  1.5rem;
+  --sp-6:  2rem;
+  --sp-7:  2.5rem;
+  --sp-8:  3.5rem;     /* section padding-block */
+  --sp-9:  4rem;       /* hero padding-top */
+
+  /* Containers */
+  --container-max: 1220px;  /* @kind spacing */
+}
+
+/* ── Dark theme ──────────────────────────────────────────────────────────
+   Applied when a control sets data-theme="dark" on <html>, or when the theme
+   choice is "auto" and the OS prefers dark. Keep the two token blocks below
+   identical. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --waft-accent:       #8fd7cc;
+  --waft-accent-dark:  #8fd7cc;
+  --waft-accent-soft:  rgb(22 160 133 / 16%);
+  --waft-air-soft:     rgb(214 194 74 / 16%);
+  --waft-focus:        #8fd7cc;
+  --waft-ink:          #f8fafc;
+  --waft-ink-soft:     #cbd5dc;
+  --waft-muted:        #93a0aa;
+  --waft-surface:      #101512;
+  --waft-panel:        #19201d;
+  --waft-subtle:       #141a17;
+  --waft-line:         rgb(248 250 252 / 14%);
+  --waft-line-strong:  rgb(248 250 252 / 22%);
+  --waft-code:         #151a1f;
+  --waft-code-bg:      #151a1f;
+  --waft-code-fg:      #f8fafc;
+  --waft-code-btn:     rgb(248 250 252 / 6%);
+  --waft-code-neg:     #fca5a5;
+  --waft-mark-2:       #d6c24a;
+  --waft-error:        #fca5a5;
+  --waft-error-bg:     rgb(180 35 35 / 22%);
+  --waft-shadow:       0 1px 2px rgb(0 0 0 / 24%);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] {
+    color-scheme: dark;
+    --waft-accent:       #8fd7cc;
+    --waft-accent-dark:  #8fd7cc;
+    --waft-accent-soft:  rgb(22 160 133 / 16%);
+    --waft-air-soft:     rgb(214 194 74 / 16%);
+    --waft-focus:        #8fd7cc;
+    --waft-ink:          #f8fafc;
+    --waft-ink-soft:     #cbd5dc;
+    --waft-muted:        #93a0aa;
+    --waft-surface:      #101512;
+    --waft-panel:        #19201d;
+    --waft-subtle:       #141a17;
+    --waft-line:         rgb(248 250 252 / 14%);
+    --waft-line-strong:  rgb(248 250 252 / 22%);
+    --waft-code:         #151a1f;
+    --waft-code-bg:      #151a1f;
+    --waft-code-fg:      #f8fafc;
+    --waft-code-btn:     rgb(248 250 252 / 6%);
+    --waft-code-neg:     #fca5a5;
+    --waft-mark-2:       #d6c24a;
+    --waft-error:        #fca5a5;
+    --waft-error-bg:     rgb(180 35 35 / 22%);
+    --waft-shadow:       0 1px 2px rgb(0 0 0 / 24%);
+  }
+}
+
+/* Printed docs are always rendered on a light surface, even when the saved
+   browser preference is dark. */
+@media print {
+  :root,
+  :root[data-theme="dark"],
+  :root[data-theme="auto"] {
+    color-scheme: light;
+    --waft-accent:       #16a085;
+    --waft-accent-dark:  #0f6e61;
+    --waft-accent-soft:  #dff5f1;
+    --waft-air-soft:     #fff8c9;
+    --waft-focus:        #0f6e61;
+    --waft-ink:          #1f2328;
+    --waft-ink-soft:     #3d4650;
+    --waft-muted:        #6b7280;
+    --waft-surface:      #f7f8f6;
+    --waft-panel:        #ffffff;
+    --waft-subtle:       #eef2f1;
+    --waft-line:         #e2e5e9;
+    --waft-line-strong:  #c8cdd3;
+    --waft-code:         #151a1f;
+    --waft-code-bg:      #f3f5f4;
+    --waft-code-fg:      #1f2328;
+    --waft-code-btn:     #ffffff;
+    --waft-code-neg:     #b42323;
+    --waft-mark-2:       #a8871f;
+    --waft-error:        #b42323;
+    --waft-error-bg:     #fce4e4;
+    --waft-shadow:       none;
+    --waft-shadow-pop:   none;
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Semantic element styles — drop these onto a host page to get the look.
+   ────────────────────────────────────────────────────────────────────── */
+
+.waft-body,
+body.waft {
+  margin: 0;
+  background: var(--waft-surface);
+  color: var(--waft-ink);
+  font-family: var(--waft-font-sans);
+  font-size: var(--fs-body);
+  line-height: var(--lh-base);
+}
+
+.waft h1, h1.waft {
+  margin: 0;
+  font-size: var(--fs-display);
+  line-height: var(--lh-tight);
+  font-weight: var(--fw-black);
+  letter-spacing: -0.01em;
+}
+
+.waft h2, h2.waft {
+  margin: 0;
+  font-size: var(--fs-h2);
+  line-height: var(--lh-snug);
+  font-weight: var(--fw-black);
+}
+
+.waft h3, h3.waft {
+  margin: 0;
+  font-size: var(--fs-h3);
+  line-height: 1.2;
+  font-weight: var(--fw-bold);
+}
+
+.waft .eyebrow, .eyebrow.waft {
+  margin: 0 0 var(--sp-4);
+  color: var(--waft-accent-dark);
+  font-size: var(--fs-eyebrow);
+  font-weight: var(--fw-black);
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.waft .lede, .lede.waft {
+  color: var(--waft-ink-soft);
+  font-size: var(--fs-lede);
+  font-weight: var(--fw-medium);
+  line-height: var(--lh-relaxed);
+}
+
+.waft p, p.waft {
+  color: var(--waft-ink);
+  line-height: var(--lh-base);
+}
+
+.waft code, code.waft,
+.waft pre, pre.waft {
+  font-family: var(--waft-font-mono);
+}
+
+.waft a, a.waft {
+  color: var(--waft-accent-dark);
+  font-weight: var(--fw-bold);
+  text-underline-offset: 3px;
+}

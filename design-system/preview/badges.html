@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Components" name="badges" subtitle="Tag, eligible, excluded, index" viewport="700x230" -->
+<html><head><meta charset="utf-8"><title>Badges & pills</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--waft-surface);color:var(--waft-ink);font-family:var(--waft-font-sans)}
+  .wrap{padding:22px;display:flex;flex-direction:column;gap:14px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .label{font-family:var(--waft-font-mono);font-size:10.5px;color:var(--waft-muted);text-transform:uppercase;letter-spacing:.04em;font-weight:700;min-width:96px}
+  .badge{display:inline-flex;align-items:center;min-height:28px;padding:0 9px;border:1px solid var(--waft-line);border-radius:4px;background:#fff;color:var(--waft-muted);font-family:var(--waft-font-mono);font-size:12px;font-weight:600}
+  .badge--accent{color:#0f6e61;border-color:color-mix(in srgb,#16a085 42%,transparent);background:#dff5f1}
+  .badge--warn{color:#b42323;border-color:color-mix(in srgb,#b42323 34%,#e2e5e9);background:#fce4e4}
+  .idx{width:1.75rem;height:1.75rem;display:inline-grid;place-items:center;border:1px solid color-mix(in srgb,#16a085 42%,transparent);border-radius:4px;color:#0f6e61;font-family:var(--waft-font-mono);font-size:12px;font-weight:800}
+</style></head><body><div class="wrap">
+  <div class="row"><span class="label">tag</span><span class="badge">Rust</span><span class="badge">CLI</span><span class="badge">Git worktrees</span></div>
+  <div class="row"><span class="label">eligible</span><span class="badge--accent badge">.env</span><span class="badge--accent badge">*.env.local</span><span class="badge--accent badge">**/*.key</span></div>
+  <div class="row"><span class="label">excluded</span><span class="badge--warn badge">!test.key</span><span class="badge--warn badge">tooling-v1</span></div>
+  <div class="row"><span class="label">index</span><span class="idx">01</span><span class="idx">02</span><span class="idx">03</span></div>
+</div></body></html>

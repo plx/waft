@@ -2,9 +2,6 @@ import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 import { siteConfig } from "./src/site.config.mjs";
 
-const fontStylesheetUrl =
-  "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap";
-
 const basePath =
   siteConfig.site.basePath === "/" ? "" : siteConfig.site.basePath;
 /** @param {string} path */
@@ -18,9 +15,12 @@ export default defineConfig({
     starlight({
       title: siteConfig.project.title,
       description: siteConfig.project.description,
-      logo: {
-        src: "./src/assets/tool-mark.svg",
-        alt: "",
+      components: {
+        Header: "./src/components/StarlightHeader.astro",
+        MobileMenuFooter: "./src/components/StarlightMobileMenuFooter.astro",
+        SiteTitle: "./src/components/StarlightSiteTitle.astro",
+        ThemeProvider: "./src/components/ThemeProvider.astro",
+        ThemeSelect: "./src/components/ThemeToggle.astro",
       },
       customCss: ["./src/styles/starlight.css"],
       head: [
@@ -36,7 +36,6 @@ export default defineConfig({
             crossorigin: "",
           },
         },
-        { tag: "link", attrs: { rel: "stylesheet", href: fontStylesheetUrl } },
         {
           tag: "link",
           attrs: {
@@ -46,15 +45,8 @@ export default defineConfig({
           },
         },
       ],
-      social: [
-        {
-          icon: "github",
-          label: "GitHub",
-          href: siteConfig.repository.url,
-        },
-      ],
       editLink: {
-        baseUrl: `${siteConfig.repository.url}/edit/${siteConfig.repository.defaultBranch}/site/src/content/docs/`,
+        baseUrl: `${siteConfig.repository.url}/edit/${siteConfig.repository.defaultBranch}/site/`,
       },
       sidebar: siteConfig.docs.sidebar,
     }),

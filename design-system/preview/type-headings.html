@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Type" name="type-headings" subtitle="h2 / h3 / lede / body / small" viewport="700x280" -->
+<html><head><meta charset="utf-8"><title>Headings</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--waft-surface);color:var(--waft-ink);font-family:var(--waft-font-sans)}
+  .wrap{padding:22px;display:flex;flex-direction:column;gap:14px}
+  .row{display:flex;align-items:baseline;gap:18px}
+  .row .label{font-family:var(--waft-font-mono);font-size:10.5px;color:var(--waft-muted);min-width:62px;text-transform:uppercase;font-weight:700;letter-spacing:.04em}
+  .h2{font-size:32px;line-height:1.08;font-weight:800;margin:0}
+  .h3{font-size:19.2px;line-height:1.2;font-weight:700;margin:0}
+  .lede{font-size:18px;line-height:1.55;font-weight:500;color:var(--waft-ink-soft);margin:0}
+  .body{font-size:16px;line-height:1.5;margin:0}
+  .small{font-size:14px;line-height:1.5;color:var(--waft-ink-soft);margin:0}
+</style></head><body><div class="wrap">
+  <div class="row"><span class="label">h2</span><p class="h2">Compatibility profiles</p></div>
+  <div class="row"><span class="label">h3</span><p class="h3">Plan before copying</p></div>
+  <div class="row"><span class="label">lede</span><p class="lede">A small Rust CLI for copying selected ignored files between worktrees.</p></div>
+  <div class="row"><span class="label">body</span><p class="body">Tracked files are never overwritten in the destination worktree.</p></div>
+  <div class="row"><span class="label">small</span><p class="small">Use <code>--compat-profile git</code> for Git-style semantics.</p></div>
+</div></body></html>

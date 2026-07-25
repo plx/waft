@@ -27,7 +27,11 @@ navLinks.forEach((link) => {
 
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    const shouldRestoreFocus = navPanel?.contains(document.activeElement);
     setNavOpen(false);
+    if (shouldRestoreFocus) {
+      navToggle?.focus();
+    }
   }
 });
 

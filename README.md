@@ -203,6 +203,21 @@ waft reacquires the lock and rechecks the index for each published file. That
 cost is proportional to selected files times index size; keep automatic
 manifests narrow and benchmark large cache manifests in monorepos.
 
+## Website development
+
+The production Astro/Starlight site lives in [`site/`](site/). Its visual,
+component, and content-voice source of truth is the
+[`design-system/`](design-system/) directory. Read
+[`AGENTS.md`](AGENTS.md), [`design-system/SKILL.md`](design-system/SKILL.md),
+and [`design-system/README.md`](design-system/README.md) before changing the
+site.
+
+Run the complete site validation from `site/`:
+
+```sh
+npm run validate
+```
+
 ## Building
 
 ```sh

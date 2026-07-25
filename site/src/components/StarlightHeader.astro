@@ -1,0 +1,177 @@
+---
+import SiteTitle from "./StarlightSiteTitle.astro";
+import ThemeToggle from "./ThemeToggle.astro";
+import { siteConfig } from "../site.config.mjs";
+import Search from "@astrojs/starlight/components/Search.astro";
+import StarlightTableAccessibility from "./StarlightTableAccessibility.astro";
+
+const siteBase = import.meta.env.BASE_URL.endsWith("/")
+  ? import.meta.env.BASE_URL
+  : `${import.meta.env.BASE_URL}/`;
+const sitePath = (path: string = "") =>
+  `${siteBase}${path.replace(/^\/+/, "")}`;
+const navLinks = siteConfig.landing.nav.filter(
+  (link) => !/^https?:\/\//.test(link.href),
+);
+const docsHref = siteConfig.docs.pages[0]?.href || "usage/";
+const currentPath = Astro.url.pathname;
+const isCurrent = (href: string) =>
+  href.startsWith("#")
+    ? false
+    : currentPath === new URL(sitePath(href), Astro.url).pathname;
+---
+
+<div class="waft-doc-header">
+  <StarlightTableAccessibility />
+  <SiteTitle />
+  <nav class="waft-doc-nav" aria-label="Primary navigation">
+    {
+      navLinks.map((link) => (
+        <a
+          class:list={["waft-doc-nav__link", { "is-active": isCurrent(link.href) }]}
+          href={link.href.startsWith("#") ? sitePath(link.href) : sitePath(link.href)}
+          aria-current={isCurrent(link.href) ? "page" : undefined}
+        >
+          {link.label}
+        </a>
+      ))
+    }
+  </nav>
+  <div class="waft-doc-actions">
+    <div class="waft-doc-search">
+      <Search />
+    </div>
+    <ThemeToggle />
+    <a
+      class="waft-doc-button waft-doc-button--secondary"
+      href={siteConfig.repository.url}
+      target="_blank"
+      rel="noopener noreferrer">GitHub</a
+    >
+    <a
+      class="waft-doc-button waft-doc-button--primary"
+      href={sitePath(docsHref)}>Read the docs</a
+    >
+  </div>
+</div>
+
+<style>
+  .waft-doc-header {
+    width: min(1220px, 100%);
+    height: 100%;
+    margin-inline: auto;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+  }
+
+  .waft-doc-nav {
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-inline: auto;
+  }
+
+  .waft-doc-nav__link {
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 0.55rem;
+    border-radius: var(--waft-radius-sm);
+    color: var(--waft-ink);
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-decoration: none;
+  }
+
+  .waft-doc-nav__link:hover,
+  .waft-doc-nav__link:focus-visible,
+  .waft-doc-nav__link.is-active {
+    background: color-mix(in srgb, var(--waft-accent) 8%, transparent);
+    outline: 2px solid var(--waft-focus);
+    outline-offset: 2px;
+  }
+
+  .waft-doc-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .waft-doc-search {
+    width: clamp(2.5rem, 11vw, 9rem);
+  }
+
+  .waft-doc-button {
+    min-height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 0.9rem;
+    border: 1px solid var(--waft-line);
+    border-radius: var(--waft-radius-sm);
+    background: var(--waft-panel);
+    color: var(--waft-ink);
+    font: 700 0.875rem/1 var(--waft-font-sans);
+    text-decoration: none;
+    white-space: nowrap;
+    box-shadow: var(--waft-shadow);
+  }
+
+  .waft-doc-button:hover,
+  .waft-doc-button:focus-visible {
+    outline: 2px solid var(--waft-focus);
+    outline-offset: 2px;
+  }
+
+  .waft-doc-button--secondary {
+    background: var(--waft-surface);
+  }
+
+  .waft-doc-button--primary {
+    border-color: var(--waft-accent-dark);
+    background: var(--waft-accent-dark);
+    color: var(--waft-surface);
+  }
+
+  @media (max-width: 68rem) {
+    .waft-doc-nav,
+    .waft-doc-button {
+      display: none;
+    }
+
+    .waft-doc-actions {
+      margin-inline-start: auto;
+    }
+  }
+
+  @media (max-width: 50rem) {
+    .waft-doc-actions {
+      padding-inline-end: 2.75rem;
+    }
+
+    .waft-doc-search {
+      width: auto;
+    }
+  }
+
+  @media (max-width: 31rem) {
+    :global(:root[data-has-sidebar])
+      .waft-doc-actions
+      :global(waft-theme-toggle) {
+      display: none;
+    }
+  }
+
+  @media print {
+    .waft-doc-header {
+      width: 100%;
+    }
+
+    .waft-doc-nav,
+    .waft-doc-actions {
+      display: none;
+    }
+  }
+</style>

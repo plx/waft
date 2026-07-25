@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Components" name="terminal-card" subtitle="Hero terminal block — theme-aware" viewport="700x220" -->
+<html data-theme="auto"><head><meta charset="utf-8"><title>Terminal card</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--waft-surface);color:var(--waft-ink);font-family:var(--waft-font-sans)}
+  .wrap{padding:22px}
+  .term{overflow:hidden;border:1px solid var(--waft-line);border-radius:8px;background:var(--waft-code-bg);color:var(--waft-code-fg);box-shadow:var(--waft-shadow);font-family:var(--waft-font-mono);font-size:13px;line-height:1.55}
+  .hd{min-height:40px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 14px;border-bottom:1px solid var(--waft-line);font-family:var(--waft-font-sans);color:var(--waft-ink-soft)}
+  .hd h2{margin:0;color:var(--waft-code-fg);font-size:14px;font-weight:700}
+  .hd .eb{margin:0 0 2px;color:var(--waft-ink-soft);font-size:10.5px;text-transform:uppercase;font-weight:800;letter-spacing:.04em}
+  .hd .meta{color:var(--waft-ink-soft);font-family:var(--waft-font-mono);font-size:11.5px}
+  pre{margin:0;padding:14px;overflow-x:auto;white-space:pre-wrap;color:var(--waft-code-fg)}
+  pre code::first-letter{color:var(--waft-accent-dark)}
+  .copy{display:inline-flex;align-items:center;gap:6px;min-height:28px;margin:0 0 14px 14px;padding:0 10px;border:1px solid var(--waft-line);border-radius:4px;background:var(--waft-code-btn);color:var(--waft-code-fg);font-family:var(--waft-font-mono);font-size:11.5px;cursor:pointer}
+</style></head><body><div class="wrap"><div class="term">
+  <div class="hd"><div><p class="eb">Terminal</p><h2>waft</h2></div><span class="meta">copy commands</span></div>
+  <pre><code>$ waft copy --dry-run
+$ waft copy --source ../main --dest .</code></pre>
+  <button class="copy">Copy</button>
+</div></div></body></html>

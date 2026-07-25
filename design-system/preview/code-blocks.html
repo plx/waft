@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<!-- @dsCard group="Components" name="code-blocks" subtitle="MDX docs body + theme-aware code block" viewport="700x340" -->
+<html data-theme="auto"><head><meta charset="utf-8"><title>Code & docs typography</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  html,body{margin:0;background:var(--waft-surface);color:var(--waft-ink);font-family:var(--waft-font-sans);font-size:14px;line-height:1.5}
+  .wrap{padding:22px}
+  h3{margin:0 0 6px;font-size:16px;font-weight:700}
+  p{margin:0 0 10px;color:var(--waft-ink)}
+  ol{margin:0 0 10px;padding-left:20px;color:var(--waft-ink)}
+  ol li{margin:2px 0}
+  code{font-family:var(--waft-font-mono);font-size:12.5px;background:var(--waft-subtle);padding:1px 5px;border-radius:3px}
+  pre{margin:6px 0 0;padding:12px 14px;background:var(--waft-code-bg);color:var(--waft-code-fg);border:1px solid var(--waft-line);border-radius:8px;font-family:var(--waft-font-mono);font-size:12.5px;line-height:1.55;overflow:auto}
+  .neg{color:var(--waft-code-neg)}
+  .cmt{color:var(--waft-ink-soft)}
+  .acc{color:var(--waft-accent-dark)}
+</style></head><body><div class="wrap">
+  <h3>Eligibility</h3>
+  <p>A file is eligible for copying only when all of these are true:</p>
+  <ol>
+    <li>It exists in the source worktree.</li>
+    <li>It is a regular file, not a symlink.</li>
+    <li>It is selected by the active <code>compat-profile</code>.</li>
+  </ol>
+<pre><span class="cmt"># Include environment files</span>
+.env
+*.env.local
+
+<span class="cmt"># All keys recursively</span>
+**/*.key
+
+<span class="cmt"># But not test keys</span>
+<span class="neg">!test.key</span></pre>
+</div></body></html>
