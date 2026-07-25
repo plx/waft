@@ -168,6 +168,46 @@ test.describe("rendered site", () => {
     );
   });
 
+  test("opens the documentation sidebar from the mobile menu", async ({
+    page,
+  }) => {
+    await page.goto(sitePath(docsPages[0]?.href));
+
+    const menu = page.getByRole("button", { name: "Menu", exact: true });
+    const sidebar = page.locator("#starlight__sidebar");
+    const compactNavigation = (page.viewportSize()?.width ?? 0) < 800;
+
+    if (!compactNavigation) {
+      await expect(menu).toBeHidden();
+      await expect(sidebar).toBeVisible();
+      return;
+    }
+
+    await expect(menu).toBeVisible();
+    await expect(menu).toHaveAttribute("aria-controls", "starlight__sidebar");
+    await expect(sidebar).toBeHidden();
+
+    await menu.click();
+
+    await expect(page.locator("body")).toHaveAttribute(
+      "data-mobile-menu-expanded",
+      "",
+    );
+    await expect(sidebar).toBeVisible();
+    await expect(
+      sidebar.getByRole("link", { name: "Usage", exact: true }),
+    ).toBeVisible();
+
+    await page.keyboard.press("Escape");
+
+    await expect(page.locator("body")).not.toHaveAttribute(
+      "data-mobile-menu-expanded",
+      "",
+    );
+    await expect(sidebar).toBeHidden();
+    await expect(menu).toBeFocused();
+  });
+
   test("carries the selected theme from the landing page to docs", async ({
     page,
   }) => {
