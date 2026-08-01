@@ -33,19 +33,19 @@ include = [
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-gix = { version = "0.81", default-features = false, features = ["excludes", "index", "sha1"] }
+gix = { version = "0.86", default-features = false, features = ["excludes", "index", "sha1"] }
 ignore = "0.4"
 reflink-copy = "0.1"
 serde = { version = "1", features = ["derive"] }
 tempfile = "3"
 thiserror = "2"
-toml = "0.9"
+toml = "1.1"
 unicode-casefold = "0.2"
 unicode-normalization = "0.1"
 walkdir = "2"
 
 [target.'cfg(unix)'.dependencies]
-getrandom = "0.3"
+getrandom = "0.4"
 rustix = { version = "1.1", features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
