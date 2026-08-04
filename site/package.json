@@ -18,16 +18,16 @@
     "validate": "npm run lint && npm run build && npm run test"
   },
   "dependencies": {
-    "@astrojs/starlight": "^0.41.5",
+    "@astrojs/starlight": "^0.41.6",
     "astro": "^7.1.6"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.10.0",
     "@astrojs/check": "^0.9.10",
-    "@playwright/test": "^1.62.0",
+    "@playwright/test": "^1.62.1",
     "cspell": "^10.0.1",
     "prettier": "^3.6.0",
-    "typescript": "^7.0.2"
+    "typescript": "^6.0.3"
   },
   "overrides": {
     "devalue": "^5.8.1"
