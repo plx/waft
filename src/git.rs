@@ -848,9 +848,8 @@ impl GitBackend for GitGix {
         let value = repo.config_snapshot().string(key);
         match value {
             Some(v) => {
-                let trimmed = String::from_utf8_lossy(v.as_ref().as_ref())
-                    .trim()
-                    .to_string();
+                let bytes: &[u8] = v.as_ref();
+                let trimmed = String::from_utf8_lossy(bytes).trim().to_string();
                 if trimmed.is_empty() {
                     Ok(None)
                 } else {

@@ -12,7 +12,7 @@ date relative to `Cargo.lock`.
 
 ## Overview
 
-- [MIT License](#MIT) — 152
+- [MIT License](#MIT) — 155
 - [zlib License](#Zlib) — 2
 - [Apache License 2.0](#Apache-2.0) — 1
 - [MIT No Attribution](#MIT-0) — 1
@@ -308,7 +308,7 @@ DEALINGS IN THE SOFTWARE.
 Used by:
 
 - [`cfg-if 1.0.4`](https://github.com/rust-lang/cfg-if)
-- [`filetime 0.2.27`](https://github.com/alexcrichton/filetime)
+- [`filetime 0.2.29`](https://github.com/alexcrichton/filetime)
 
 ```text
 Copyright (c) 2014 Alex Crichton
@@ -488,6 +488,7 @@ DEALINGS IN THE SOFTWARE.
 Used by:
 
 - [`hashbrown 0.16.1`](https://github.com/rust-lang/hashbrown)
+- [`hashbrown 0.17.1`](https://github.com/rust-lang/hashbrown)
 
 ```text
 Copyright (c) 2016 Amanieu d'Antras
@@ -978,42 +979,6 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [`getrandom 0.3.4`](https://github.com/rust-random/getrandom)
-
-```text
-Copyright (c) 2018-2025 The rust-random Project Developers
-Copyright (c) 2014 The Rust Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-```
-
-### <a id="MIT"></a>MIT License
-
-Used by:
-
 - [`getrandom 0.4.2`](https://github.com/rust-random/getrandom)
 
 ```text
@@ -1072,35 +1037,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-```
-
-### <a id="MIT"></a>MIT License
-
-Used by:
-
-- [`maybe-async 0.2.10`](https://github.com/fMeow/maybe-async-rs)
-
-```text
-Copyright (c) 2020 Guoli Lyu
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
 
 ```
 
@@ -1283,18 +1219,18 @@ Used by:
 - [`anstyle-query 1.1.5`](https://github.com/rust-cli/anstyle.git)
 - [`anstyle-wincon 3.0.11`](https://github.com/rust-cli/anstyle.git)
 - [`anstyle 1.0.14`](https://github.com/rust-cli/anstyle.git)
-- [`clap 4.6.0`](https://github.com/clap-rs/clap)
-- [`clap_builder 4.6.0`](https://github.com/clap-rs/clap)
-- [`clap_derive 4.6.0`](https://github.com/clap-rs/clap)
+- [`clap 4.6.4`](https://github.com/clap-rs/clap)
+- [`clap_builder 4.6.2`](https://github.com/clap-rs/clap)
+- [`clap_derive 4.6.4`](https://github.com/clap-rs/clap)
 - [`clap_lex 1.1.0`](https://github.com/clap-rs/clap)
 - [`colorchoice 1.0.5`](https://github.com/rust-cli/anstyle.git)
 - [`is_terminal_polyfill 1.70.2`](https://github.com/polyfill-rs/is_terminal_polyfill)
 - [`once_cell_polyfill 1.70.2`](https://github.com/polyfill-rs/once_cell_polyfill)
 - [`serde_spanned 1.1.1`](https://github.com/toml-rs/toml)
-- [`toml 0.9.12+spec-1.1.0`](https://github.com/toml-rs/toml)
-- [`toml_datetime 0.7.5+spec-1.1.0`](https://github.com/toml-rs/toml)
-- [`toml_parser 1.1.2+spec-1.1.0`](https://github.com/toml-rs/toml)
-- [`toml_writer 1.1.1+spec-1.1.0`](https://github.com/toml-rs/toml)
+- [`toml 1.1.4+spec-1.1.0`](https://github.com/toml-rs/toml)
+- [`toml_datetime 1.1.1+spec-1.1.0`](https://github.com/toml-rs/toml)
+- [`toml_parser 1.1.3+spec-1.1.0`](https://github.com/toml-rs/toml)
+- [`toml_writer 1.1.2+spec-1.1.0`](https://github.com/toml-rs/toml)
 
 ```text
 Copyright (c) Individual contributors
@@ -1323,7 +1259,7 @@ SOFTWARE.
 
 Used by:
 
-- [`libc 0.2.184`](https://github.com/rust-lang/libc)
+- [`libc 0.2.189`](https://github.com/rust-lang/libc)
 
 ```text
 Copyright (c) The Rust Project Developers
@@ -1482,6 +1418,8 @@ SOFTWARE.
 
 Used by:
 
+- [`bisync 0.3.0`](https://github.com/JM4ier/bisync)
+- [`bisync_macros 0.2.3`](https://github.com/JM4ier/bisync)
 - [`unicode-casefold 0.2.0`](https://github.com/lfairy/unicode-casefold)
 - [`windows-collections 0.3.2`](https://github.com/microsoft/windows-rs)
 - [`windows-core 0.62.2`](https://github.com/microsoft/windows-rs)
@@ -1528,15 +1466,16 @@ Used by:
 - [`once_cell 1.21.4`](https://github.com/matklad/once_cell)
 - [`proc-macro2 1.0.106`](https://github.com/dtolnay/proc-macro2)
 - [`quote 1.0.45`](https://github.com/dtolnay/quote)
-- [`reflink-copy 0.1.29`](https://github.com/cargo-bins/reflink-copy)
+- [`reflink-copy 0.1.30`](https://github.com/cargo-bins/reflink-copy)
 - [`rustix 1.1.4`](https://github.com/bytecodealliance/rustix)
 - [`rustversion 1.0.22`](https://github.com/dtolnay/rustversion)
-- [`serde 1.0.228`](https://github.com/serde-rs/serde)
-- [`serde_core 1.0.228`](https://github.com/serde-rs/serde)
-- [`serde_derive 1.0.228`](https://github.com/serde-rs/serde)
+- [`serde 1.0.229`](https://github.com/serde-rs/serde)
+- [`serde_core 1.0.229`](https://github.com/serde-rs/serde)
+- [`serde_derive 1.0.229`](https://github.com/serde-rs/serde)
 - [`syn 2.0.117`](https://github.com/dtolnay/syn)
-- [`thiserror-impl 2.0.18`](https://github.com/dtolnay/thiserror)
-- [`thiserror 2.0.18`](https://github.com/dtolnay/thiserror)
+- [`syn 3.0.3`](https://github.com/dtolnay/syn)
+- [`thiserror-impl 2.0.19`](https://github.com/dtolnay/thiserror)
+- [`thiserror 2.0.19`](https://github.com/dtolnay/thiserror)
 - [`unicode-ident 1.0.24`](https://github.com/dtolnay/unicode-ident)
 
 ```text
@@ -1603,7 +1542,6 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [`winnow 0.7.15`](https://github.com/winnow-rs/winnow)
 - [`winnow 1.0.2`](https://github.com/winnow-rs/winnow)
 
 ```text
@@ -1632,47 +1570,48 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [`gix-actor 0.40.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-bitmap 0.3.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-chunk 0.7.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-command 0.8.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-commitgraph 0.35.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-config-value 0.17.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-config 0.54.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-date 0.15.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-diff 0.61.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-discover 0.49.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-error 0.2.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-features 0.46.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-fs 0.19.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-glob 0.24.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-hash 0.23.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-hashtable 0.13.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-ignore 0.19.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-index 0.49.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-lock 21.0.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-object 0.58.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-odb 0.78.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-pack 0.68.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-packetline 0.21.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-path 0.11.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-protocol 0.59.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-quote 0.7.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-ref 0.61.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-refspec 0.39.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-revision 0.43.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-revwalk 0.29.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-sec 0.13.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-shallow 0.10.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-tempfile 21.0.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-trace 0.1.18`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-transport 0.55.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-traverse 0.55.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-url 0.35.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-utils 0.3.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-validate 0.11.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-worktree 0.50.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix 0.81.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-actor 0.41.2`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-bitmap 0.3.3`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-chunk 0.7.3`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-command 0.9.1`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-commitgraph 0.38.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-config-value 0.19.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-config 0.59.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-date 0.15.6`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-diff 0.66.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-discover 0.54.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-error 0.2.5`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-features 0.49.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-fs 0.22.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-glob 0.27.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-hash 0.26.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-hashtable 0.16.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-ignore 0.22.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-index 0.54.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-lock 24.0.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-object 0.63.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-odb 0.83.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-pack 0.73.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-packetline 0.22.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-path 0.12.3`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-protocol 0.64.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-quote 0.7.2`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-ref 0.66.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-refspec 0.44.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-revision 0.48.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-revwalk 0.34.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-sec 0.14.2`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-shallow 0.13.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-tempfile 24.0.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-trace 0.1.21`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-transport 0.58.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-traverse 0.60.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-url 0.37.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-utils 0.3.5`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-validate 0.11.3`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-worktree 0.55.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-zlib 0.1.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix 0.86.0`](https://github.com/GitoxideLabs/gitoxide)
 
 ```text
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -1748,10 +1687,11 @@ Used by:
 - [`aho-corasick 1.1.4`](https://github.com/BurntSushi/aho-corasick)
 - [`byteorder 1.5.0`](https://github.com/BurntSushi/byteorder)
 - [`globset 0.4.18`](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset)
-- [`ignore 0.4.25`](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore)
+- [`ignore 0.4.31`](https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore)
+- [`jiff-core 0.1.0`](https://github.com/BurntSushi/jiff)
 - [`jiff-tzdb-platform 0.1.3`](https://github.com/BurntSushi/jiff)
 - [`jiff-tzdb 0.1.6`](https://github.com/BurntSushi/jiff)
-- [`jiff 0.2.23`](https://github.com/BurntSushi/jiff)
+- [`jiff 0.2.35`](https://github.com/BurntSushi/jiff)
 - [`memchr 2.8.0`](https://github.com/BurntSushi/memchr)
 - [`walkdir 2.5.0`](https://github.com/BurntSushi/walkdir)
 
