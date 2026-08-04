@@ -77,6 +77,11 @@ Every docs page follows the same beats:
 3. **A reference table** for commands, options, or profiles when applicable.
 4. **Numbered or bulleted enumerations** for invariants, eligibility rules, pipeline steps.
 
+The landing hero uses the eyebrow `Git worktree file copier`, the headline
+`Copy ignored files.`, a direct definition of what `waft` copies, and the
+`Usage` / `Source` actions. The actions follow the body copy directly. Do not
+add a project-metadata badge row to the hero.
+
 ### Vocabulary
 
 The system has its own terms; respect them:
@@ -156,7 +161,8 @@ Two families. No optional third.
 - Small (button/nav): `0.875rem`.
 - Eyebrow/badge: `0.75rem`, uppercased, often in `--waft-font-mono`.
 
-**Treatments.** Eyebrows are uppercase mono-ish but rendered in Inter Black; badges (`Rust`, `CLI`, `Git worktrees`) are mono, 12px, bordered pills.
+**Treatments.** Eyebrows are uppercase mono-ish but rendered in Inter Black;
+status and tag badges are mono, 12px, bordered pills.
 
 > **Font substitution flag.** The site uses Inter and JetBrains Mono from system / CDN; we pull both from Google Fonts in `colors_and_type.css` to match the production build. If you have licensed/self-hosted copies you'd like to vendor, drop them in `fonts/` and swap the `@import`.
 

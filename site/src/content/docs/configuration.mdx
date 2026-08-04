@@ -2,11 +2,11 @@
 title: "Configuration"
 sidebar:
   label: "Configuration"
-description: "Layered configuration and per-knob overrides."
+description: "Set file-selection and copy policy through config, environment, or CLI options."
 ---
 
-`waft` resolves profile and policy settings from multiple layers. Later layers
-win for scalar values.
+`waft` applies configuration in the following order. Later scalar values
+override earlier values.
 
 1. Built-in defaults.
 2. User config: `~/.config/waft/config.toml`.
@@ -15,17 +15,19 @@ win for scalar values.
 4. Environment variables using the `WAFT_*` prefix.
 5. CLI flags.
 
+`exclude.extra` arrays append across layers. Set
+`exclude.replace_extra = true` or pass `--replace-extra-excludes` to discard
+values from earlier layers.
+
 Project configs must be regular files. Symlinked configs fail closed, and
 discovery stops at nested repositories and registered submodules.
 
-Selecting a profile resets all profile-owned knobs at that layer. Explicit
-knobs in that layer, or in a later layer, can override it; lower-layer knobs
-cannot silently alter a higher-precedence profile.
+Selecting a profile resets its four settings at that layer. Explicit settings
+in the same or a later layer can override it.
 
-For managed or reproducible operation, pass `--isolated`. It omits user
-configuration, `WAFT_CONFIG_PATH`, and `WAFT_*` policy environment variables;
-built-in defaults, source-project configuration, and CLI overrides still
-apply. Operational selection of the Git backend remains available.
+`--isolated` omits user configuration, `WAFT_CONFIG_PATH`, and `WAFT_*` policy
+environment variables. Built-in defaults, source-project configuration, CLI
+overrides, and operational Git backend selection still apply.
 
 ## Example `.waft.toml`
 
@@ -37,18 +39,22 @@ profile = "git"
 
 [exclude]
 extra = ["*.bak"]
+
+[copy]
+strategy = "auto"
 ```
 
-## Per-knob CLI flags
+## CLI overrides
 
-| Option                                                       | Description                                       |
-| ------------------------------------------------------------ | ------------------------------------------------- |
-| `--compat-profile <claude\|git\|wt>`                         | Coordinated preset selection.                     |
-| `--when-missing-worktreeinclude <blank\|all-ignored>`        | Behavior when no `.worktreeinclude` exists.       |
-| `--worktreeinclude-semantics <claude-2026-04\|git\|wt-0.39>` | Matcher semantics version.                        |
-| `--worktreeinclude-symlink-policy <follow\|ignore\|error>`   | How to handle symlinked rule files.               |
-| `--builtin-exclude-set <none\|tooling-v1>`                   | Curated tool-state exclusion set.                 |
-| `--extra-exclude <GLOB>`                                     | Repeatable additional excludes.                   |
-| `--replace-extra-excludes`                                   | Drop inherited `extra-exclude` values.            |
-| `--config <PATH>`                                            | Use this file instead of the default user config. |
-| `--isolated`                                                 | Omit user and environment policy layers.          |
+| Option                                                       | Description                                               |
+| ------------------------------------------------------------ | --------------------------------------------------------- |
+| `--compat-profile <claude\|git\|wt>`                         | Set the four profile-owned options.                       |
+| `--when-missing-worktreeinclude <blank\|all-ignored>`        | Set behavior when no `.worktreeinclude` exists.           |
+| `--worktreeinclude-semantics <claude-2026-04\|git\|wt-0.39>` | Select the matcher.                                       |
+| `--worktreeinclude-symlink-policy <follow\|ignore\|error>`   | Set handling for symlinked rule files.                    |
+| `--builtin-exclude-set <none\|tooling-v1>`                   | Select a built-in exclusion set.                          |
+| `--extra-exclude <GLOB>`                                     | Add an exclusion. Repeat the option to add more than one. |
+| `--replace-extra-excludes`                                   | Discard exclusions inherited from earlier layers.         |
+| `--copy-strategy <auto\|simple-copy\|cow-copy>`              | Select plain-copy or copy-on-write behavior.              |
+| `--config <PATH>`                                            | Replace user-config discovery with the specified file.    |
+| `--isolated`                                                 | Omit user config and policy environment variables.        |

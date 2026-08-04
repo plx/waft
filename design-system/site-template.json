@@ -8,7 +8,7 @@
     "name": "waft",
     "title": "waft",
     "package_name": "waft-site",
-    "category": "worktree-aware file tool",
+    "category": "Git worktree file copier",
     "tagline": "Copy .worktreeinclude-selected ignored files between Git worktrees.",
     "description": "waft is a small Rust CLI for copying selected ignored files between Git worktrees.",
     "install_command": "cargo install waft"
@@ -20,19 +20,19 @@
     "language": "en"
   },
   "landing": {
-    "headline": "Plan before copying.",
+    "headline": "Copy ignored files.",
     "lede": [
       { "text": "waft", "code": true },
-      { "text": " copies " },
+      { "text": " copies ignored, untracked files selected by " },
       { "text": ".worktreeinclude", "code": true },
       {
-        "text": "-selected ignored files between Git worktrees."
+        "text": " from one Git worktree to another."
       }
     ],
-    "body": "A small Rust CLI for copying selected ignored files — env files, API keys, build caches — between linked worktrees, with a plan-then-execute safety model.",
+    "body": "Use it for local configuration, caches, and tool state that you need in more than one worktree but do not want to commit.",
     "transfer": {
       "title": "What gets copied",
-      "description": ".worktreeinclude selects files using familiar gitignore syntax.",
+      "description": ".worktreeinclude patterns follow .gitignore syntax.",
       "includes": [".env", "*.env.local", "**/*.key"],
       "negation": "!test.key",
       "negation_description": "Negations remove a path from the include set."
@@ -53,12 +53,11 @@
       { "label": "Configuration", "href": "configuration/" },
       { "label": "GitHub", "href": "https://github.com/plx/waft" }
     ],
-    "primary_cta": { "label": "Read the docs", "href": "usage/" },
-    "secondary_cta": { "label": "View on GitHub", "href": "https://github.com/plx/waft" },
-    "badges": ["Rust", "CLI", "Git worktrees"],
+    "primary_cta": { "label": "Usage", "href": "usage/" },
+    "secondary_cta": { "label": "Source", "href": "https://github.com/plx/waft" },
     "terminal": {
       "title": "waft",
-      "meta": "copy commands",
+      "meta": "preview and copy",
       "copy": "waft copy --dry-run\nwaft copy --source ../main --dest .",
       "lines": [
         "$ waft copy --dry-run",

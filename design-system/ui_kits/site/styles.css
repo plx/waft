@@ -90,14 +90,6 @@ code, pre { font-family: var(--waft-font-mono); }
   font-size: 1.125rem; font-weight: 500; line-height: 1.55;
 }
 .hero__body { max-width: 640px; margin: 0.75rem 0 0; color: var(--waft-muted); }
-.badge-row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.5rem; }
-.badge {
-  display: inline-flex; align-items: center; min-height: 28px;
-  padding: 0 0.55rem; white-space: nowrap;
-  border: 1px solid var(--waft-line); border-radius: var(--waft-radius-sm);
-  background: var(--waft-panel); color: var(--waft-muted);
-  font-family: var(--waft-font-mono); font-size: 0.75rem; font-weight: 600;
-}
 .hero__actions { display: flex; flex-wrap: wrap; gap: 0.8rem; margin-top: 2rem; }
 .hero__visual {
   display: grid; grid-template-columns: minmax(0, 1fr) 250px;

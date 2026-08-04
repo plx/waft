@@ -2,11 +2,11 @@
 title: "Profiles"
 sidebar:
   label: "Profiles"
-description: "Compatibility profiles for different worktree workflows."
+description: "Choose claude, git, or wt file-selection behavior."
 ---
 
-`waft` ships with coordinated compatibility profiles. Each profile selects a
-bundle of matcher and safety behavior.
+`--compat-profile` sets the missing-file behavior, matcher, rule-file symlink
+policy, and built-in exclusions together.
 
 <table tabindex="0" aria-label="Compatibility profile comparison">
   <thead>
@@ -61,8 +61,9 @@ bundle of matcher and safety behavior.
 
 ## `claude`
 
-The default profile. It matches Claude Code's out-of-the-box behavior by using
-the repository root `.worktreeinclude`.
+`claude` is the default. It reads only the repository root
+`.worktreeinclude` and matches the observed Claude Code behavior identified by
+`claude-2026-04`.
 
 ```sh
 waft copy --compat-profile claude
@@ -70,9 +71,9 @@ waft copy --compat-profile claude
 
 ## `git`
 
-Use this profile when you want Git-style per-directory exclude semantics, where
-patterns are relative to the directory containing the file and deeper files can
-override shallower files.
+`git` applies per-directory exclude semantics. Patterns are relative to the
+directory containing the rule file, and deeper rule files override shallower
+ones.
 
 ```sh
 waft copy --compat-profile git
@@ -80,8 +81,9 @@ waft copy --compat-profile git
 
 ## `wt`
 
-Use this profile for worktrunk parity. It starts from every git-ignored
-untracked file and removes paths matched by literal-name negations.
+`wt` matches the observed behavior identified by `wt-0.39`. It starts with
+every ignored, untracked file and removes paths matched by literal-name
+negations.
 
 ```sh
 waft copy --compat-profile wt
