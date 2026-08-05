@@ -1,6 +1,7 @@
 .astro
 .playwright-browsers
 dist
+design-system
 node_modules
 package-lock.json
 playwright-report

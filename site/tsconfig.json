@@ -3,5 +3,6 @@
   "compilerOptions": {
     "allowJs": true,
     "checkJs": true
-  }
+  },
+  "exclude": ["${configDir}/design-system", "${configDir}/dist"]
 }

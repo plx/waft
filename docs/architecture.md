@@ -106,11 +106,8 @@ tests/
   worktrunk_parity.rs                 # Cross-tool parity scenarios
   property.rs                         # Differential/property tests against `git` profile oracle
 docs/
-  architecture.md             # This file
-planning/
-  WorktreeincludeConfigAndFixtureMatrix.md  # Source of truth for profile/knob/fixture matrix
-  WorktreeincludeImplementationPRSteps.md   # PR-by-PR plan for the modes feature
-  WorktrunkParityReport.md                  # Observed `wt-0.39` behavior captured for tests
+  architecture.md                       # This file
+  worktreeinclude-compatibility.md       # Source of truth for profile/knob/fixture matrix
 ```
 
 ## Command Pipeline
@@ -183,7 +180,7 @@ Tests are organized in several layers:
 
 The differential tests historically anchored waft's correctness against
 Git; they remain the per-directory engine's primary correctness gate.
-The fixture matrix in `planning/WorktreeincludeConfigAndFixtureMatrix.md`
+The fixture matrix in `docs/worktreeinclude-compatibility.md`
 is the source of truth for the cross-profile expectations exercised by
 the mode-coverage tests.
 
@@ -206,5 +203,5 @@ cannot be re-included by a deeper negation pattern. Users of this engine
 should prefer `dir/*` plus `!dir/keep` over `dir/` plus `!dir/keep`.
 
 The `claude-2026-04` and `wt-0.39` engines deliberately diverge from
-these rules; see `planning/WorktreeincludeConfigAndFixtureMatrix.md` for
+these rules; see `docs/worktreeinclude-compatibility.md` for
 the per-engine fixture expectations.

@@ -207,10 +207,11 @@ manifests narrow and benchmark large cache manifests in monorepos.
 
 The production Astro/Starlight site lives in [`site/`](site/). Its visual,
 component, and content-voice source of truth is the
-[`design-system/`](design-system/) directory. Read
-[`AGENTS.md`](AGENTS.md), [`design-system/SKILL.md`](design-system/SKILL.md),
-and [`design-system/README.md`](design-system/README.md) before changing the
-site.
+[`site/design-system/`](site/design-system/) directory. Read
+[`AGENTS.md`](AGENTS.md),
+[`site/design-system/SKILL.md`](site/design-system/SKILL.md), and
+[`site/design-system/README.md`](site/design-system/README.md) before changing
+the site.
 
 Run the complete site validation from `site/`:
 

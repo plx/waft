@@ -38,6 +38,7 @@
     "Safety",
     "starlight",
     "Starlight",
+    "tabindex",
     "tool",
     "trackedness",
     "Usage",
@@ -51,6 +52,7 @@
   "ignorePaths": [
     ".astro",
     ".playwright-browsers",
+    "design-system/**",
     "dist",
     "node_modules",
     "package-lock.json",
