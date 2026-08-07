@@ -3,9 +3,9 @@
 A small, opinionated design system for **waft** — a Rust CLI tool for copying `.worktreeinclude`-selected ignored files between Git worktrees.
 
 This directory is the canonical visual and content-voice system for the **waft
-documentation site** (the production Astro + Starlight application under
-`../site/`). The CLI itself ships as a terminal binary; everything here applies
-to the *web surface* around it: the landing page and the docs.
+documentation site** (the production Astro + Starlight application in the
+parent directory). The CLI itself ships as a terminal binary; everything here
+applies to the *web surface* around it: the landing page and the docs.
 
 ## Authority and references
 
@@ -16,8 +16,9 @@ Use the files in this directory in this order:
 - **Canonical assets:** [`assets/`](assets/), with provenance recorded in
   [`ATTRIBUTION.md`](ATTRIBUTION.md).
 - **Component and page reference:** [`ui_kits/site/`](ui_kits/site/).
-- **Production implementation:** [`../site/`](../site/).
-- **Copywriting and information architecture:** [`../site-template.json`](../site-template.json).
+- **Production implementation:** [`../`](../).
+- **Copywriting and information architecture:**
+  [`../site-template.json`](../site-template.json).
 - **Historical source snapshot:** [`site/`](site/) inside this directory,
   retained for comparison only.
 
@@ -39,8 +40,8 @@ It's a single-binary Rust CLI. The product surface is the *terminal*. The web su
 
 | Surface | Source | Status |
 |---|---|---|
-| **Documentation website** | `../site/` (Astro + Starlight) | Covered — see `ui_kits/site/` |
-| CLI itself | `../src/` (Rust) | Out of scope — no GUI |
+| **Documentation website** | `../` (Astro + Starlight) | Covered — see `ui_kits/site/` |
+| CLI itself | `../../src/` (Rust) | Out of scope — no GUI |
 
 ---
 
@@ -351,7 +352,7 @@ The UI-kit JSX under `ui_kits/site/` is separate — those are in-browser Babel 
 
 - **Building a marketing page or landing variant for waft?** Open `ui_kits/site/index.html`, use its component anatomy as a reference, and port the result into the target stack.
 - **Building a docs page?** Port the token mappings into the production
-  Starlight bridge under `../site/`; the copy under
+  Starlight bridge in the parent directory; the copy under
   `site/src/styles/starlight.css` is reference-only.
 - **Styling an unrelated artifact in the waft brand?** Link `styles.css` (single entrypoint) and use the `--waft-*` variables.
 - **Need a button, badge, or terminal block?** Import from the bundle — see **Components** above.
@@ -365,5 +366,5 @@ The UI-kit JSX under `ui_kits/site/` is separate — those are in-browser Babel 
 - **No icon library.** Intentional. See **Iconography**.
 - **No imagery.** Intentional. See **Visual Foundations → Backgrounds**.
 - **Astro/Starlight not reproduced.** The UI kit is plain HTML + React; it
-  isn't an Astro app. Use the production application under `../site/` for
-  builds and deployment.
+  isn't an Astro app. Use the production application in the parent directory
+  for builds and deployment.

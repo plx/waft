@@ -2,29 +2,35 @@
 
 This directory contains the production Astro/Starlight site. The renderer input
 for its content and information architecture is tracked at
-`../site-template.json`.
+`site-template.json`.
+
+The manifest keeps `site.dir` relative to the repository root. Invoke the
+external renderer from the repository root so its output remains this directory.
 
 ## Source-of-truth hierarchy
 
 Use these sources in order:
 
-1. `../design-system/README.md` defines the canonical visual language, content
+1. `design-system/README.md` defines the canonical visual language, content
    voice, interaction rules, and asset usage.
-2. `../design-system/colors_and_type.css` defines canonical tokens.
-   `../design-system/ui_kits/site/` is the component and page-composition
+2. `design-system/colors_and_type.css` defines canonical tokens.
+   `design-system/ui_kits/site/` is the component and page-composition
    reference.
-3. `../design-system/assets/` contains the canonical brand assets. Preserve the
-   attribution in `../design-system/ATTRIBUTION.md`.
-4. `../site-template.json` defines shared copy and information architecture,
+3. `design-system/assets/` contains the canonical brand assets. Preserve the
+   attribution in `design-system/ATTRIBUTION.md`.
+4. `site-template.json` defines shared copy and information architecture,
    while this directory is the deployable Astro/Starlight implementation.
 
-`../design-system/site/` is a reference snapshot, not production code.
-`../.maquette/` is an archived, superseded exploration. Neither should
-override the canonical design-system files above.
+`design-system/site/` is a reference snapshot, not production code. It
+does not override the canonical design-system files above.
+
+`design-system/` is repository source and reference material, not published
+documentation content. Astro loads documentation pages from `src/content/docs/`
+and imports only the canonical token contract from this subtree.
 
 ## Migration and change rules
 
-- Read `../design-system/SKILL.md` and `../design-system/README.md` before
+- Read `design-system/SKILL.md` and `design-system/README.md` before
   changing the site.
 - Import the canonical token contract through `src/styles/theme.css` and use
   the `--waft-*` names directly. Do not duplicate token values in production
@@ -35,7 +41,7 @@ override the canonical design-system files above.
 - Keep terminal, code, footer, and on-page brand surfaces theme-aware. Use
   `--waft-code-bg`, `--waft-code-fg`, and related light/dark values rather than
   the legacy fixed-dark `--waft-code` chip token.
-- Update both `../site-template.json` and the production implementation when a
+- Update both `site-template.json` and the production implementation when a
   shared content or information-architecture contract changes.
 - Record intentional design-system exceptions in the design-system guidance in
   the same change.

@@ -7,7 +7,7 @@ user-invocable: true
 Read the `README.md` file within this skill completely, then explore the files
 relevant to the task. This directory is the canonical visual and content-voice
 system for the **waft documentation website**. The deployable Astro + Starlight
-application lives under the repository's top-level `site/`.
+application lives in the parent directory, the repository's top-level `site/`.
 
 Key files in this skill:
 
@@ -24,7 +24,7 @@ Key files in this skill:
 If creating visual artifacts (slides, mocks, throwaway prototypes), copy assets
 out of this skill and create static HTML files for the user to view; load
 `colors_and_type.css` for tokens. For production work, port the canonical
-tokens, assets, and UI-kit patterns into the top-level Astro/Starlight `site/`
+tokens, assets, and UI-kit patterns into the parent Astro/Starlight application
 while preserving its accessibility, navigation, routing, and documentation
 behavior.
 

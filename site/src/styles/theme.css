@@ -3,4 +3,4 @@
  * Keep site-specific layout rules in landing.css and Starlight mappings in
  * starlight.css instead of duplicating tokens here.
  */
-@import "../../../design-system/colors_and_type.css";
+@import "../../design-system/colors_and_type.css";
