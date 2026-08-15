@@ -104,8 +104,9 @@ pub(crate) enum EmptySelectionCause {
     /// A `.worktreeinclude` exists, but not at the repository root, and the
     /// active semantics read the root file only.
     NoRootRuleFile,
-    /// The `.worktreeinclude` files that exist are all symlinks, which the
-    /// active symlink policy skips.
+    /// Every `.worktreeinclude` the active configuration would have read is a
+    /// symlink, which the active symlink policy skips — repo-wide, or just at
+    /// the root when the semantics read the root file only.
     RuleFileSymlinkIgnored,
 }
 
@@ -126,6 +127,12 @@ pub(crate) enum EmptySelectionCause {
 /// `when_missing` gates only the two "no rule file was consulted" variants.
 /// [`EmptySelectionCause::NoRootRuleFile`] ignores it because a rule file was
 /// found, so `when_missing` never applied to this run at all.
+///
+/// The two refinements compose: a symlinked root file plus any regular nested
+/// one satisfies the repo-wide gate and fails the root-only check, and only
+/// the symlink policy explains that. Reporting the absence of a root file
+/// there would be false, and its remedy — Git semantics — would leave the
+/// root symlink just as skipped, so the run would stay empty.
 fn diagnose_empty_selection(
     git: &dyn GitBackend,
     source_root: &Path,
@@ -140,6 +147,18 @@ fn diagnose_empty_selection(
                 policy.symlink_policy,
             )
         {
+            // Re-ask the root predicate while following symlinks, mirroring
+            // the repo-wide re-ask below. A yes means the root file exists and
+            // the policy is what hid it — and, because the predicate is the
+            // engine's own existence gate, that the named remedy restores it.
+            if policy.symlink_policy == SymlinkPolicy::Ignore
+                && crate::worktreeinclude::root_rule_file_is_consulted(
+                    source_root,
+                    SymlinkPolicy::Follow,
+                )
+            {
+                return Ok(Some(EmptySelectionCause::RuleFileSymlinkIgnored));
+            }
             return Ok(Some(EmptySelectionCause::NoRootRuleFile));
         }
         // A consulted rule file that selects nothing is a legitimate

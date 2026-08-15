@@ -274,6 +274,7 @@ fn list_does_not_note_a_nested_rule_file_the_git_semantics_read() {
 /// .worktreeinclude found" tells the user a file they can see does not exist;
 /// the note must name the policy that skipped it instead.
 #[test]
+#[cfg(unix)]
 fn list_note_names_the_symlink_policy_that_skipped_a_rule_file() {
     let repo = make_repo();
     write_file(repo.path(), ".gitignore", ".env\n");
@@ -307,6 +308,92 @@ fn list_note_names_the_symlink_policy_that_skipped_a_rule_file() {
     assert!(
         String::from_utf8_lossy(&followed.stdout).contains(".env"),
         "following the symlink should select .env"
+    );
+}
+
+/// A symlinked *root* rule file under root-only semantics, with a regular
+/// nested one to satisfy the repo-wide existence gate. The gate says a rule
+/// file exists, and the root-only check says the root file is not consulted —
+/// but the reason is the symlink policy, not the file's absence. "No
+/// .worktreeinclude in the repository root" would be false, and its remedy
+/// (Git semantics) leaves the root symlink just as ignored, so the run stays
+/// empty. The symlink note is both true here and actually curative.
+#[cfg(unix)]
+#[test]
+fn list_note_names_the_symlink_policy_when_root_only_semantics_skip_the_root_symlink() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), "rules.txt", ".env\n");
+    std::os::unix::fs::symlink("rules.txt", repo.path().join(".worktreeinclude")).unwrap();
+    // Regular, non-symlinked, and nested: this is what makes the repo-wide
+    // existence check answer "found" while the root file stays unread.
+    write_file(repo.path(), "sub/.worktreeinclude", ".env\n");
+    git(
+        repo.path(),
+        &["add", ".gitignore", "rules.txt", "sub/.worktreeinclude"],
+    );
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+
+    let ignored = run_list(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-symlink-policy",
+            "ignore",
+        ],
+    );
+
+    assert!(ignored.status.success());
+    let stderr = String::from_utf8_lossy(&ignored.stderr);
+    assert!(
+        stderr
+            .contains("note: .worktreeinclude is a symlink and the active symlink policy skips it"),
+        "{stderr}"
+    );
+    // The root file is right there; denying it sends the user to a remedy
+    // that does not apply.
+    assert!(
+        !stderr.contains("no .worktreeinclude in the repository root"),
+        "{stderr}"
+    );
+    assert_eq!(String::from_utf8_lossy(&ignored.stdout), "");
+
+    // The remedy the wrong note would have recommended does not fix this run:
+    // Git semantics read the nested file, and the root symlink stays skipped.
+    let git_semantics = run_list(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-semantics",
+            "git",
+            "--worktreeinclude-symlink-policy",
+            "ignore",
+        ],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&git_semantics.stdout),
+        "",
+        "switching to Git semantics should not rescue an ignored root symlink"
+    );
+
+    // The remedy the note does name works: root-only semantics read the
+    // symlinked root file once the policy stops skipping it.
+    let followed = run_list(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-symlink-policy",
+            "follow",
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&followed.stdout).contains(".env"),
+        "following the symlink should let the root rule file select .env; got {:?}",
+        String::from_utf8_lossy(&followed.stdout)
     );
 }
 
