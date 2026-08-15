@@ -29,6 +29,16 @@ fn make_repo() -> TempDir {
     dir
 }
 
+/// Probe whether `dir`'s filesystem resolves differently-cased spellings to
+/// the same file, so tests can state which semantics the host can exercise.
+fn filesystem_folds_case(dir: &Path) -> bool {
+    let probe = dir.join("waft-case-probe");
+    std::fs::write(&probe, b"probe").unwrap();
+    let folded = dir.join("WAFT-CASE-PROBE").exists();
+    std::fs::remove_file(&probe).unwrap();
+    folded
+}
+
 fn run_waft(repo: &Path, backend: &str, args: &[&str]) -> Output {
     support::std_command(env!("CARGO_BIN_EXE_waft"))
         .env("WAFT_GIT_BACKEND", backend)
@@ -139,9 +149,13 @@ fn tracked_paths_use_normalized_unicode_folding_for_both_backends() {
     }
 }
 
+/// A folded-name collision that `core.ignoreCase = false` says is a distinct
+/// path is still protected when the filesystem itself resolves both spellings
+/// to one file. The confirmation is targeted: only the colliding index entry
+/// is consulted, never the whole index.
 #[cfg(target_os = "macos")]
 #[test]
-fn tracked_paths_protect_native_sigma_alias_with_ignore_case_false() {
+fn tracked_paths_confirm_native_sigma_alias_through_filesystem_identity() {
     use waft::path::RepoRelPath;
 
     let repo = make_repo();
@@ -168,27 +182,14 @@ fn tracked_paths_protect_native_sigma_alias_with_ignore_case_false() {
             "backend failed to protect the filesystem's sigma alias"
         );
     }
-
-    // The conservative folded-name guard must also work while the tracked
-    // worktree entry is absent and identity comparison is impossible.
-    std::fs::remove_file(tracked_path).unwrap();
-    for backend in [
-        &GitGix::new() as &dyn GitBackend,
-        &GitCli::new() as &dyn GitBackend,
-    ] {
-        let tracked = backend
-            .tracked_paths(repo.path(), std::slice::from_ref(&query))
-            .unwrap();
-        assert!(
-            tracked.contains(&query),
-            "backend failed to protect the missing sigma alias"
-        );
-    }
 }
 
+/// The tracked-path lookup no longer scans the whole index for filesystem
+/// aliases, so two deliberately distinct hard-linked names are two paths.
+/// Only the one Git tracks is protected.
 #[cfg(unix)]
 #[test]
-fn tracked_paths_use_filesystem_identity_even_when_ignore_case_is_false() {
+fn tracked_paths_treat_named_hard_links_as_distinct_paths() {
     use waft::path::RepoRelPath;
 
     let repo = make_repo();
@@ -197,19 +198,23 @@ fn tracked_paths_use_filesystem_identity_even_when_ignore_case_is_false() {
     git(repo.path(), &["add", "tracked.env"]);
     git(repo.path(), &["commit", "-m", "track original hard link"]);
     std::fs::hard_link(&tracked_path, repo.path().join("alias.env")).unwrap();
-    git(repo.path(), &["config", "core.ignoreCase", "false"]);
 
-    let query = RepoRelPath::normalize(Path::new("alias.env"), repo.path()).unwrap();
+    let alias = RepoRelPath::normalize(Path::new("alias.env"), repo.path()).unwrap();
+    let tracked_query = RepoRelPath::normalize(Path::new("tracked.env"), repo.path()).unwrap();
     for backend in [
         &GitGix::new() as &dyn GitBackend,
         &GitCli::new() as &dyn GitBackend,
     ] {
         let tracked = backend
-            .tracked_paths(repo.path(), std::slice::from_ref(&query))
+            .tracked_paths(repo.path(), &[alias.clone(), tracked_query.clone()])
             .unwrap();
         assert!(
-            tracked.contains(&query),
-            "backend failed to protect a filesystem alias of a tracked path"
+            tracked.contains(&tracked_query),
+            "backend failed to report the tracked path itself"
+        );
+        assert!(
+            !tracked.contains(&alias),
+            "a separately named hard link is not the tracked path"
         );
     }
 }
@@ -523,9 +528,12 @@ fn all_ignored_fallback_excludes_negated_gitignore_match_for_both_backends() {
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+/// With no worktree entry to compare identities against, the repository's own
+/// `core.ignoreCase` decides whether a differently-cased spelling names the
+/// tracked path. Both backends must read the same answer from the config, on
+/// every host filesystem.
 #[test]
-fn tracked_paths_protect_missing_case_alias_when_ignore_case_is_false() {
+fn tracked_paths_follow_configured_case_sensitivity_for_missing_aliases() {
     use waft::path::RepoRelPath;
 
     let repo = make_repo();
@@ -533,7 +541,57 @@ fn tracked_paths_protect_missing_case_alias_when_ignore_case_is_false() {
     git(repo.path(), &["add", "secret.env"]);
     git(repo.path(), &["commit", "-m", "track lower-case path"]);
     std::fs::remove_file(repo.path().join("secret.env")).unwrap();
+
+    let query = RepoRelPath::normalize(Path::new("SECRET.env"), repo.path()).unwrap();
+
+    git(repo.path(), &["config", "core.ignoreCase", "true"]);
+    for backend in [
+        &GitGix::new() as &dyn GitBackend,
+        &GitCli::new() as &dyn GitBackend,
+    ] {
+        let tracked = backend
+            .tracked_paths(repo.path(), std::slice::from_ref(&query))
+            .unwrap();
+        assert!(
+            tracked.contains(&query),
+            "a case-folding checkout must protect the differently-cased spelling"
+        );
+    }
+
     git(repo.path(), &["config", "core.ignoreCase", "false"]);
+    for backend in [
+        &GitGix::new() as &dyn GitBackend,
+        &GitCli::new() as &dyn GitBackend,
+    ] {
+        let tracked = backend
+            .tracked_paths(repo.path(), std::slice::from_ref(&query))
+            .unwrap();
+        assert!(
+            !tracked.contains(&query),
+            "a case-sensitive checkout must treat the differently-cased \
+             spelling as a distinct, untracked path"
+        );
+    }
+}
+
+/// On a genuinely case-sensitive volume, a distinct untracked file whose name
+/// folds onto a tracked one stays eligible.
+#[test]
+fn tracked_paths_keep_distinct_case_spellings_on_case_sensitive_volumes() {
+    use waft::path::RepoRelPath;
+
+    let repo = make_repo();
+    if filesystem_folds_case(repo.path()) {
+        // Both spellings would be one file here; the decision itself is
+        // covered by the unit tests and by the missing-alias test above.
+        return;
+    }
+
+    std::fs::write(repo.path().join("secret.env"), "tracked\n").unwrap();
+    git(repo.path(), &["add", "secret.env"]);
+    git(repo.path(), &["commit", "-m", "track lower-case path"]);
+    git(repo.path(), &["config", "core.ignoreCase", "false"]);
+    std::fs::write(repo.path().join("SECRET.env"), "untracked\n").unwrap();
 
     let query = RepoRelPath::normalize(Path::new("SECRET.env"), repo.path()).unwrap();
     for backend in [
@@ -544,8 +602,9 @@ fn tracked_paths_protect_missing_case_alias_when_ignore_case_is_false() {
             .tracked_paths(repo.path(), std::slice::from_ref(&query))
             .unwrap();
         assert!(
-            tracked.contains(&query),
-            "backend failed to protect a missing case alias of a tracked path"
+            !tracked.contains(&query),
+            "a distinct file on a case-sensitive volume must not be reported \
+             as tracked"
         );
     }
 }
@@ -901,4 +960,295 @@ fn info_output_matches_between_backends() {
         String::from_utf8_lossy(&cli.stdout),
         "info output mismatch between gix and cli backends"
     );
+}
+
+/// Git echoes each linked worktree's recorded path verbatim, and that record
+/// can legitimately hold a symlinked spelling (a worktree relocated under a
+/// symlinked mount, or repaired by hand). `show_toplevel` and the gix backend
+/// both hand back canonical roots, so the CLI backend must normalize too:
+/// otherwise main-vs-linked classification and the anchored copy engine end up
+/// comparing a symlinked path against a canonical one.
+#[cfg(unix)]
+#[test]
+fn symlinked_worktree_records_are_normalized_by_both_backends() {
+    let parent = TempDir::new().unwrap();
+    let real = parent.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    git(&real, &["init"]);
+    git(&real, &["config", "user.email", "test@test.com"]);
+    git(&real, &["config", "user.name", "Test"]);
+    std::fs::write(real.join("tracked.txt"), "x\n").unwrap();
+    git(&real, &["add", "tracked.txt"]);
+    git(&real, &["commit", "-m", "init"]);
+
+    let worktrees = parent.path().join("worktrees");
+    std::fs::create_dir(&worktrees).unwrap();
+    let linked = worktrees.join("linked");
+    git(
+        &real,
+        &["worktree", "add", linked.to_str().unwrap(), "-b", "feature"],
+    );
+
+    // Re-record the linked worktree through a symlinked ancestor, and reach
+    // the repository itself through another symlink.
+    let worktrees_alias = parent.path().join("worktrees-alias");
+    std::os::unix::fs::symlink(&worktrees, &worktrees_alias).unwrap();
+    let gitdir_record = real.join(".git/worktrees/linked/gitdir");
+    std::fs::write(
+        &gitdir_record,
+        format!("{}\n", worktrees_alias.join("linked/.git").display()),
+    )
+    .unwrap();
+    let symlinked_root = parent.path().join("via-symlink");
+    std::os::unix::fs::symlink(&real, &symlinked_root).unwrap();
+
+    let expected_main = std::fs::canonicalize(&real).unwrap();
+    let expected_linked = std::fs::canonicalize(&linked).unwrap();
+
+    for backend in [
+        &GitGix::new() as &dyn GitBackend,
+        &GitCli::new() as &dyn GitBackend,
+    ] {
+        assert_eq!(
+            backend.show_toplevel(&symlinked_root).unwrap(),
+            expected_main,
+            "backend returned a non-canonical toplevel through a symlink"
+        );
+
+        let records = backend.list_worktrees(&symlinked_root).unwrap();
+        let main = records
+            .iter()
+            .find(|record| record.is_main)
+            .expect("main worktree");
+        assert_eq!(
+            main.path, expected_main,
+            "backend returned a non-canonical main worktree path"
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| !record.is_main && record.path == expected_linked),
+            "backend did not normalize the symlinked worktree record: {:?}",
+            records.iter().map(|r| &r.path).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// `WAFT_GIT_BACKEND` selects which implementation enforces waft's safety
+/// checks, so a typo must fail loudly rather than fall back to the default.
+#[test]
+fn unknown_git_backend_selection_fails_with_the_valid_values() {
+    let repo = make_repo();
+    std::fs::write(repo.path().join(".worktreeinclude"), "*.env\n").unwrap();
+
+    let source = repo.path().to_string_lossy().to_string();
+    let output = run_waft(repo.path(), "gxi", &["list", "--source", &source]);
+
+    assert!(
+        !output.status.success(),
+        "a misspelled backend name must not silently use the default"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("WAFT_GIT_BACKEND") && stderr.contains("\"gix\", \"cli\""),
+        "error must name the variable and its valid values, got: {stderr}"
+    );
+}
+
+/// Backend names are trimmed and matched without regard to ASCII case.
+#[test]
+fn git_backend_selection_accepts_case_and_padding_variants() {
+    let repo = make_repo();
+    std::fs::write(repo.path().join(".gitignore"), "*.env\n").unwrap();
+    std::fs::write(repo.path().join(".worktreeinclude"), "*.env\n").unwrap();
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "setup"]);
+    std::fs::write(repo.path().join("secret.env"), "s\n").unwrap();
+
+    let source = repo.path().to_string_lossy().to_string();
+    for backend in ["CLI", " cli ", "GIX", "gix"] {
+        let output = run_waft(repo.path(), backend, &["list", "--source", &source]);
+        assert!(
+            output.status.success(),
+            "backend {backend:?} was rejected: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "secret.env\n");
+    }
+}
+
+/// The executor rechecks trackedness of each destination path while holding
+/// the index lock, and that recheck now reads a cached index snapshot rather
+/// than the index itself. The cache is only sound if a real `git add` between
+/// two queries invalidates it, so pin that against real repositories and real
+/// backends rather than against a synthetic index file.
+#[test]
+fn a_reused_backend_instance_observes_a_path_becoming_tracked() {
+    use waft::path::RepoRelPath;
+
+    for backend_name in ["gix", "cli"] {
+        let repo = make_repo();
+        std::fs::write(repo.path().join(".gitignore"), "*.env\n").unwrap();
+        git(repo.path(), &["add", "-f", ".gitignore"]);
+        git(repo.path(), &["commit", "-m", "setup"]);
+        std::fs::write(repo.path().join("secret.env"), "s\n").unwrap();
+
+        // One instance for the whole exchange: this is the executor's usage,
+        // and a fresh instance per query would not exercise the cache at all.
+        let backend: Box<dyn GitBackend> = match backend_name {
+            "gix" => Box::new(GitGix::new()),
+            _ => Box::new(GitCli::new()),
+        };
+        let query = RepoRelPath::normalize(Path::new("secret.env"), repo.path()).unwrap();
+        let paths = std::slice::from_ref(&query);
+
+        assert!(
+            !backend
+                .tracked_paths(repo.path(), paths)
+                .unwrap()
+                .contains(&query),
+            "{backend_name}: an ignored, unadded file must not read as tracked"
+        );
+
+        git(repo.path(), &["add", "-f", "secret.env"]);
+
+        assert!(
+            backend
+                .tracked_paths(repo.path(), paths)
+                .unwrap()
+                .contains(&query),
+            "{backend_name}: the same instance must observe the new index, \
+             or the under-lock recheck would publish over a tracked path"
+        );
+
+        git(repo.path(), &["rm", "--cached", "-q", "secret.env"]);
+
+        assert!(
+            !backend
+                .tracked_paths(repo.path(), paths)
+                .unwrap()
+                .contains(&query),
+            "{backend_name}: the cached snapshot outlived the index it came from"
+        );
+    }
+}
+
+/// Companion to the above for the gitlink half of the same snapshot: a
+/// registered submodule appearing in the index must be visible to a backend
+/// instance that already answered a question about that repository.
+#[test]
+fn a_reused_backend_instance_observes_a_new_gitlink() {
+    let submodule = make_repo();
+    std::fs::write(submodule.path().join("inner.txt"), "i\n").unwrap();
+    git(submodule.path(), &["add", "-f", "inner.txt"]);
+    git(submodule.path(), &["commit", "-m", "inner"]);
+
+    for backend_name in ["gix", "cli"] {
+        let repo = make_repo();
+        std::fs::write(repo.path().join("root.txt"), "r\n").unwrap();
+        git(repo.path(), &["add", "-f", "root.txt"]);
+        git(repo.path(), &["commit", "-m", "setup"]);
+
+        let backend: Box<dyn GitBackend> = match backend_name {
+            "gix" => Box::new(GitGix::new()),
+            _ => Box::new(GitCli::new()),
+        };
+
+        assert!(
+            backend.gitlinks(repo.path()).unwrap().is_empty(),
+            "{backend_name}: no submodule is registered yet"
+        );
+
+        let name = format!("vendor-{backend_name}");
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                &submodule.path().to_string_lossy(),
+                &name,
+            ],
+        );
+
+        assert!(
+            backend.gitlinks(repo.path()).unwrap().contains(&name),
+            "{backend_name}: the same instance must observe the new gitlink"
+        );
+    }
+}
+
+/// `core.ignoreCase` comes from the config, not the index, so it must not be
+/// revalidated by the index fingerprint: writing the index must neither
+/// re-read it nor make a config edit appear to take effect. The backend
+/// contract is that each instance resolves it once; a run therefore cannot
+/// apply folded protection to some paths and exact matching to others.
+#[test]
+fn case_sensitivity_is_resolved_once_per_backend_instance() {
+    use waft::path::RepoRelPath;
+
+    let repo = make_repo();
+    std::fs::write(repo.path().join("secret.env"), "tracked\n").unwrap();
+    git(repo.path(), &["add", "secret.env"]);
+    git(repo.path(), &["commit", "-m", "track lower-case path"]);
+    std::fs::remove_file(repo.path().join("secret.env")).unwrap();
+
+    let query = RepoRelPath::normalize(Path::new("SECRET.env"), repo.path()).unwrap();
+    let paths = std::slice::from_ref(&query);
+
+    for backend_name in ["gix", "cli"] {
+        git(repo.path(), &["config", "core.ignoreCase", "true"]);
+        let backend: Box<dyn GitBackend> = match backend_name {
+            "gix" => Box::new(GitGix::new()),
+            _ => Box::new(GitCli::new()),
+        };
+        assert!(
+            backend.checkout_folds_case(repo.path()).unwrap(),
+            "{backend_name}: the configured answer must be read"
+        );
+
+        // Change the config *and* the index. The index change is observed
+        // (the file becomes untracked below is not what we assert here) but
+        // it must not drag a re-read of the config along with it.
+        git(repo.path(), &["config", "core.ignoreCase", "false"]);
+        std::fs::write(repo.path().join("other.txt"), "o\n").unwrap();
+        git(repo.path(), &["add", "-f", "other.txt"]);
+
+        assert!(
+            backend.checkout_folds_case(repo.path()).unwrap(),
+            "{backend_name}: the case answer must stay fixed for this \
+             instance rather than tracking the index's mtime"
+        );
+        assert!(
+            backend
+                .tracked_paths(repo.path(), paths)
+                .unwrap()
+                .contains(&query),
+            "{backend_name}: tracked-path protection must use the same fixed \
+             answer, not a freshly re-read one"
+        );
+
+        // A new instance is how the changed configuration is picked up.
+        let reloaded: Box<dyn GitBackend> = match backend_name {
+            "gix" => Box::new(GitGix::new()),
+            _ => Box::new(GitCli::new()),
+        };
+        assert!(
+            !reloaded.checkout_folds_case(repo.path()).unwrap(),
+            "{backend_name}: a fresh instance must read the current config"
+        );
+        assert!(
+            !reloaded
+                .tracked_paths(repo.path(), paths)
+                .unwrap()
+                .contains(&query),
+            "{backend_name}: a case-sensitive checkout treats the \
+             differently-cased spelling as a distinct, untracked path"
+        );
+
+        git(repo.path(), &["rm", "--cached", "-q", "other.txt"]);
+        let _ = std::fs::remove_file(repo.path().join("other.txt"));
+    }
 }

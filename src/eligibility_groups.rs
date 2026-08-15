@@ -42,11 +42,13 @@ pub fn compute(
     source_root: &Path,
     eligible: Vec<RepoRelPath>,
     gitlinks: &HashSet<String>,
+    ignore_case: bool,
 ) -> Result<EligibilityGroups> {
     let eligible_set: BTreeSet<RepoRelPath> = eligible.into_iter().collect();
     let mut ctx = WalkContext {
         source_root,
         gitlinks,
+        ignore_case,
         eligible: &eligible_set,
         copyable_dirs: BTreeMap::new(),
     };
@@ -80,6 +82,8 @@ pub fn compute(
 struct WalkContext<'a> {
     source_root: &'a Path,
     gitlinks: &'a HashSet<String>,
+    /// Whether this checkout folds case, for gitlink boundary comparison.
+    ignore_case: bool,
     eligible: &'a BTreeSet<RepoRelPath>,
     copyable_dirs: BTreeMap<String, BTreeSet<RepoRelPath>>,
 }
@@ -121,6 +125,7 @@ impl WalkContext<'_> {
                     depth + 1,
                     self.source_root,
                     self.gitlinks,
+                    self.ignore_case,
                 ) {
                     blocked = true;
                     continue;
@@ -207,6 +212,7 @@ mod tests {
             root,
             eligible.iter().copied().map(rel).collect(),
             &HashSet::new(),
+            false,
         )
         .unwrap()
     }
@@ -312,7 +318,7 @@ mod tests {
         let mut gitlinks = HashSet::new();
         gitlinks.insert("cfg/sub".to_string());
 
-        let groups = compute(tmp.path(), vec![rel("cfg/a.conf")], &gitlinks).unwrap();
+        let groups = compute(tmp.path(), vec![rel("cfg/a.conf")], &gitlinks, false).unwrap();
 
         assert!(groups.full_dirs.is_empty());
         assert_eq!(groups.remaining_files, vec![rel("cfg/a.conf")]);

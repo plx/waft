@@ -458,3 +458,71 @@ fn validate_rejects_symlinked_worktreeinclude_under_error_policy() {
         .failure()
         .stderr(predicate::str::contains("symlinked .worktreeinclude"));
 }
+
+/// A linked worktree whose recorded path holds a symlinked spelling must
+/// still be recognized as part of the source's worktree family. The CLI
+/// backend echoes Git's recorded paths, so without normalization the
+/// destination looks like it belongs to a different repository and the copy is
+/// rejected.
+#[cfg(unix)]
+#[test]
+fn copy_through_a_symlinked_worktree_record_succeeds_for_both_backends() {
+    for backend in ["gix", "cli"] {
+        let parent = TempDir::new().unwrap();
+        let real = parent.path().join("real");
+        fs::create_dir(&real).unwrap();
+        git(&real, &["init"]);
+        git(&real, &["config", "user.email", "test@test.com"]);
+        git(&real, &["config", "user.name", "Test"]);
+
+        write_file(&real, ".gitignore", ".env\n");
+        write_file(&real, ".worktreeinclude", ".env\n");
+        git(&real, &["add", ".gitignore", ".worktreeinclude"]);
+        git(&real, &["commit", "-m", "init"]);
+        write_file(&real, ".env", "SECRET=foo\n");
+
+        let worktrees = parent.path().join("worktrees");
+        fs::create_dir(&worktrees).unwrap();
+        let linked = worktrees.join("linked");
+        git(
+            &real,
+            &[
+                "worktree",
+                "add",
+                linked.to_str().unwrap(),
+                "-b",
+                "linked-branch",
+            ],
+        );
+
+        let worktrees_alias = parent.path().join("worktrees-alias");
+        std::os::unix::fs::symlink(&worktrees, &worktrees_alias).unwrap();
+        fs::write(
+            real.join(".git/worktrees/linked/gitdir"),
+            format!("{}\n", worktrees_alias.join("linked/.git").display()),
+        )
+        .unwrap();
+
+        let symlinked_source = parent.path().join("via-symlink");
+        std::os::unix::fs::symlink(&real, &symlinked_source).unwrap();
+
+        waft()
+            .env("WAFT_GIT_BACKEND", backend)
+            .args([
+                "copy",
+                "--source",
+                symlinked_source.to_str().unwrap(),
+                "--dest",
+                linked.to_str().unwrap(),
+            ])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("copied: .env"));
+
+        assert_eq!(
+            fs::read_to_string(linked.join(".env")).unwrap(),
+            "SECRET=foo\n",
+            "{backend} backend did not publish through the symlinked source"
+        );
+    }
+}

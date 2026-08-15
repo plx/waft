@@ -14,6 +14,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
@@ -126,6 +127,31 @@ pub trait GitBackend {
     /// Read a Git config value as a string. Returns `None` if the key is unset.
     fn read_config(&self, source_root: &Path, key: &str) -> Result<Option<String>>;
 
+    /// Whether this checkout treats differently-cased spellings of a path as
+    /// naming the same file.
+    ///
+    /// This single answer drives tracked-path protection and repository
+    /// boundary comparisons, so the two cannot disagree. The real backends
+    /// override this to distinguish an explicitly configured
+    /// `core.ignoreCase = false` from an absent key; see
+    /// [`case_folding_applies`].
+    ///
+    /// The real backends resolve this **once per repository per backend
+    /// instance** and reuse the answer for the rest of that instance's life.
+    /// Re-reading it would put a config lookup — a subprocess, for
+    /// [`GitCli`] — on the per-file path the executor takes while holding the
+    /// destination index lock, and the answer is a property of the checkout's
+    /// filesystem that Git records at creation time. A `core.ignoreCase` edit
+    /// made after the first query is therefore not observed by that instance;
+    /// construct a new backend to pick it up.
+    ///
+    /// Note that this governs *repository path* comparisons. Exclusion
+    /// pattern matching keeps its own deliberately more conservative rule; see
+    /// [`crate::policy_filter::effective_case_insensitive`].
+    fn checkout_folds_case(&self, source_root: &Path) -> Result<bool> {
+        self.read_bool_config(source_root, "core.ignoreCase")
+    }
+
     /// Whether this backend reads Git's ambient default global excludes file.
     ///
     /// Real backends return true. In-memory test/specialized backends default
@@ -135,26 +161,128 @@ pub trait GitBackend {
     }
 }
 
+/// Which [`GitBackend`] implementation `WAFT_GIT_BACKEND` selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitBackendKind {
+    /// In-process `gix` backend; the default.
+    Gix,
+    /// `git` subprocess backend.
+    Cli,
+}
+
+/// Valid `WAFT_GIT_BACKEND` values, in the order they are reported to users.
+const GIT_BACKEND_VALUES: &str = "\"gix\", \"cli\"";
+
+/// Parse a `WAFT_GIT_BACKEND` value.
+///
+/// Surrounding whitespace is trimmed and the name is matched
+/// ASCII-case-insensitively, so `cli`, `CLI`, and `" cli "` all select the
+/// subprocess backend. Anything else is rejected: silently falling back to
+/// the default backend on a typo would change which implementation enforces
+/// waft's tracked-path and boundary checks without telling anyone.
+fn parse_git_backend_kind(value: &str) -> Result<GitBackendKind> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "gix" => Ok(GitBackendKind::Gix),
+        "cli" => Ok(GitBackendKind::Cli),
+        other => Err(Error::Config {
+            message: format!(
+                "WAFT_GIT_BACKEND=\"{other}\" is not a known Git backend; \
+                 valid values are {GIT_BACKEND_VALUES}"
+            ),
+        }),
+    }
+}
+
 /// Create the configured Git backend.
 ///
-/// Uses the in-process `gix` backend by default.
-/// Set `WAFT_GIT_BACKEND=cli` to use the Git CLI backend as a fallback.
-pub fn default_git_backend() -> Box<dyn GitBackend> {
-    if std::env::var("WAFT_GIT_BACKEND").as_deref() == Ok("cli") {
-        Box::new(GitCli::new())
-    } else {
-        Box::new(GitGix::new())
-    }
+/// Uses the in-process `gix` backend when `WAFT_GIT_BACKEND` is unset. See
+/// [`parse_git_backend_kind`] for the accepted values; an unrecognized value
+/// is a hard error.
+pub fn default_git_backend() -> Result<Box<dyn GitBackend>> {
+    let kind = match std::env::var("WAFT_GIT_BACKEND") {
+        Ok(value) => parse_git_backend_kind(&value)?,
+        Err(std::env::VarError::NotPresent) => GitBackendKind::Gix,
+        Err(std::env::VarError::NotUnicode(value)) => {
+            return Err(Error::Config {
+                message: format!(
+                    "WAFT_GIT_BACKEND={value:?} is not valid Unicode; \
+                     valid values are {GIT_BACKEND_VALUES}"
+                ),
+            });
+        }
+    };
+    Ok(match kind {
+        GitBackendKind::Gix => Box::new(GitGix::new()) as Box<dyn GitBackend>,
+        GitBackendKind::Cli => Box::new(GitCli::new()),
+    })
 }
 
 /// Git backend that shells out to the `git` CLI.
 #[derive(Debug, Default)]
-pub struct GitCli;
+pub struct GitCli {
+    cache: RepoStateCache,
+}
 
 impl GitCli {
     /// Create a new `GitCli` backend.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Return this repository's index-derived state, reusing the cached copy
+    /// while the index file is unchanged.
+    fn index_state(&self, source_root: &Path) -> Result<Arc<RepoIndexState>> {
+        let index_path = self
+            .cache
+            .index_path(source_root, || self.resolve_index_path(source_root))?;
+        let ignore_case = self.cached_checkout_folds_case(source_root)?;
+        self.cache.index_state(source_root, &index_path, || {
+            // One `ls-files -s` yields both the tracked names and the
+            // gitlink (mode 160000) entries, so a run needs a single
+            // subprocess for all tracked-state questions about this index.
+            let output = self.run_git(source_root, &["ls-files", "-s", "-z", "--full-name"])?;
+            RepoIndexState::from_ls_files_stage_output(&output, ignore_case)
+        })
+    }
+
+    /// Resolve `core.ignoreCase` once per repository; see
+    /// [`GitBackend::checkout_folds_case`] for the contract.
+    ///
+    /// Kept out of the index-fingerprinted snapshot deliberately: the config
+    /// is not the index, so an index write must not re-run the config read,
+    /// and a config edit must not appear to be observed just because the index
+    /// happened to move.
+    fn cached_checkout_folds_case(&self, source_root: &Path) -> Result<bool> {
+        self.cache
+            .checkout_folds_case(source_root, || self.read_checkout_folds_case(source_root))
+    }
+
+    fn resolve_index_path(&self, source_root: &Path) -> Result<PathBuf> {
+        let output = self.run_git(source_root, &["rev-parse", "--git-path", "index"])?;
+        let path_bytes = trim_git_line_ending(&output);
+        let raw = path_buf_from_git_bytes(path_bytes, "Git index path")?;
+        Ok(if raw.is_absolute() {
+            raw
+        } else {
+            source_root.join(raw)
+        })
+    }
+
+    fn read_checkout_folds_case(&self, source_root: &Path) -> Result<bool> {
+        // `git config --bool` exits non-zero when the key is unset, which
+        // `run_git` reports as an error; treat that as "no recorded answer".
+        let configured = self
+            .run_git(
+                source_root,
+                &["config", "--bool", "--get", "core.ignoreCase"],
+            )
+            .ok()
+            .and_then(|bytes| match String::from_utf8_lossy(&bytes).trim() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            });
+        Ok(case_folding_applies(configured))
     }
 
     fn run_git(&self, root: &Path, args: &[&str]) -> Result<Vec<u8>> {
@@ -223,12 +351,44 @@ impl GitCli {
 ///
 /// During migration, operations not yet ported may still delegate to [`GitCli`].
 #[derive(Debug, Default)]
-pub struct GitGix;
+pub struct GitGix {
+    cache: RepoStateCache,
+}
 
 impl GitGix {
     /// Create a new `GitGix` backend.
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    /// Return this repository's index-derived state, reusing the cached copy
+    /// while the index file is unchanged.
+    fn index_state(&self, source_root: &Path) -> Result<Arc<RepoIndexState>> {
+        let index_path = self.cache.index_path(source_root, || {
+            Ok(self.discover_repo(source_root)?.index_path())
+        })?;
+        let ignore_case = self.cached_checkout_folds_case(source_root)?;
+        self.cache.index_state(source_root, &index_path, || {
+            let repo = self.discover_repo(source_root)?;
+            let index = repo.index_or_empty().map_err(|e| Error::Git {
+                message: format!(
+                    "gix failed to read index for {}: {e}",
+                    source_root.display()
+                ),
+            })?;
+            RepoIndexState::from_gix_index(&index, ignore_case)
+        })
+    }
+
+    /// Resolve `core.ignoreCase` once per repository; see
+    /// [`GitBackend::checkout_folds_case`] for the contract.
+    fn cached_checkout_folds_case(&self, source_root: &Path) -> Result<bool> {
+        self.cache.checkout_folds_case(source_root, || {
+            let repo = self.discover_repo(source_root)?;
+            Ok(case_folding_applies(
+                repo.config_snapshot().boolean("core.ignoreCase"),
+            ))
+        })
     }
 
     fn discover_repo(&self, path: &Path) -> Result<gix::Repository> {
@@ -311,7 +471,16 @@ impl GitBackend for GitCli {
 
     fn list_worktrees(&self, source_root: &Path) -> Result<Vec<WorktreeRecord>> {
         let output = self.run_git(source_root, &["worktree", "list", "--porcelain", "-z"])?;
-        parse_worktree_list(&output)
+        let mut records = parse_worktree_list(&output)?;
+        // Git echoes each worktree's registered path verbatim, which keeps any
+        // symlinked ancestor in the spelling. `show_toplevel` and the gix
+        // backend both hand back canonical roots, so normalize here too:
+        // otherwise main-vs-linked classification and the anchored copy engine
+        // compare a symlinked path against a canonical one.
+        for record in &mut records {
+            record.path = normalize_repo_path(&record.path);
+        }
+        Ok(records)
     }
 
     fn tracked_paths(
@@ -328,35 +497,18 @@ impl GitBackend for GitCli {
         // would let `SECRET.env` be treated as untracked when the index
         // contains `secret.env`. Enumerate the index once and return the
         // caller's spelling for every matching query.
-        let output = self.run_git(source_root, &["ls-files", "--cached", "--full-name", "-z"])?;
-        let ignore_case = self.read_bool_config(source_root, "core.ignoreCase")?;
-        let index_paths = TrackedPathLookup::new(
-            output.split(|&b| b == 0).filter(|entry| !entry.is_empty()),
-            ignore_case,
-        );
-        let mut result = HashSet::new();
-        for path in paths {
-            if index_paths.contains(source_root, path.as_str().as_bytes()) {
-                result.insert(path.clone());
-            }
-        }
-        Ok(result)
+        let state = self.index_state(source_root)?;
+        Ok(state.tracked.select(source_root, paths))
     }
 
     fn index_path(&self, source_root: &Path) -> Result<Option<PathBuf>> {
-        let output = self.run_git(source_root, &["rev-parse", "--git-path", "index"])?;
-        let path_bytes = trim_git_line_ending(&output);
-        let raw = path_buf_from_git_bytes(path_bytes, "Git index path")?;
-        let path = if raw.is_absolute() {
-            raw
-        } else {
-            source_root.join(raw)
-        };
-        Ok(Some(path))
+        self.cache
+            .index_path(source_root, || self.resolve_index_path(source_root))
+            .map(Some)
     }
 
     fn gitlinks(&self, source_root: &Path) -> Result<HashSet<String>> {
-        read_gitlinks_via_cli(self, source_root)
+        Ok(self.index_state(source_root)?.gitlinks.clone())
     }
 
     fn check_ignore(
@@ -428,12 +580,17 @@ impl GitBackend for GitCli {
         // querying the index for gitlinks via `git ls-files -s`. This keeps
         // both backends in agreement on which subtrees count as "in the
         // repo" for purposes of this check.
-        let gitlinks = read_gitlinks_via_cli(self, source_root)?;
+        let state = self.index_state(source_root)?;
         Ok(walk_for_first_worktreeinclude(
             source_root,
-            &gitlinks,
+            &state.gitlinks,
+            state.ignore_case,
             symlink_policy,
         ))
+    }
+
+    fn checkout_folds_case(&self, source_root: &Path) -> Result<bool> {
+        self.cached_checkout_folds_case(source_root)
     }
 
     fn read_bool_config(&self, source_root: &Path, key: &str) -> Result<bool> {
@@ -542,49 +699,20 @@ impl GitBackend for GitGix {
             return Ok(HashSet::new());
         }
 
-        let repo = self.discover_repo(source_root)?;
-        let index = repo.index_or_empty().map_err(|e| Error::Git {
-            message: format!(
-                "gix failed to read index for {}: {e}",
-                source_root.display()
-            ),
-        })?;
-
-        let mut tracked = HashSet::new();
-        let ignore_case = repo
-            .config_snapshot()
-            .boolean("core.ignoreCase")
-            .unwrap_or(false);
-        let index_paths = TrackedPathLookup::new(
-            index
-                .entries()
-                .iter()
-                .map(|entry| entry.path(&index).as_ref()),
-            ignore_case,
-        );
-        for path in paths {
-            if index_paths.contains(source_root, path.as_str().as_bytes()) {
-                tracked.insert(path.clone());
-            }
-        }
-
-        Ok(tracked)
+        let state = self.index_state(source_root)?;
+        Ok(state.tracked.select(source_root, paths))
     }
 
     fn index_path(&self, source_root: &Path) -> Result<Option<PathBuf>> {
-        Ok(Some(self.discover_repo(source_root)?.index_path()))
+        self.cache
+            .index_path(source_root, || {
+                Ok(self.discover_repo(source_root)?.index_path())
+            })
+            .map(Some)
     }
 
     fn gitlinks(&self, source_root: &Path) -> Result<HashSet<String>> {
-        let repo = self.discover_repo(source_root)?;
-        let index = repo.index_or_empty().map_err(|e| Error::Git {
-            message: format!(
-                "gix failed to read index for {}: {e}",
-                source_root.display()
-            ),
-        })?;
-
-        gitlinks_from_gix_index(&index)
+        Ok(self.index_state(source_root)?.gitlinks.clone())
     }
 
     fn check_ignore(
@@ -660,35 +788,19 @@ impl GitBackend for GitGix {
         semantics: WorktreeincludeSemantics,
         symlink_policy: SymlinkPolicy,
     ) -> Result<Vec<RepoRelPath>> {
-        let repo = self.discover_repo(source_root)?;
-        let index = repo.index_or_empty().map_err(|e| Error::Git {
-            message: format!(
-                "gix failed to read index for {}: {e}",
-                source_root.display()
-            ),
-        })?;
-        let ignore_case = repo
-            .config_snapshot()
-            .boolean("core.ignoreCase")
-            .unwrap_or(false);
-        let tracked_paths = TrackedPathLookup::new(
-            index
-                .entries()
-                .iter()
-                .map(|entry| entry.path(&index).as_ref()),
-            ignore_case,
-        );
-
         // Submodules registered with `git submodule add` are stored in the
         // index as entries with mode 160000 (gitlink). `git ls-files` skips
         // these when walking the worktree, and so must we.
-        let gitlinks = gitlinks_from_gix_index(&index)?;
+        let state = self.index_state(source_root)?;
+        let ignore_case = state.ignore_case;
+        let tracked_paths = &state.tracked;
+        let gitlinks = &state.gitlinks;
 
         let engine = crate::worktreeinclude_engine::engine_for(semantics);
         let mut candidates = Vec::new();
         for entry in walkdir::WalkDir::new(source_root)
             .into_iter()
-            .filter_entry(|e| !is_nested_git_boundary(e, source_root, &gitlinks))
+            .filter_entry(|e| !is_nested_git_boundary(e, source_root, gitlinks, ignore_case))
         {
             let entry = entry.map_err(|e| Error::Git {
                 message: format!("failed walking {}: {e}", source_root.display()),
@@ -742,12 +854,6 @@ impl GitBackend for GitGix {
 
     fn list_ignored_untracked(&self, source_root: &Path) -> Result<Vec<RepoRelPath>> {
         let repo = self.discover_repo(source_root)?;
-        let index = repo.index_or_empty().map_err(|e| Error::Git {
-            message: format!(
-                "gix failed to read index for {}: {e}",
-                source_root.display()
-            ),
-        })?;
         let worktree = repo.worktree().ok_or_else(|| Error::Git {
             message: format!(
                 "cannot enumerate ignored files for bare repository at {}",
@@ -761,23 +867,15 @@ impl GitBackend for GitGix {
             ),
         })?;
 
-        let gitlinks = gitlinks_from_gix_index(&index)?;
-        let ignore_case = repo
-            .config_snapshot()
-            .boolean("core.ignoreCase")
-            .unwrap_or(false);
-        let tracked_paths = TrackedPathLookup::new(
-            index
-                .entries()
-                .iter()
-                .map(|entry| entry.path(&index).as_ref()),
-            ignore_case,
-        );
+        let state = self.index_state(source_root)?;
+        let ignore_case = state.ignore_case;
+        let tracked_paths = &state.tracked;
+        let gitlinks = &state.gitlinks;
 
         let mut result = Vec::new();
         for entry in walkdir::WalkDir::new(source_root)
             .into_iter()
-            .filter_entry(|e| !is_nested_git_boundary(e, source_root, &gitlinks))
+            .filter_entry(|e| !is_nested_git_boundary(e, source_root, gitlinks, ignore_case))
         {
             let entry = entry.map_err(|e| Error::Git {
                 message: format!("failed walking {}: {e}", source_root.display()),
@@ -823,19 +921,17 @@ impl GitBackend for GitGix {
         source_root: &Path,
         symlink_policy: SymlinkPolicy,
     ) -> Result<bool> {
-        let repo = self.discover_repo(source_root)?;
-        let index = repo.index_or_empty().map_err(|e| Error::Git {
-            message: format!(
-                "gix failed to read index for {}: {e}",
-                source_root.display()
-            ),
-        })?;
-        let gitlinks = gitlinks_from_gix_index(&index)?;
+        let state = self.index_state(source_root)?;
         Ok(walk_for_first_worktreeinclude(
             source_root,
-            &gitlinks,
+            &state.gitlinks,
+            state.ignore_case,
             symlink_policy,
         ))
+    }
+
+    fn checkout_folds_case(&self, source_root: &Path) -> Result<bool> {
+        self.cached_checkout_folds_case(source_root)
     }
 
     fn read_bool_config(&self, source_root: &Path, key: &str) -> Result<bool> {
@@ -865,45 +961,202 @@ impl GitBackend for GitGix {
     }
 }
 
-/// Read the set of gitlink paths (mode 160000) from the index using the Git
-/// CLI. Used by the [`GitCli`] backend when it needs the same submodule
-/// boundary information that the gix backend gets from its in-process index.
-fn read_gitlinks_via_cli(cli: &GitCli, source_root: &Path) -> Result<HashSet<String>> {
-    // `git ls-files -s -z` emits one entry per line in the form
-    // `<mode> <hash> <stage>\t<path>` with NUL separators.
-    let output = cli.run_git(source_root, &["ls-files", "-s", "-z"])?;
-    let mut links = HashSet::new();
-    for record in output.split(|&b| b == 0) {
-        if record.is_empty() {
-            continue;
+/// Everything a run needs to know about one repository's index.
+///
+/// Grouping these together lets a backend answer trackedness and submodule
+/// boundary questions from a single index read.
+#[derive(Debug)]
+struct RepoIndexState {
+    /// Tracked-name lookup built from every index entry.
+    tracked: TrackedPathLookup,
+    /// Registered submodule paths (mode 160000 gitlinks).
+    gitlinks: HashSet<String>,
+    /// Whether this checkout folds case; see [`case_folding_applies`].
+    ///
+    /// Carried here so walkers reading a snapshot get the same answer the
+    /// tracked lookup was built with. It is resolved from the config by
+    /// [`RepoStateCache::checkout_folds_case`], not from the index, and is
+    /// stable for the life of a backend instance.
+    ignore_case: bool,
+}
+
+impl RepoIndexState {
+    /// Build from `git ls-files -s -z --full-name` output.
+    ///
+    /// Each record is `<mode> <object> <stage>\t<path>`, so one invocation
+    /// supplies both the tracked names and the gitlink entries. Only gitlink
+    /// paths are converted to [`RepoRelPath`]; tracked names stay raw bytes so
+    /// an unrelated non-UTF-8 index entry cannot fail the whole lookup.
+    fn from_ls_files_stage_output(output: &[u8], ignore_case: bool) -> Result<Self> {
+        let mut tracked_paths: Vec<&[u8]> = Vec::new();
+        let mut gitlinks = HashSet::new();
+        for record in output.split(|&b| b == 0) {
+            if record.is_empty() {
+                continue;
+            }
+            let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
+                continue;
+            };
+            let (metadata, path) = record.split_at(tab);
+            let path = &path[1..];
+            if metadata.starts_with(b"160000 ") {
+                gitlinks.insert(RepoRelPath::from_git_bytes(path)?.as_str().to_string());
+            }
+            tracked_paths.push(path);
         }
-        // Format: "160000 <hash> <stage>\t<path>"
-        let Some(tab) = record.iter().position(|byte| *byte == b'\t') else {
-            continue;
-        };
-        if record[..tab].starts_with(b"160000 ") {
-            let path = RepoRelPath::from_git_bytes(&record[tab + 1..])?;
-            links.insert(path.as_str().to_string());
-        }
+        Ok(Self {
+            tracked: TrackedPathLookup::new(tracked_paths, ignore_case),
+            gitlinks,
+            ignore_case,
+        })
     }
-    Ok(links)
+
+    fn from_gix_index(index: &gix::index::State, ignore_case: bool) -> Result<Self> {
+        Ok(Self {
+            tracked: TrackedPathLookup::new(
+                index
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.path(index).as_ref()),
+                ignore_case,
+            ),
+            gitlinks: gitlinks_from_gix_index(index)?,
+            ignore_case,
+        })
+    }
+}
+
+/// Identifying stat data for a Git index file.
+///
+/// Git publishes a new index by renaming `index.lock` over `index`, so any
+/// committed change to trackedness gives the index a new inode; size and
+/// modification time catch the remaining unusual writers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IndexFingerprint {
+    identity: Option<FilesystemIdentity>,
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn index_fingerprint(index_path: &Path) -> Option<IndexFingerprint> {
+    let metadata = std::fs::symlink_metadata(index_path).ok()?;
+    Some(IndexFingerprint {
+        identity: filesystem_identity(index_path),
+        size: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+/// Per-backend memo of index-derived repository state.
+///
+/// The executor calls `tracked_paths` once per published file while holding
+/// the destination index lock. Rebuilding the lookup there costs a full index
+/// read every time — and for the CLI backend, several subprocess spawns under
+/// the lock. Instead each backend builds the state once per repository and
+/// revalidates it with a single `stat` of the index file, which keeps the
+/// under-lock recheck honest: a cache hit means the same index bytes the
+/// snapshot was built from are still in place.
+///
+/// `core.ignoreCase` is memoized separately and *not* fingerprinted. It comes
+/// from the config, not the index, so folding it into the index snapshot would
+/// tie a config answer to an unrelated file's mtime: an index write would
+/// re-run the config read, and a config edit would appear to take effect only
+/// if the index happened to move. Resolving it exactly once per repository is
+/// both cheaper and honest about what is guaranteed; see
+/// [`GitBackend::checkout_folds_case`].
+#[derive(Debug, Default)]
+struct RepoStateCache {
+    index_paths: Mutex<HashMap<PathBuf, PathBuf>>,
+    case_folding: Mutex<HashMap<PathBuf, bool>>,
+    states: Mutex<HashMap<PathBuf, (IndexFingerprint, Arc<RepoIndexState>)>>,
+}
+
+impl RepoStateCache {
+    /// Resolve the index path for `source_root` once per backend instance.
+    fn index_path(
+        &self,
+        source_root: &Path,
+        resolve: impl FnOnce() -> Result<PathBuf>,
+    ) -> Result<PathBuf> {
+        if let Some(cached) = lock(&self.index_paths).get(source_root) {
+            return Ok(cached.clone());
+        }
+        let resolved = resolve()?;
+        lock(&self.index_paths).insert(source_root.to_path_buf(), resolved.clone());
+        Ok(resolved)
+    }
+
+    /// Resolve `core.ignoreCase` for `source_root` once per backend instance.
+    ///
+    /// Every later query returns the first answer, so one run cannot apply
+    /// folded protection to some paths and exact matching to others.
+    fn checkout_folds_case(
+        &self,
+        source_root: &Path,
+        resolve: impl FnOnce() -> Result<bool>,
+    ) -> Result<bool> {
+        if let Some(cached) = lock(&self.case_folding).get(source_root) {
+            return Ok(*cached);
+        }
+        let resolved = resolve()?;
+        lock(&self.case_folding).insert(source_root.to_path_buf(), resolved);
+        Ok(resolved)
+    }
+
+    /// Return the cached state when the index file is still the one the state
+    /// was built from, otherwise build a fresh state and cache that.
+    fn index_state(
+        &self,
+        source_root: &Path,
+        index_path: &Path,
+        build: impl FnOnce() -> Result<RepoIndexState>,
+    ) -> Result<Arc<RepoIndexState>> {
+        let before = index_fingerprint(index_path);
+        if let Some(before) = before
+            && let Some((fingerprint, state)) = lock(&self.states).get(source_root)
+            && *fingerprint == before
+        {
+            return Ok(Arc::clone(state));
+        }
+
+        let state = Arc::new(build()?);
+        // Only cache when the index did not change while it was being read;
+        // otherwise the snapshot cannot be attributed to either fingerprint.
+        if let Some(before) = before
+            && index_fingerprint(index_path) == Some(before)
+        {
+            lock(&self.states).insert(source_root.to_path_buf(), (before, Arc::clone(&state)));
+        }
+        Ok(state)
+    }
+}
+
+/// Take a lock, recovering from poisoning.
+///
+/// A panic elsewhere must not turn a cache into a hard failure; the cached
+/// values are plain data and remain consistent.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Walk the source tree looking for the first `.worktreeinclude` file,
 /// skipping nested git checkouts/submodules.
 ///
-/// Pure filesystem walk; the only Git-specific input is the gitlinks set.
-/// Under `SymlinkPolicy::Ignore`, symlinked rule files do not count toward
-/// existence (consistent with their being treated as absent during
-/// selection).
+/// Pure filesystem walk; the only Git-specific inputs are the gitlinks set and
+/// the checkout's case sensitivity. Under `SymlinkPolicy::Ignore`, symlinked
+/// rule files do not count toward existence (consistent with their being
+/// treated as absent during selection).
 fn walk_for_first_worktreeinclude(
     source_root: &Path,
     gitlinks: &HashSet<String>,
+    ignore_case: bool,
     symlink_policy: SymlinkPolicy,
 ) -> bool {
     for entry in walkdir::WalkDir::new(source_root)
         .into_iter()
-        .filter_entry(|e| !is_nested_git_boundary(e, source_root, gitlinks))
+        .filter_entry(|e| !is_nested_git_boundary(e, source_root, gitlinks, ignore_case))
     {
         let entry = match entry {
             Ok(e) => e,
@@ -936,25 +1189,19 @@ fn cli_list_candidates_with_engine(
     semantics: WorktreeincludeSemantics,
     symlink_policy: SymlinkPolicy,
 ) -> Result<Vec<RepoRelPath>> {
-    let gitlinks = read_gitlinks_via_cli(cli, source_root)?;
-    let ignore_case = cli
-        .read_bool_config(source_root, "core.ignoreCase")
-        .unwrap_or(false);
-
     // Tracked paths must be excluded from candidates, the same as the index
-    // check used by the gix backend. Use `git ls-files --cached` for a
-    // single CLI invocation rather than per-path checks.
-    let cached = cli.run_git(source_root, &["ls-files", "--cached", "-z"])?;
-    let tracked = TrackedPathLookup::new(
-        cached.split(|&b| b == 0).filter(|entry| !entry.is_empty()),
-        ignore_case,
-    );
+    // check used by the gix backend, and gitlinks bound the walk. Both come
+    // from one cached index read rather than per-path or per-run subprocesses.
+    let state = cli.index_state(source_root)?;
+    let ignore_case = state.ignore_case;
+    let tracked = &state.tracked;
+    let gitlinks = &state.gitlinks;
 
     let engine = crate::worktreeinclude_engine::engine_for(semantics);
     let mut candidates = Vec::new();
     for entry in walkdir::WalkDir::new(source_root)
         .into_iter()
-        .filter_entry(|e| !is_nested_git_boundary(e, source_root, &gitlinks))
+        .filter_entry(|e| !is_nested_git_boundary(e, source_root, gitlinks, ignore_case))
     {
         let entry = entry.map_err(|e| Error::Git {
             message: format!("failed walking {}: {e}", source_root.display()),
@@ -1022,25 +1269,52 @@ pub(crate) fn repo_paths_equivalent(left: &str, right: &str, ignore_case: bool) 
     repo_path_bytes_equal(left.as_bytes(), right.as_bytes(), ignore_case)
 }
 
-/// Return true when `alias` is a non-exact spelling that the filesystem
-/// resolves to the same entry as `canonical`.
+/// One repository path's "is this a filesystem alias of some other path?"
+/// question, with everything that depends only on that path resolved up front.
+///
+/// Callers ask this of a whole candidate set at once. The two costly parts
+/// depend only on the probed path: proving it is a *non-exact* spelling reads
+/// one directory per path component, and resolving its identity is a `stat`.
+/// Both are hoisted here so testing a candidate set costs one `stat` per
+/// candidate instead of a directory walk per candidate.
 ///
 /// Requiring at least one missing exact directory entry distinguishes a
 /// case/normalization alias from two explicitly named hard links.
-pub(crate) fn repo_paths_alias_on_filesystem(
-    source_root: &Path,
-    canonical: &RepoRelPath,
-    alias: &RepoRelPath,
-) -> bool {
-    if canonical == alias || repo_path_has_exact_spelling(source_root, alias) {
-        return false;
+pub(crate) struct RepoPathAliasProbe<'a> {
+    source_root: &'a Path,
+    alias: &'a RepoRelPath,
+    /// Identity of `alias`, or `None` when it cannot be an alias of anything:
+    /// it already names an existing entry exactly, or it does not resolve.
+    identity: Option<FilesystemIdentity>,
+}
+
+impl<'a> RepoPathAliasProbe<'a> {
+    /// Resolve the path-dependent half of the question.
+    pub(crate) fn new(source_root: &'a Path, alias: &'a RepoRelPath) -> Self {
+        let identity = if repo_path_has_exact_spelling(source_root, alias) {
+            None
+        } else {
+            repo_path_filesystem_identity(source_root, alias.as_str().as_bytes())
+        };
+        Self {
+            source_root,
+            alias,
+            identity,
+        }
     }
 
-    let canonical_info = repo_path_filesystem_info(source_root, canonical.as_str().as_bytes());
-    let alias_info = repo_path_filesystem_info(source_root, alias.as_str().as_bytes());
-    canonical_info
-        .zip(alias_info)
-        .is_some_and(|(canonical, alias)| canonical.identity == alias.identity)
+    /// Whether the filesystem resolves the probed path and `canonical` to the
+    /// same entry, the probed path being the non-exact spelling of the two.
+    pub(crate) fn resolves_to(&self, canonical: &RepoRelPath) -> bool {
+        let Some(identity) = self.identity else {
+            return false;
+        };
+        if canonical == self.alias {
+            return false;
+        }
+        repo_path_filesystem_identity(self.source_root, canonical.as_str().as_bytes())
+            == Some(identity)
+    }
 }
 
 fn repo_path_has_exact_spelling(source_root: &Path, path: &RepoRelPath) -> bool {
@@ -1094,48 +1368,67 @@ fn case_folded_repo_path(path: &[u8]) -> CaseFoldedRepoPath {
     }
 }
 
-/// Precomputed tracked-name lookup with lazy filesystem-identity checks.
+/// Decide whether differently-cased spellings name the same repository path.
 ///
-/// Exact and protected case-folded queries are constant-time. On platforms
-/// where folding is not automatically protective, only tracked names in the
-/// query's folded-name bucket are opened to detect a filesystem alias.
-/// macOS/Windows native aliases and Unix hard-linked queries may require a
-/// wider identity scan.
+/// `configured` is `core.ignoreCase` as recorded in the repository config, or
+/// `None` when the key is absent. Git probes the checkout's filesystem when it
+/// creates a repository and records the answer there, so an explicit value is
+/// authoritative for that checkout and is exactly what Git itself obeys: a
+/// case-sensitive volume with `core.ignoreCase = false` really does hold
+/// `Secret.env` and `secret.env` as two distinct files, and treating them as
+/// one silently drops a legitimate candidate.
+///
+/// Only when the key is absent — a repository whose config Git did not write —
+/// does the platform's usual filesystem behavior decide, so a hand-assembled
+/// macOS or Windows checkout still gets the conservative answer.
+pub(crate) fn case_folding_applies(configured: Option<bool>) -> bool {
+    configured.unwrap_or(cfg!(any(target_os = "macos", windows)))
+}
+
+/// Precomputed tracked-name lookup.
+///
+/// Every query is a hash lookup against the index names, plus — only when a
+/// query collides with a tracked name under Unicode case folding — a
+/// filesystem-identity check against the 0-1 colliding index entries. Work per
+/// query is therefore bounded by the size of that one folded-name bucket,
+/// never by the size of the index.
+#[derive(Debug)]
 struct TrackedPathLookup {
     exact: HashSet<Vec<u8>>,
-    protected_folded: Option<HashSet<CaseFoldedRepoPath>>,
-    always_folded: HashMap<CaseFoldedRepoPath, Vec<Vec<u8>>>,
+    folded: HashMap<CaseFoldedRepoPath, Vec<Vec<u8>>>,
+    /// Whether a folded-name collision alone proves trackedness, i.e. whether
+    /// the checkout folds case; see [`case_folding_applies`].
+    protect_folded_names: bool,
 }
 
 impl TrackedPathLookup {
     fn new<'a>(paths: impl IntoIterator<Item = &'a [u8]>, ignore_case: bool) -> Self {
         let mut exact = HashSet::new();
-        // A false core.ignoreCase cannot prove that a macOS volume or Windows
-        // directory is case-sensitive, especially when both spellings are
-        // currently absent and there is no filesystem identity to compare.
-        // Prefer a conservative skip on those platforms. Linux keeps Git's
-        // configured semantics and uses the lazy identity checks below.
-        let protect_folded_names = ignore_case || cfg!(target_os = "macos") || cfg!(windows);
-        let mut protected_folded = protect_folded_names.then(HashSet::new);
-        let mut always_folded: HashMap<CaseFoldedRepoPath, Vec<Vec<u8>>> = HashMap::new();
+        let mut folded: HashMap<CaseFoldedRepoPath, Vec<Vec<u8>>> = HashMap::new();
 
         for path in paths {
             exact.insert(path.to_vec());
-            let folded_path = case_folded_repo_path(path);
-            if let Some(protected_folded) = &mut protected_folded {
-                protected_folded.insert(folded_path.clone());
-            }
-            always_folded
-                .entry(folded_path)
+            folded
+                .entry(case_folded_repo_path(path))
                 .or_default()
                 .push(path.to_vec());
         }
 
         Self {
             exact,
-            protected_folded,
-            always_folded,
+            folded,
+            protect_folded_names: ignore_case,
         }
+    }
+
+    /// Return the subset of `paths` that the index tracks, in the caller's
+    /// spelling.
+    fn select(&self, source_root: &Path, paths: &[RepoRelPath]) -> HashSet<RepoRelPath> {
+        paths
+            .iter()
+            .filter(|path| self.contains(source_root, path.as_str().as_bytes()))
+            .cloned()
+            .collect()
     }
 
     fn contains(&self, source_root: &Path, query: &[u8]) -> bool {
@@ -1143,49 +1436,32 @@ impl TrackedPathLookup {
             return true;
         }
 
-        let folded_query = case_folded_repo_path(query);
-        if self
-            .protected_folded
-            .as_ref()
-            .is_some_and(|folded| folded.contains(&folded_query))
-        {
-            return true;
-        }
-
-        let Some(query_info) = repo_path_filesystem_info(source_root, query) else {
+        // No tracked name folds onto this query, so no spelling of it can be
+        // the tracked one. This is the overwhelmingly common answer and costs
+        // one hash lookup.
+        let Some(bucket) = self.folded.get(&case_folded_repo_path(query)) else {
             return false;
         };
 
-        if let Some(bucket) = self.always_folded.get(&folded_query)
-            && bucket.iter().any(|path| {
-                repo_path_filesystem_info(source_root, path)
-                    .is_some_and(|info| info.identity == query_info.identity)
-            })
-        {
+        if self.protect_folded_names {
             return true;
         }
 
-        // A filesystem's native caseless comparison can be broader than the
-        // Unicode version compiled into this binary. On macOS and Windows,
-        // compare identities across every folded bucket when the query
-        // resolves; on other Unix systems the wider scan is needed for hard
-        // links.
-        (cfg!(target_os = "macos") || cfg!(windows) || query_info.hard_link_count > 1)
-            && self
-                .always_folded
-                .iter()
-                .filter(|(folded, _)| *folded != &folded_query)
-                .flat_map(|(_, paths)| paths)
-                .any(|path| {
-                    repo_path_filesystem_info(source_root, path)
-                        .is_some_and(|info| info.identity == query_info.identity)
-                })
+        // Git says this checkout is case-sensitive, so a differently-cased
+        // spelling is a different file unless the filesystem disagrees.
+        // Confirm against the colliding index entries only.
+        let Some(query_identity) = repo_path_filesystem_identity(source_root, query) else {
+            return false;
+        };
+        bucket
+            .iter()
+            .any(|path| repo_path_filesystem_identity(source_root, path) == Some(query_identity))
     }
 }
 
-fn repo_path_filesystem_info(source_root: &Path, path: &[u8]) -> Option<FilesystemInfo> {
+fn repo_path_filesystem_identity(source_root: &Path, path: &[u8]) -> Option<FilesystemIdentity> {
     let path = repo_bytes_to_path(source_root, path)?;
-    filesystem_info(&path)
+    filesystem_identity(&path)
 }
 
 #[cfg(unix)]
@@ -1200,44 +1476,34 @@ fn repo_bytes_to_path(source_root: &Path, path: &[u8]) -> Option<PathBuf> {
     Some(source_root.join(std::str::from_utf8(path).ok()?))
 }
 
+/// Opaque per-object filesystem identity: two pathnames with the same identity
+/// name the same object.
 #[cfg(unix)]
 type FilesystemIdentity = (u64, u64);
 
 #[cfg(unix)]
-fn filesystem_info(path: &Path) -> Option<FilesystemInfo> {
+fn filesystem_identity(path: &Path) -> Option<FilesystemIdentity> {
     use std::os::unix::fs::MetadataExt;
     let metadata = std::fs::symlink_metadata(path).ok()?;
-    Some(FilesystemInfo {
-        identity: (metadata.dev(), metadata.ino()),
-        hard_link_count: metadata.nlink(),
-    })
+    Some((metadata.dev(), metadata.ino()))
 }
 
 #[cfg(windows)]
 type FilesystemIdentity = (u64, u64);
 
 #[cfg(windows)]
-fn filesystem_info(path: &Path) -> Option<FilesystemInfo> {
+fn filesystem_identity(path: &Path) -> Option<FilesystemIdentity> {
     let handle = winapi_util::Handle::from_path_any(path).ok()?;
     let info = winapi_util::file::information(&handle).ok()?;
-    Some(FilesystemInfo {
-        identity: (info.volume_serial_number(), info.file_index()),
-        hard_link_count: info.number_of_links(),
-    })
+    Some((info.volume_serial_number(), info.file_index()))
 }
 
 #[cfg(not(any(unix, windows)))]
 type FilesystemIdentity = ();
 
 #[cfg(not(any(unix, windows)))]
-fn filesystem_info(_path: &Path) -> Option<FilesystemInfo> {
+fn filesystem_identity(_path: &Path) -> Option<FilesystemIdentity> {
     None
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FilesystemInfo {
-    identity: FilesystemIdentity,
-    hard_link_count: u64,
 }
 
 /// Return true when `entry` is a directory that should not be descended into
@@ -1264,11 +1530,18 @@ fn is_nested_git_boundary(
     entry: &walkdir::DirEntry,
     source_root: &Path,
     gitlinks: &HashSet<String>,
+    ignore_case: bool,
 ) -> bool {
     if !entry.file_type().is_dir() {
         return false;
     }
-    crate::walk::is_git_boundary_dir(entry.path(), entry.depth(), source_root, gitlinks)
+    crate::walk::is_git_boundary_dir(
+        entry.path(),
+        entry.depth(),
+        source_root,
+        gitlinks,
+        ignore_case,
+    )
 }
 
 /// Parse the output of `git worktree list --porcelain -z`.
@@ -1394,6 +1667,262 @@ fn parse_check_ignore_output(output: &[u8]) -> Result<Vec<IgnoreCheckRecord>> {
 mod tests {
     use super::*;
 
+    // ---- backend selection ----
+
+    #[test]
+    fn git_backend_selection_accepts_both_names_in_any_ascii_case() {
+        for (value, expected) in [
+            ("gix", GitBackendKind::Gix),
+            ("GIX", GitBackendKind::Gix),
+            ("cli", GitBackendKind::Cli),
+            ("Cli", GitBackendKind::Cli),
+            ("  cli\n", GitBackendKind::Cli),
+        ] {
+            assert_eq!(parse_git_backend_kind(value).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn git_backend_selection_rejects_anything_else() {
+        for value in ["", "gx", "gitcli", "git", "cli,gix", "true"] {
+            let error = parse_git_backend_kind(value)
+                .err()
+                .unwrap_or_else(|| panic!("{value:?} must not select a backend"))
+                .to_string();
+            assert!(
+                error.contains("WAFT_GIT_BACKEND") && error.contains("\"gix\", \"cli\""),
+                "error for {value:?} must name the variable and valid values: {error}"
+            );
+        }
+    }
+
+    // ---- case-sensitivity policy ----
+
+    /// An explicitly configured value is authoritative in both directions;
+    /// only an absent key defers to the platform.
+    #[test]
+    fn case_folding_policy_follows_the_repository_configuration() {
+        assert!(case_folding_applies(Some(true)));
+        assert!(!case_folding_applies(Some(false)));
+        assert_eq!(
+            case_folding_applies(None),
+            cfg!(any(target_os = "macos", windows)),
+            "an unconfigured repository falls back to the platform default"
+        );
+    }
+
+    // ---- tracked-path lookup ----
+
+    fn tracked_lookup(paths: &[&str], ignore_case: bool) -> TrackedPathLookup {
+        TrackedPathLookup::new(paths.iter().map(|path| path.as_bytes()), ignore_case)
+    }
+
+    /// A root that cannot exist keeps these assertions independent of the host
+    /// filesystem: no identity confirmation can ever succeed.
+    fn unreachable_root() -> &'static Path {
+        Path::new("/waft-nonexistent-root-for-unit-tests")
+    }
+
+    #[test]
+    fn tracked_lookup_matches_exact_index_spellings() {
+        let lookup = tracked_lookup(&["secret.env", "cfg/app.env"], false);
+        assert!(lookup.contains(unreachable_root(), b"secret.env"));
+        assert!(lookup.contains(unreachable_root(), b"cfg/app.env"));
+        assert!(!lookup.contains(unreachable_root(), b"other.env"));
+    }
+
+    #[test]
+    fn tracked_lookup_protects_folded_names_on_a_case_folding_checkout() {
+        let lookup = tracked_lookup(&["secret.env"], true);
+        assert!(lookup.contains(unreachable_root(), b"SECRET.env"));
+        assert!(!lookup.contains(unreachable_root(), "Ä.env".as_bytes()));
+
+        let unicode = tracked_lookup(&["ä.env"], true);
+        assert!(unicode.contains(unreachable_root(), "Ä.env".as_bytes()));
+    }
+
+    /// The regression this fixes: on a case-sensitive checkout a distinct file
+    /// whose name folds onto a tracked one must stay eligible, even though the
+    /// host running the test may itself fold case.
+    #[test]
+    fn tracked_lookup_keeps_exact_semantics_on_a_case_sensitive_checkout() {
+        let lookup = tracked_lookup(&["secret.env"], false);
+        assert!(!lookup.contains(unreachable_root(), b"SECRET.env"));
+
+        let unicode = tracked_lookup(&["ä.env"], false);
+        assert!(!unicode.contains(unreachable_root(), "Ä.env".as_bytes()));
+    }
+
+    /// Only the colliding folded-name bucket is ever consulted, so an index
+    /// full of unrelated names contributes no per-query work — and no
+    /// unrelated name can be mistaken for the query.
+    #[test]
+    fn tracked_lookup_ignores_index_entries_outside_the_folded_bucket() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("tracked.env"), "x").unwrap();
+        std::fs::hard_link(
+            temp.path().join("tracked.env"),
+            temp.path().join("alias.env"),
+        )
+        .unwrap();
+
+        let lookup = tracked_lookup(&["tracked.env"], false);
+        assert!(lookup.contains(temp.path(), b"tracked.env"));
+        assert!(
+            !lookup.contains(temp.path(), b"alias.env"),
+            "a separately named hard link is a separate path"
+        );
+    }
+
+    #[test]
+    fn tracked_lookup_selects_queries_in_the_callers_spelling() {
+        let lookup = tracked_lookup(&["secret.env"], true);
+        let query = RepoRelPath::from_normalized("SECRET.env".to_string());
+        let other = RepoRelPath::from_normalized("public.env".to_string());
+        let selected = lookup.select(unreachable_root(), &[query.clone(), other]);
+        assert_eq!(selected.len(), 1);
+        assert!(selected.contains(&query));
+    }
+
+    // ---- index state parsing ----
+
+    #[test]
+    fn index_state_reads_tracked_names_and_gitlinks_from_one_listing() {
+        let output = b"100644 aaaaaaaa 0\tsecret.env\x00160000 bbbbbbbb 0\tvendor/sub\x00100644 cccccccc 0\tcfg/app.env\x00";
+        let state = RepoIndexState::from_ls_files_stage_output(output, false).unwrap();
+
+        assert!(state.tracked.contains(unreachable_root(), b"secret.env"));
+        assert!(state.tracked.contains(unreachable_root(), b"cfg/app.env"));
+        assert!(
+            state.tracked.contains(unreachable_root(), b"vendor/sub"),
+            "a gitlink entry is still a tracked path"
+        );
+        assert_eq!(
+            state.gitlinks,
+            HashSet::from(["vendor/sub".to_string()]),
+            "only mode 160000 entries are submodule boundaries"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_state_keeps_non_utf8_tracked_names_without_failing() {
+        let mut output = Vec::new();
+        output.extend_from_slice(b"100644 aaaaaaaa 0\tsecret-\xff.env\x00");
+        let state = RepoIndexState::from_ls_files_stage_output(&output, false).unwrap();
+        assert!(
+            state
+                .tracked
+                .contains(unreachable_root(), b"secret-\xff.env")
+        );
+    }
+
+    // ---- index-validated caching ----
+
+    #[test]
+    fn cached_index_state_is_reused_until_the_index_changes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        std::fs::write(&index, b"first").unwrap();
+
+        let cache = RepoStateCache::default();
+        let builds = std::cell::Cell::new(0);
+        let build = || {
+            builds.set(builds.get() + 1);
+            RepoIndexState::from_ls_files_stage_output(b"100644 a 0\tsecret.env\x00", false)
+        };
+
+        cache.index_state(temp.path(), &index, build).unwrap();
+        cache.index_state(temp.path(), &index, build).unwrap();
+        assert_eq!(builds.get(), 1, "an unchanged index must not be re-read");
+
+        // Git publishes a new index by renaming a lock file into place, which
+        // is what the fingerprint is designed to notice.
+        let replacement = temp.path().join("index.lock");
+        std::fs::write(&replacement, b"second and longer").unwrap();
+        std::fs::rename(&replacement, &index).unwrap();
+
+        cache.index_state(temp.path(), &index, build).unwrap();
+        assert_eq!(builds.get(), 2, "a replaced index must be re-read");
+    }
+
+    #[test]
+    fn missing_index_state_is_rebuilt_rather_than_cached() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+
+        let cache = RepoStateCache::default();
+        let builds = std::cell::Cell::new(0);
+        let build = || {
+            builds.set(builds.get() + 1);
+            RepoIndexState::from_ls_files_stage_output(b"", false)
+        };
+
+        cache.index_state(temp.path(), &index, build).unwrap();
+        cache.index_state(temp.path(), &index, build).unwrap();
+        assert_eq!(
+            builds.get(),
+            2,
+            "without an index file there is nothing to validate a cache against"
+        );
+    }
+
+    #[test]
+    fn cached_index_path_is_resolved_once_per_repository() {
+        let cache = RepoStateCache::default();
+        let resolutions = std::cell::Cell::new(0);
+        let resolve = || {
+            resolutions.set(resolutions.get() + 1);
+            Ok(PathBuf::from("/repo/.git/index"))
+        };
+
+        let root = Path::new("/repo");
+        assert_eq!(
+            cache.index_path(root, resolve).unwrap(),
+            PathBuf::from("/repo/.git/index")
+        );
+        assert_eq!(
+            cache.index_path(root, resolve).unwrap(),
+            PathBuf::from("/repo/.git/index")
+        );
+        assert_eq!(resolutions.get(), 1);
+    }
+
+    /// `core.ignoreCase` is memoized separately from the index snapshot, so it
+    /// is read once per repository however many index rebuilds intervene — and
+    /// separately per repository, since it is a per-checkout property.
+    #[test]
+    fn cached_case_folding_answer_is_resolved_once_per_repository() {
+        let cache = RepoStateCache::default();
+        let reads = std::cell::Cell::new(0);
+        let folding = Path::new("/folding");
+        let exact = Path::new("/exact");
+
+        let resolve = |answer: bool| {
+            let reads = &reads;
+            move || {
+                reads.set(reads.get() + 1);
+                Ok(answer)
+            }
+        };
+
+        assert!(cache.checkout_folds_case(folding, resolve(true)).unwrap());
+        assert!(cache.checkout_folds_case(folding, resolve(false)).unwrap());
+        assert_eq!(reads.get(), 1, "the second query must not re-read config");
+
+        assert!(!cache.checkout_folds_case(exact, resolve(false)).unwrap());
+        assert_eq!(
+            reads.get(),
+            2,
+            "a different repository is a different answer"
+        );
+        assert!(
+            cache.checkout_folds_case(folding, resolve(false)).unwrap(),
+            "one repository's answer must not be overwritten by another's"
+        );
+        assert_eq!(reads.get(), 2);
+    }
+
     #[test]
     fn repository_path_equivalence_normalizes_unicode_case() {
         assert!(repo_paths_equivalent("Ä.env", "a\u{308}.env", true));
@@ -1422,11 +1951,7 @@ mod tests {
         );
         let canonical = RepoRelPath::from_normalized("Secret.env".to_string());
         let alias = RepoRelPath::from_normalized("secret.env".to_string());
-        assert!(repo_paths_alias_on_filesystem(
-            temp.path(),
-            &canonical,
-            &alias
-        ));
+        assert!(RepoPathAliasProbe::new(temp.path(), &alias).resolves_to(&canonical));
     }
 
     #[cfg(unix)]
@@ -1441,11 +1966,42 @@ mod tests {
         .unwrap();
         let first = RepoRelPath::from_normalized("first.env".to_string());
         let second = RepoRelPath::from_normalized("second.env".to_string());
-        assert!(!repo_paths_alias_on_filesystem(
-            temp.path(),
-            &first,
-            &second
-        ));
+        assert!(!RepoPathAliasProbe::new(temp.path(), &second).resolves_to(&first));
+    }
+
+    /// The probe hoists everything that depends only on the probed path out of
+    /// the candidate loop. That is sound only if the hoisted decision — "can
+    /// this path be an alias of anything at all?" — is genuinely independent
+    /// of the candidate, so pin both ways it can come out `no`.
+    #[test]
+    fn alias_probe_settles_candidate_independent_questions_up_front() {
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join("dir")).unwrap();
+        std::fs::write(temp.path().join("dir/present.env"), "x").unwrap();
+        let present = RepoRelPath::from_normalized("dir/present.env".to_string());
+
+        // Names an existing entry exactly, so it is that path rather than an
+        // alias of some other one.
+        assert!(
+            RepoPathAliasProbe::new(temp.path(), &present)
+                .identity
+                .is_none()
+        );
+
+        // Resolves to nothing, so no candidate can be the same entry.
+        let missing = RepoRelPath::from_normalized("dir/absent.env".to_string());
+        let probe = RepoPathAliasProbe::new(temp.path(), &missing);
+        assert!(probe.identity.is_none());
+        assert!(!probe.resolves_to(&present));
+
+        // A component that does not resolve is equally conclusive, and must
+        // not be mistaken for "exact spelling" by the directory walk.
+        let under_missing_dir = RepoRelPath::from_normalized("absent/present.env".to_string());
+        assert!(
+            RepoPathAliasProbe::new(temp.path(), &under_missing_dir)
+                .identity
+                .is_none()
+        );
     }
 
     #[test]

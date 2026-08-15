@@ -149,6 +149,12 @@ that order. `--isolated` conflicts with `--config`; it also ignores
 `WAFT_CONFIG_PATH`. Operational environment such as `WAFT_GIT_BACKEND` is not
 part of policy resolution and remains available.
 
+`WAFT_GIT_BACKEND` selects the Git implementation: `gix` (the default,
+in-process) or `cli` (shells out to `git`). The value is trimmed and matched
+without regard to ASCII case, so `cli` and `CLI` are the same choice. Any other
+value is an error naming the valid ones rather than a silent fall back to the
+default, since the two backends are what enforce waft's safety checks.
+
 ### Per-knob CLI flags
 
 | Option | Description |
@@ -199,9 +205,37 @@ different directory object. An already-open authorized directory can still be
 relocated by another process after final revalidation; avoid concurrent
 directory relocation when the destination pathname itself must remain stable.
 For immediacy without holding Git's index lock during content preparation,
-waft reacquires the lock and rechecks the index for each published file. That
-cost is proportional to selected files times index size; keep automatic
-manifests narrow and benchmark large cache manifests in monorepos.
+waft reacquires the lock and rechecks the index for each published file. The
+recheck reuses one index snapshot per repository, revalidated by a single
+`stat` of the index file — Git publishes a new index by renaming `index.lock`
+into place, so a change to trackedness always invalidates the snapshot. A
+recheck therefore costs a stat and a hash lookup per file rather than a fresh
+index read (and, for the Git CLI backend, a subprocess) under the lock.
+
+### Case sensitivity
+
+Whether `Secret.env` and `secret.env` name the same path is decided by the
+repository's own `core.ignoreCase`, which Git records per checkout after
+probing the filesystem. When it is true, a differently-cased spelling of a
+tracked path is protected as that tracked path, and a differently-cased
+spelling of a registered submodule directory is treated as that submodule
+boundary. When it is false, both comparisons are exact — a case-sensitive
+volume really does hold two distinct files — except that a tracked path is
+still protected when the filesystem itself resolves both spellings to the same
+entry. If the key is absent entirely, macOS and Windows fall back to folding
+and other platforms to exact comparison.
+
+This answer is read once per run, so a single invocation cannot apply folded
+protection to some paths and exact matching to others. Editing `core.ignoreCase`
+while waft is running has no effect on that run.
+
+Two pathnames that a filesystem aliases in a way neither Unicode case folding
+nor an exact match detects (for example a deliberately hard-linked second name
+for a tracked file) are treated as distinct paths.
+
+Exclusion patterns are matched separately and more conservatively: on macOS and
+Windows they stay case-insensitive even when `core.ignoreCase` is false, since
+withholding a file is safer than leaking one.
 
 ## Website development
 

@@ -154,8 +154,16 @@ pub fn resolve_context(
         }
     }
 
-    // Read core.ignoreCase
-    let core_ignore_case = git.read_bool_config(&source_root, "core.ignoreCase")?;
+    // Ask the backend whether this checkout folds case. Every decision about
+    // whether two *repository paths* are the same path — tracked-path
+    // protection, gitlink boundaries, candidate matching — reads this one
+    // answer, so they cannot disagree.
+    //
+    // Exclusion pattern matching deliberately does not: it treats this as a
+    // lower bound and stays case-insensitive on macOS and Windows regardless,
+    // because a missed safety exclusion leaks a file while a spurious one only
+    // withholds one. See `crate::policy_filter::effective_case_insensitive`.
+    let core_ignore_case = git.checkout_folds_case(&source_root)?;
 
     Ok(RepoContext {
         source_root,

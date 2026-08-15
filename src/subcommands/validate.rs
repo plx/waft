@@ -16,7 +16,7 @@ pub struct ValidateArgs {}
 
 /// Run the `validate` subcommand.
 pub fn run_validate(cli: &Cli, policy: &ResolvedPolicy, _args: &ValidateArgs) -> Result<()> {
-    let git = default_git_backend();
+    let git = default_git_backend()?;
 
     let ctx = context::resolve_context(
         git.as_ref(),

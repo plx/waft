@@ -131,7 +131,7 @@ impl Cli {
     /// destination worktree on another branch, from changing source
     /// selection.
     pub fn resolve_policy(&self) -> Result<ResolvedPolicy> {
-        let git = default_git_backend();
+        let git = default_git_backend()?;
         let ctx = context::resolve_context(
             git.as_ref(),
             self.source.as_deref(),
@@ -245,7 +245,7 @@ impl Cli {
 
     /// Dispatch the parsed CLI to the appropriate command handler.
     pub fn dispatch(self) -> Result<()> {
-        let git = default_git_backend();
+        let git = default_git_backend()?;
         let ctx = context::resolve_context(
             git.as_ref(),
             self.source.as_deref(),

@@ -19,11 +19,20 @@ pub(crate) fn special_filename_matches(actual: &OsStr, expected: &str) -> bool {
             .is_some_and(|name| name.eq_ignore_ascii_case(expected))
 }
 
+/// Return true when `path` is a directory the source walk must not enter.
+///
+/// `ignore_case` is the checkout's own case sensitivity (`core.ignoreCase`,
+/// via [`crate::git::case_folding_applies`]). It decides how a directory name
+/// is compared against the registered gitlink paths: on a case-insensitive
+/// checkout `Vendor/` and the `vendor/` submodule are the same directory, but
+/// on a case-sensitive one they are two different directories and treating
+/// them as one would silently exclude a legitimate source subtree.
 pub(crate) fn is_git_boundary_dir(
     path: &Path,
     depth: usize,
     source_root: &Path,
     gitlinks: &HashSet<String>,
+    ignore_case: bool,
 ) -> bool {
     if path
         .file_name()
@@ -45,12 +54,9 @@ pub(crate) fn is_git_boundary_dir(
         return true;
     }
     if let Ok(rel) = RepoRelPath::normalize(path, source_root)
-        && gitlinks.iter().any(|gitlink| {
-            // A repository boundary is a safety filter, so prefer a
-            // conservative case/normalization match even when Git's current
-            // config claims the filesystem is case-sensitive.
-            crate::git::repo_paths_equivalent(rel.as_str(), gitlink, true)
-        })
+        && gitlinks
+            .iter()
+            .any(|gitlink| crate::git::repo_paths_equivalent(rel.as_str(), gitlink, ignore_case))
     {
         return true;
     }
@@ -73,4 +79,71 @@ fn read_dot_git_pointer(path: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gitlinks(paths: &[&str]) -> HashSet<String> {
+        paths.iter().map(|path| (*path).to_string()).collect()
+    }
+
+    /// A case-sensitive checkout holds `Vendor/` and the `vendor/` submodule
+    /// as two different directories; only the submodule is a boundary.
+    #[test]
+    fn gitlink_boundary_requires_exact_spelling_when_case_is_significant() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let vendor = temp.path().join("Vendor");
+        std::fs::create_dir(&vendor).unwrap();
+
+        assert!(!is_git_boundary_dir(
+            &vendor,
+            1,
+            temp.path(),
+            &gitlinks(&["vendor"]),
+            false
+        ));
+        assert!(is_git_boundary_dir(
+            &vendor,
+            1,
+            temp.path(),
+            &gitlinks(&["Vendor"]),
+            false
+        ));
+    }
+
+    /// A case-insensitive checkout resolves both spellings to the submodule.
+    #[test]
+    fn gitlink_boundary_folds_case_when_the_checkout_does() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let vendor = temp.path().join("Vendor");
+        std::fs::create_dir(&vendor).unwrap();
+
+        assert!(is_git_boundary_dir(
+            &vendor,
+            1,
+            temp.path(),
+            &gitlinks(&["vendor"]),
+            true
+        ));
+    }
+
+    /// Unrelated directories are never boundaries under either policy.
+    #[test]
+    fn unrelated_directories_are_not_boundaries() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let config = temp.path().join("config");
+        std::fs::create_dir(&config).unwrap();
+
+        for ignore_case in [false, true] {
+            assert!(!is_git_boundary_dir(
+                &config,
+                1,
+                temp.path(),
+                &gitlinks(&["vendor"]),
+                ignore_case
+            ));
+        }
+    }
 }
