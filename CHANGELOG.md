@@ -42,7 +42,13 @@ Until the first supported release, changes remain under `Unreleased`.
   If a recovery step fails and strands another writer's file under a
   `.waft-copy-*` name, or strands the prepared replacement after the previous
   destination is already gone, the file is kept and named in the per-file
-  error instead of being cleaned up.
+  error instead of being cleaned up. Undoing a lost race is held to the same
+  standard: the identity of the file this run wrote is pinned before the
+  exchange, and both the undo swap and the cleanup that follows it are
+  performed only after re-proving that the name they act on still holds that
+  file. A third writer taking the destination name mid-undo would otherwise be
+  swapped under the temporary name and deleted there; instead nothing is moved
+  or removed, and the error names the full path of every file left behind.
 - Remove `.waft-copy-*` staging files from a drop guard so an unwinding panic
   during publication cannot leave them behind.
 - Unlink the live Git `index.lock` from `SIGINT`/`SIGTERM` handlers on Unix
@@ -50,9 +56,16 @@ Until the first supported release, changes remain under `Unreleased`.
   publish window cannot leave a stale lock. A signal the process inherited as
   ignored (`nohup`, background jobs without job control) is left ignored:
   handling it would delete the live lock and then return into the publish
-  window without it. Windows and other non-Unix targets have no such handler;
-  an interrupt there can still leave `.git/**/index.lock` behind for the user
-  to delete.
+  window without it. A signal arriving while the lock is being created — after
+  `create_new` may have produced the file but before cleanup is armed — is
+  recorded and deferred rather than re-raised: the handler cannot tell whether
+  a lock exists yet or whether it is waft's, and terminating there would leave
+  an `index.lock` that blocks every later Git and waft operation. The
+  acquisition acts on the record as soon as it knows, removing only a lock this
+  process created and then re-raising, so no deferred signal is lost and no
+  other writer's lock is touched. Windows and other non-Unix targets have no
+  such handler; an interrupt there can still leave `.git/**/index.lock` behind
+  for the user to delete.
 - Install the optional Git hook and a reviewed waft binary outside checked-out
   worktrees, while chaining only regular-file trusted hooks, rejecting
   per-worktree overrides, and ignoring ambient executable overrides at run

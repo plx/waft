@@ -645,6 +645,7 @@ fn copy_file_anchored_unix(
                 &destination_parent,
                 &destination_directory,
                 &mut temporary_guard,
+                &temporary,
                 &destination_name,
                 destination,
                 expected,
@@ -761,26 +762,34 @@ fn revert_permission_repair(file: &fs::File, expected: &FileSnapshot) -> io::Err
 /// than a silent clobber.
 ///
 /// `parent_directory` is the pathname of `parent` at planning time, used only
-/// to name files a caller may have to deal with by hand.
+/// to name files a caller may have to deal with by hand. `prepared` is the open
+/// descriptor for the temporary this run wrote; its identity is what every
+/// recovery step below proves before it moves or removes anything.
 #[cfg(unix)]
 fn replace_verified_destination(
     parent: &OwnedFd,
     parent_directory: &Path,
     temporary_guard: &mut AnchoredTempGuard<'_>,
+    prepared: &fs::File,
     destination_name: &OsStr,
     verified: &mut fs::File,
     expected: &FileSnapshot,
 ) -> io::Result<()> {
     ensure_name_refers_to_file(parent, destination_name, verified)?;
     ensure_open_snapshot_matches(verified, expected)?;
-    let verified_stat = rustix::fs::fstat(&*verified)?;
+    let verified_identity = rustix::fs::fstat(&*verified)?;
+    // Pinned before the swap, while the temporary name is still guaranteed to
+    // be this run's own file. Afterwards it is the only way to tell waft's
+    // replacement apart from whatever a concurrent writer may have put under
+    // either name.
+    let prepared_identity = rustix::fs::fstat(prepared)?;
 
     after_destination_verified();
 
     match exchange_anchored(parent, temporary_guard.name(), destination_name) {
         Ok(()) => {
             let swapped_out_as_planned =
-                swapped_out_matches(parent, temporary_guard.name(), &verified_stat)
+                name_holds_inode(parent, temporary_guard.name(), &verified_identity)
                     .unwrap_or(false)
                     && ensure_open_snapshot_matches(verified, expected).is_ok();
             if swapped_out_as_planned {
@@ -805,30 +814,15 @@ fn replace_verified_destination(
                 });
             }
             // Another writer changed the destination between the identity
-            // proof and the exchange. Put both names back and fail this file.
-            before_exchange_back();
-            match exchange_anchored(parent, temporary_guard.name(), destination_name) {
-                Ok(()) => Err(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "destination changed during publication; it was left untouched",
-                )),
-                Err(undo_error) => {
-                    // The undo failed, so the destination name may still hold
-                    // the newly prepared content and the temporary name holds
-                    // a file this process never verified. Deleting that file
-                    // would destroy another writer's data, so the guard is
-                    // released and the situation is described instead.
-                    let stranded = temporary_guard.name().to_os_string();
-                    temporary_guard.disarm();
-                    Err(io::Error::other(format!(
-                        "destination changed during publication and the swap could not be undone \
-                         ({undo_error}): {} may now hold newly published content and the file \
-                         that was there was left as {}; nothing was deleted",
-                        Path::new(destination_name).display(),
-                        Path::new(&stranded).display(),
-                    )))
-                }
-            }
+            // proof and the exchange, so this run has just published over a
+            // file it never verified. Put both names back and fail this file.
+            Err(undo_lost_exchange(
+                parent,
+                parent_directory,
+                temporary_guard,
+                destination_name,
+                &prepared_identity,
+            ))
         }
         Err(error) if rename_flag_unsupported(error) => {
             // Without an atomic exchange the best available sequence is
@@ -869,6 +863,96 @@ fn replace_verified_destination(
     }
 }
 
+/// Undo an exchange that published over a file this run never verified, and
+/// report whatever could not be undone.
+///
+/// At entry the destination name holds the prepared replacement and the
+/// temporary name holds the file the exchange swapped out — a file waft did not
+/// write and has no right to delete. Both steps that follow are conditional on
+/// proving, immediately beforehand, that the name they act on still resolves to
+/// the inode this run created:
+///
+/// * The undo itself moves whatever currently sits at the destination name
+///   under the temporary name, where the drop guard would unlink it. A third
+///   writer taking the name in this window would lose its file that way, so an
+///   unrecognized destination is left exactly where it is.
+/// * The unlink that follows a successful undo is likewise proven rather than
+///   assumed, because the same window exists around the temporary name.
+///
+/// Leaving two files on disk under names the error spells out is recoverable by
+/// hand; deleting a file nobody has a copy of is not.
+#[cfg(unix)]
+fn undo_lost_exchange(
+    parent: &OwnedFd,
+    parent_directory: &Path,
+    temporary_guard: &mut AnchoredTempGuard<'_>,
+    destination_name: &OsStr,
+    prepared_identity: &rustix::fs::Stat,
+) -> io::Error {
+    before_exchange_back();
+
+    // What the temporary name holds changes under this function's feet; its
+    // pathname does not, and it is what an operator has to be told.
+    let temporary_path = parent_directory.join(temporary_guard.name());
+    if !name_holds_inode(parent, destination_name, prepared_identity).unwrap_or(false) {
+        // Someone took the destination name again after the lost race was
+        // detected. Exchanging back now would file that writer's file under the
+        // temporary name and delete it on the way out.
+        temporary_guard.disarm();
+        return io::Error::other(format!(
+            "destination changed twice during publication: {} now holds a file this run never \
+             verified and was left untouched, so the swap was not undone and the file that was \
+             displaced was kept as {}; nothing was deleted",
+            Path::new(destination_name).display(),
+            temporary_path.display(),
+        ));
+    }
+
+    if let Err(undo_error) = exchange_back(parent, temporary_guard.name(), destination_name) {
+        // The destination name still holds the newly prepared content and the
+        // temporary name holds a file this process never verified. Deleting
+        // that file would destroy another writer's data, so the guard is
+        // released and the situation is described instead.
+        temporary_guard.disarm();
+        return io::Error::other(format!(
+            "destination changed during publication and the swap could not be undone \
+             ({undo_error}): {} now holds newly published content and the file that was there was \
+             left as {}; nothing was deleted",
+            Path::new(destination_name).display(),
+            temporary_path.display(),
+        ));
+    }
+
+    after_exchange_back();
+
+    // The undo put the other writer's file back, so the temporary name should
+    // hold the prepared replacement once more — but "should" is not the
+    // standard for an unlink.
+    if !name_holds_inode(parent, temporary_guard.name(), prepared_identity).unwrap_or(false) {
+        temporary_guard.disarm();
+        return io::Error::other(format!(
+            "destination changed during publication and was left untouched, but {} no longer \
+             holds the replacement this run prepared: it was left alone rather than deleted",
+            temporary_path.display(),
+        ));
+    }
+    match temporary_guard.remove_now() {
+        Ok(()) => io::Error::new(
+            io::ErrorKind::Interrupted,
+            "destination changed during publication; it was left untouched",
+        ),
+        Err(error) => io::Error::new(
+            error.kind(),
+            format!(
+                "destination changed during publication and was left untouched, but the \
+                 replacement this run prepared could not be removed ({error}): it is still on \
+                 disk as {}; delete it by hand",
+                temporary_path.display(),
+            ),
+        ),
+    }
+}
+
 /// Atomically swap two names under `parent`.
 #[cfg(unix)]
 fn exchange_anchored(parent: &OwnedFd, from: &OsStr, to: &OsStr) -> Result<(), rustix::io::Errno> {
@@ -878,25 +962,40 @@ fn exchange_anchored(parent: &OwnedFd, from: &OsStr, to: &OsStr) -> Result<(), r
     rustix::fs::renameat_with(parent, from, parent, to, rustix::fs::RenameFlags::EXCHANGE)
 }
 
-/// After an exchange, check that the temporary name holds the inode that was
-/// previously verified at the destination name.
+/// The undo of an exchange, with a test seam of its own: reaching it requires
+/// the forward exchange to have succeeded, so the "this filesystem cannot
+/// exchange" seam cannot stand in for a failure here.
 #[cfg(unix)]
-fn swapped_out_matches(
+fn exchange_back(parent: &OwnedFd, from: &OsStr, to: &OsStr) -> Result<(), rustix::io::Errno> {
+    if exchange_back_forced_failure() {
+        return Err(rustix::io::Errno::IO);
+    }
+    exchange_anchored(parent, from, to)
+}
+
+/// Whether `name` under `parent` currently resolves to exactly `identity`.
+///
+/// Opened with `O_NOFOLLOW` and `O_NONBLOCK`, so a symlink or a FIFO planted at
+/// the name answers "no" rather than being followed or blocking. Used to decide
+/// whether waft may move or unlink what a name refers to: the caller treats any
+/// failure to prove the identity as a "no".
+#[cfg(unix)]
+fn name_holds_inode(
     parent: &OwnedFd,
-    temporary_name: &OsStr,
-    verified: &rustix::fs::Stat,
+    name: &OsStr,
+    identity: &rustix::fs::Stat,
 ) -> io::Result<bool> {
-    let swapped_out = rustix::fs::openat(
+    let current = rustix::fs::openat(
         parent,
-        temporary_name,
+        name,
         rustix::fs::OFlags::RDONLY
             | rustix::fs::OFlags::NOFOLLOW
             | rustix::fs::OFlags::NONBLOCK
             | rustix::fs::OFlags::CLOEXEC,
         rustix::fs::Mode::empty(),
     )?;
-    let swapped_out = rustix::fs::fstat(&swapped_out)?;
-    Ok(swapped_out.st_dev == verified.st_dev && swapped_out.st_ino == verified.st_ino)
+    let current = rustix::fs::fstat(&current)?;
+    Ok(current.st_dev == identity.st_dev && current.st_ino == identity.st_ino)
 }
 
 /// Errnos that mean "this filesystem cannot exchange two names atomically".
@@ -911,8 +1010,9 @@ fn rename_flag_unsupported(error: rustix::io::Errno) -> bool {
 /// Test-only seams inside the publication window.
 ///
 /// The destructive recovery branches of [`replace_verified_destination`] — the
-/// undo of a failed exchange, and the unlink-then-publish fallback used where
-/// exchange is unsupported — cannot be provoked from an ordinary test volume:
+/// undo of a failed exchange, including the third writer that can arrive
+/// mid-undo, and the unlink-then-publish fallback used where exchange is
+/// unsupported — cannot be provoked from an ordinary test volume:
 /// the guards that run before the swap reject any change made from
 /// `before_publish`, and every filesystem CI runs on supports exchange. Two
 /// more branches are just as unreachable by ordinary means: the instant between
@@ -930,8 +1030,12 @@ mod publish_hooks {
     pub(super) struct Hooks {
         /// Runs after the destination identity proof and before the swap.
         pub(super) after_destination_verified: Option<Box<dyn FnMut()>>,
-        /// Runs after a mismatch is detected and before the undo swap.
+        /// Runs after a mismatch is detected and before the undo swap — the
+        /// window in which a third writer can take the destination name.
         pub(super) before_exchange_back: Option<Box<dyn FnMut()>>,
+        /// Runs after a successful undo swap and before the prepared
+        /// replacement is removed from the temporary name.
+        pub(super) after_exchange_back: Option<Box<dyn FnMut()>>,
         /// Runs in the exchange-less fallback, after the verified destination
         /// has been unlinked and before the replacement is published.
         pub(super) after_destination_removed: Option<Box<dyn FnMut()>>,
@@ -940,6 +1044,9 @@ mod publish_hooks {
         pub(super) before_permission_repair: Option<Box<dyn FnMut()>>,
         /// Makes every exchange report the filesystem as unable to swap names.
         pub(super) exchange_unsupported: bool,
+        /// Makes only the undo swap fail, standing in for a filesystem error
+        /// that leaves the replacement published over an unverified file.
+        pub(super) exchange_back_fails: bool,
         /// Makes removing a temporary name report an I/O error without
         /// unlinking anything, standing in for a transient failure on the
         /// last step of a replacement.
@@ -972,6 +1079,10 @@ mod publish_hooks {
         run(|hooks| hooks.before_exchange_back.take());
     }
 
+    pub(super) fn after_exchange_back() {
+        run(|hooks| hooks.after_exchange_back.take());
+    }
+
     pub(super) fn after_destination_removed() {
         run(|hooks| hooks.after_destination_removed.take());
     }
@@ -982,6 +1093,10 @@ mod publish_hooks {
 
     pub(super) fn exchange_forced_unsupported() -> bool {
         HOOKS.with(|cell| cell.borrow().exchange_unsupported)
+    }
+
+    pub(super) fn exchange_back_forced_failure() -> bool {
+        HOOKS.with(|cell| cell.borrow().exchange_back_fails)
     }
 
     pub(super) fn temporary_removal_forced_failure() -> bool {
@@ -1001,8 +1116,9 @@ mod publish_hooks {
 
 #[cfg(all(test, unix))]
 use publish_hooks::{
-    after_destination_removed, after_destination_verified, before_exchange_back,
-    before_permission_repair, exchange_forced_unsupported, temporary_removal_forced_failure,
+    after_destination_removed, after_destination_verified, after_exchange_back,
+    before_exchange_back, before_permission_repair, exchange_back_forced_failure,
+    exchange_forced_unsupported, temporary_removal_forced_failure,
 };
 
 #[cfg(all(not(test), unix))]
@@ -1012,6 +1128,9 @@ fn after_destination_verified() {}
 fn before_exchange_back() {}
 
 #[cfg(all(not(test), unix))]
+fn after_exchange_back() {}
+
+#[cfg(all(not(test), unix))]
 fn after_destination_removed() {}
 
 #[cfg(all(not(test), unix))]
@@ -1019,6 +1138,11 @@ fn before_permission_repair() {}
 
 #[cfg(all(not(test), unix))]
 fn exchange_forced_unsupported() -> bool {
+    false
+}
+
+#[cfg(all(not(test), unix))]
+fn exchange_back_forced_failure() -> bool {
     false
 }
 
@@ -1853,16 +1977,13 @@ mod tests {
         let planned = existing_snapshot(&dst);
 
         let substitute_root = destination_root.clone();
-        let removed_dst = dst.clone();
         let _hooks = publish_hooks::install(publish_hooks::Hooks {
             after_destination_verified: Some(Box::new(move || {
                 substitute_destination(&substitute_root, "file.env", "someone else's file\n");
             })),
-            // Removing the destination name makes the undo swap fail: an
-            // exchange needs both names to exist.
-            before_exchange_back: Some(Box::new(move || {
-                fs::remove_file(&removed_dst).unwrap();
-            })),
+            // The destination name still holds what waft just published, so the
+            // undo is attempted; this stands in for the filesystem refusing it.
+            exchange_back_fails: true,
             ..publish_hooks::Hooks::default()
         });
 
@@ -1886,11 +2007,137 @@ mod tests {
             fs::read_to_string(&stranded[0]).unwrap(),
             "someone else's file\n"
         );
+        assert_eq!(
+            fs::read_to_string(&dst).unwrap(),
+            "new\n",
+            "an undo that failed leaves the published content at the destination"
+        );
         let message = error.to_string();
-        let name = stranded[0].file_name().unwrap().to_string_lossy();
         assert!(
-            message.contains(&*name),
-            "the error must name the stranded file, got: {message}"
+            message.contains(&*stranded[0].to_string_lossy()),
+            "the error must name the full path of the stranded file, got: {message}"
+        );
+    }
+
+    /// The window the undo cannot assume away: after waft's exchange has
+    /// already lost one race, a *third* writer takes the destination name
+    /// before the undo runs. Exchanging back would move that writer's file
+    /// under the temporary name, where the drop guard would delete it.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_does_not_undo_a_swap_onto_a_third_writers_file() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+        let dst = destination_root.join("file.env");
+        write(&dst, "old\n");
+        let planned = existing_snapshot(&dst);
+
+        let substitute_root = destination_root.clone();
+        let third_writer_root = destination_root.clone();
+        let _hooks = publish_hooks::install(publish_hooks::Hooks {
+            after_destination_verified: Some(Box::new(move || {
+                substitute_destination(&substitute_root, "file.env", "someone else's file\n");
+            })),
+            before_exchange_back: Some(Box::new(move || {
+                substitute_destination(&third_writer_root, "file.env", "a third writer's file\n");
+            })),
+            ..publish_hooks::Hooks::default()
+        });
+
+        let error = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::ReplaceExisting(planned),
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read_to_string(&dst).unwrap(),
+            "a third writer's file\n",
+            "the file holding the name must be left exactly as it was found"
+        );
+        let stranded = temporaries(&destination_root);
+        assert_eq!(
+            stranded.len(),
+            1,
+            "the file that lost the first race must survive"
+        );
+        assert_eq!(
+            fs::read_to_string(&stranded[0]).unwrap(),
+            "someone else's file\n",
+            "the loser of the first race must not be deleted by the guard"
+        );
+        assert_eq!(
+            fs::read_dir(&destination_root).unwrap().count(),
+            2,
+            "nothing may be deleted: only the destination and the stranded file remain"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&*stranded[0].to_string_lossy()),
+            "the error must name the full path of the preserved file, got: {message}"
+        );
+    }
+
+    /// A successful undo hands the temporary name back to the replacement waft
+    /// prepared — unless someone takes that name too. The unlink that follows
+    /// is conditioned on proving the inode, not on assuming it.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_keeps_a_temporary_name_taken_over_after_the_undo() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+        let dst = destination_root.join("file.env");
+        write(&dst, "old\n");
+        let planned = existing_snapshot(&dst);
+
+        let substitute_root = destination_root.clone();
+        let temporary_root = destination_root.clone();
+        let _hooks = publish_hooks::install(publish_hooks::Hooks {
+            after_destination_verified: Some(Box::new(move || {
+                substitute_destination(&substitute_root, "file.env", "someone else's file\n");
+            })),
+            after_exchange_back: Some(Box::new(move || {
+                // Someone lands on the temporary name in the instant between
+                // the undo and the cleanup that follows it.
+                let taken = temporaries(&temporary_root);
+                assert_eq!(taken.len(), 1);
+                let interloper = temporary_root.join("interloper");
+                write(&interloper, "not waft's file\n");
+                fs::rename(&interloper, &taken[0]).unwrap();
+            })),
+            ..publish_hooks::Hooks::default()
+        });
+
+        let error = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::ReplaceExisting(planned),
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read_to_string(&dst).unwrap(),
+            "someone else's file\n",
+            "the undo restored the other writer's file"
+        );
+        let kept = temporaries(&destination_root);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            fs::read_to_string(&kept[0]).unwrap(),
+            "not waft's file\n",
+            "a file waft did not write must not be unlinked"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&*kept[0].to_string_lossy()),
+            "the error must name the file that was left alone, got: {message}"
         );
     }
 

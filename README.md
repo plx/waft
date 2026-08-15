@@ -224,7 +224,9 @@ extra = ["*.bak"]
   length, content fingerprint, and mode to still match the planning snapshot.
   Replacement is a single atomic exchange whose swapped-out file is re-checked
   against that same snapshot before it is unlinked; a lost race is exchanged
-  back and reported as a per-file failure. A permissions repair also requires
+  back and reported as a per-file failure — unless the destination name has
+  been taken again in the meantime, in which case nothing is moved back and
+  both files are named in the error. A permissions repair also requires
   the pinned source and destination snapshots to agree on content, so the
   "content is already equal" premise is re-established at publication time
   rather than inherited from an earlier comparison
@@ -245,10 +247,14 @@ extra = ["*.bak"]
   drop guard, including when a publication unwinds
 - **Interrupt-safe index locking** — on Unix, `SIGINT` and `SIGTERM` unlink the
   live `index.lock` before re-raising under their previous disposition, so an
-  interrupt during the publish window cannot leave a stale lock. A signal the
-  process inherited as ignored is left ignored: waft would otherwise drop its
-  own lock and keep publishing without it. Other platforms have no such
-  handler; an interrupt there may require deleting `.git/**/index.lock` by hand
+  interrupt during the publish window cannot leave a stale lock. A signal that
+  arrives while the lock is still being created is recorded and acted on the
+  moment its ownership is known, rather than re-raised into a process that
+  would die with the lock on disk or delete a lock another writer holds. A
+  signal the process inherited as ignored is left ignored: waft would otherwise
+  drop its own lock and keep publishing without it. Other platforms have no
+  such handler; an interrupt there may require deleting `.git/**/index.lock` by
+  hand
 - **Dry-run is mutation-free** — `--dry-run` reads only, writes nothing, and
   reports planning failures on stderr with the same nonzero exit the real run
   would produce

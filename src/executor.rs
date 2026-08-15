@@ -180,18 +180,26 @@ impl GitIndexLock {
         let path = PathBuf::from(lock_name);
 
         // Install the handlers and stage the path *before* the file exists, so
-        // arming afterwards is a single atomic store. Anything between creating
-        // the lock and arming is a window where an interrupt would leave the
-        // lock behind, and this makes that window as small as it can be.
+        // arming afterwards is a single atomic store. A signal arriving between
+        // creating the lock and arming would once have terminated the process
+        // with the lock still on disk; from `stage` onwards such a signal is
+        // deferred to `resume_deferred_signal` below instead.
         interrupt_cleanup::stage(&path);
 
         let mut attempt = 0usize;
         let file = loop {
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => break file,
+            let created = OpenOptions::new().write(true).create_new(true).open(&path);
+            // A signal arriving while the path is merely staged cannot be acted
+            // on by the handler: it cannot tell whether the call above has
+            // already produced a file, so it records the signal and returns
+            // rather than terminating the process with a lock on disk that
+            // nothing will remove. Here the answer is known.
+            resume_deferred_signal(&path, created.is_ok())?;
+            match created {
+                Ok(file) => break Ok(file),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                     let Some(delay) = INDEX_LOCK_RETRY_DELAYS.get(attempt) else {
-                        return Err(io::Error::new(
+                        break Err(io::Error::new(
                             io::ErrorKind::WouldBlock,
                             format!(
                                 "destination Git index is locked at {} after {} attempt(s); refusing to publish",
@@ -204,7 +212,7 @@ impl GitIndexLock {
                     std::thread::sleep(*delay);
                 }
                 Err(error) => {
-                    return Err(io::Error::new(
+                    break Err(io::Error::new(
                         error.kind(),
                         format!(
                             "failed to lock destination Git index at {}: {error}",
@@ -215,15 +223,58 @@ impl GitIndexLock {
             }
         };
 
+        let file = match file {
+            Ok(file) => file,
+            Err(error) => {
+                // No lock was created and none will be, so the staged window
+                // closes here rather than staying open for the rest of the run.
+                // Leaving it *before* the check that follows is what makes a
+                // signal deferred at the last instant visible to that check
+                // instead of stranded for the next acquisition.
+                interrupt_cleanup::disarm();
+                resume_deferred_signal(&path, false)?;
+                return Err(error);
+            }
+        };
+
+        after_lock_created();
+
         // The lock now exists and is ours, so the staged path becomes live: an
         // interrupt during the publish window will not leave a stale lock
         // behind for the next Git command.
         interrupt_cleanup::arm();
+        // A signal delivered between the check above and `arm` is deferred too,
+        // and the handler only defers while the state is still staged — so a
+        // deferral that raced this `arm` is guaranteed to be visible here. Every
+        // path that records a signal ends at one of these two checks.
+        resume_deferred_signal(&path, true)?;
         Ok(Self {
             path,
             file: Some(file),
         })
     }
+}
+
+/// Finish a signal the handler deferred while the lock was being created.
+///
+/// `holds_lock` answers the one question the handler could not: whether the
+/// staged path is a file this process just created, and therefore whether
+/// removing it is waft's business or another writer's loss. The re-raise that
+/// follows normally ends the process; if the previous disposition was a handler
+/// that returns, acquisition fails instead, because an interrupt the user asked
+/// for must not turn into a publication that proceeds anyway.
+fn resume_deferred_signal(path: &Path, holds_lock: bool) -> io::Result<()> {
+    let Some(signal) = interrupt_cleanup::resume_pending_signal(holds_lock) else {
+        return Ok(());
+    };
+    Err(io::Error::new(
+        io::ErrorKind::Interrupted,
+        format!(
+            "interrupted by signal {signal} while locking the destination Git index at {}; no \
+             lock was left behind and nothing was published",
+            path.display()
+        ),
+    ))
 }
 
 impl Drop for GitIndexLock {
@@ -242,9 +293,12 @@ impl Drop for GitIndexLock {
 /// Signal-safe removal of the one lock file this process may hold.
 ///
 /// Unix installs `SIGINT`/`SIGTERM` handlers that unlink the recorded path and
-/// then re-raise the signal under its previous disposition. On other platforms
-/// this degrades to a no-op: an interrupt can still leave a stale
-/// `.git/**/index.lock` that the user must delete.
+/// then re-raise the signal under its previous disposition. While the lock is
+/// only staged — the file may exist by now, or may belong to another writer —
+/// the handler cannot decide either question, so it records the signal and
+/// returns; [`GitIndexLock::acquire`] acts on the record as soon as it knows.
+/// On other platforms this degrades to a no-op: an interrupt can still leave a
+/// stale `.git/**/index.lock` that the user must delete.
 #[cfg(unix)]
 mod interrupt_cleanup {
     use std::cell::UnsafeCell;
@@ -253,7 +307,7 @@ mod interrupt_cleanup {
     use std::path::Path;
     use std::ptr;
     use std::sync::Once;
-    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 
     /// Longer than `PATH_MAX` on every platform waft supports.
     const PATH_CAPACITY: usize = 4096;
@@ -263,6 +317,9 @@ mod interrupt_cleanup {
     const STAGED: u8 = 2;
     const ARMED: u8 = 3;
 
+    /// No signal is deferred. Zero is not a valid signal number.
+    const NO_SIGNAL: i32 = 0;
+
     struct SignalCell<T>(UnsafeCell<T>);
     // Access is confined to the single-threaded acquire/release path and to a
     // signal handler that only reads once `STATE` says the value is complete.
@@ -270,6 +327,9 @@ mod interrupt_cleanup {
 
     static STATE: AtomicU8 = AtomicU8::new(EMPTY);
     static PATH: SignalCell<[u8; PATH_CAPACITY]> = SignalCell(UnsafeCell::new([0; PATH_CAPACITY]));
+    /// A signal the handler could not act on because the lock file's existence
+    /// was still undecided. Read back by the acquire path within microseconds.
+    static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(NO_SIGNAL);
 
     static HANDLERS_INSTALLED: Once = Once::new();
     static INTERRUPT_PREVIOUS_READY: AtomicBool = AtomicBool::new(false);
@@ -284,7 +344,9 @@ mod interrupt_cleanup {
     /// Staging is separate from arming so that the caller can write the path
     /// and install the handlers *before* the lock file exists, leaving only a
     /// single atomic store between "the lock is ours" and "an interrupt will
-    /// clean it up".
+    /// clean it up". A signal landing in that store's shadow is deferred rather
+    /// than acted on, because only the caller can say which side of it the
+    /// signal arrived on.
     pub(super) fn stage(path: &Path) {
         let bytes = path.as_os_str().as_bytes();
         if bytes.len() >= PATH_CAPACITY {
@@ -326,34 +388,121 @@ mod interrupt_cleanup {
         if STATE.load(Ordering::SeqCst) != ARMED {
             return;
         }
-        // SAFETY: `ARMED` means the buffer holds a complete NUL-terminated
-        // path that stays valid until `disarm`.
+        unlink_recorded_path();
+    }
+
+    /// Unlink the recorded path unconditionally.
+    ///
+    /// The caller must have established both that the buffer holds a complete
+    /// path — the state is `STAGED` or `ARMED` — and that the file at it is
+    /// this process's to remove.
+    fn unlink_recorded_path() {
+        // SAFETY: past `WRITING` the buffer holds a complete NUL-terminated
+        // path that stays valid until the next `stage`.
         unsafe {
             libc::unlink(PATH.0.get().cast::<libc::c_char>());
         }
     }
 
-    extern "C" fn handle_interrupt(signal: libc::c_int) {
+    /// Async-signal-safe throughout: atomic accesses, `unlink`, `sigaction`,
+    /// and `raise`, and nothing else.
+    pub(super) extern "C" fn handle_interrupt(signal: libc::c_int) {
+        // One window cannot be resolved from inside a handler: between
+        // `create_new` returning and the cleanup being armed, the lock file may
+        // or may not exist, and it may or may not be waft's. Re-raising there
+        // would terminate the process with a stale `index.lock` that blocks
+        // every later Git and waft operation, and unlinking there could delete
+        // a lock another process holds. So the signal is recorded and the
+        // handler returns; the acquire path has a check immediately after both
+        // ends of that window and acts on it as soon as it knows the answer.
+        if STATE.load(Ordering::SeqCst) == STAGED {
+            let _ = PENDING_SIGNAL.compare_exchange(
+                NO_SIGNAL,
+                signal,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+            // Deferring is only safe while the acquire path still has a check
+            // ahead of it. Under a single total order this load decides that:
+            // if it still sees `STAGED`, the store above precedes the store
+            // that arms, which precedes the check that follows arming, so the
+            // record cannot be missed. Otherwise the window is over — take the
+            // record back and handle the signal here, the ordinary way.
+            if STATE.load(Ordering::SeqCst) == STAGED {
+                return;
+            }
+            let _ = PENDING_SIGNAL.compare_exchange(
+                signal,
+                NO_SIGNAL,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
         // This handler is only installed for signals whose previous
         // disposition was not `SIG_IGN`, so reaching here means the process is
         // going to act on the signal rather than sail past it. Removing the
         // lock first is therefore safe: nothing resumes publishing afterwards.
         remove_armed_lock();
-        // Restore what was installed before waft and let it decide the
-        // process's fate.
+        restore_previous_and_raise(signal);
+    }
+
+    /// Act on a signal the handler deferred, if there is one.
+    ///
+    /// `holds_lock` says whether the staged path names a file this process just
+    /// created. Returns the signal number if the process survived the re-raise,
+    /// which happens only when the previous disposition was a handler that
+    /// returns; the caller must then abandon the acquisition.
+    pub(super) fn resume_pending_signal(holds_lock: bool) -> Option<i32> {
+        let signal = PENDING_SIGNAL.swap(NO_SIGNAL, Ordering::SeqCst);
+        if signal == NO_SIGNAL {
+            return None;
+        }
+        // Remove before dropping the recorded path, never after: a second
+        // signal arriving in between must still find something to clean up.
+        if holds_lock && STATE.load(Ordering::SeqCst) != EMPTY {
+            unlink_recorded_path();
+        }
+        // Whether or not a lock was created, nothing is live now. Leaving the
+        // state `STAGED` would make a later signal defer with no check ahead of
+        // it to redeem the deferral.
+        disarm();
+        restore_previous_and_raise(signal);
+        Some(signal)
+    }
+
+    /// Put back the disposition waft replaced, then re-raise, so the process
+    /// ends the way it would have without waft's handler.
+    ///
+    /// Only `SIGINT` and `SIGTERM` are ever installed. Any other number can
+    /// only come from a test driving the handler directly: nothing was replaced
+    /// for it, so nothing is restored and the signal is simply re-raised.
+    fn restore_previous_and_raise(signal: libc::c_int) {
         unsafe {
-            let (previous, ready) = match signal {
-                libc::SIGINT => (PREVIOUS_INTERRUPT.0.get(), &INTERRUPT_PREVIOUS_READY),
-                _ => (PREVIOUS_TERMINATE.0.get(), &TERMINATE_PREVIOUS_READY),
+            let replaced = match signal {
+                libc::SIGINT => Some((PREVIOUS_INTERRUPT.0.get(), &INTERRUPT_PREVIOUS_READY)),
+                libc::SIGTERM => Some((PREVIOUS_TERMINATE.0.get(), &TERMINATE_PREVIOUS_READY)),
+                _ => None,
             };
-            if ready.load(Ordering::SeqCst) {
-                libc::sigaction(signal, (*previous).as_ptr(), ptr::null_mut());
-            } else {
-                let mut default: libc::sigaction = std::mem::zeroed();
-                default.sa_sigaction = libc::SIG_DFL;
-                libc::sigaction(signal, &default, ptr::null_mut());
+            if let Some((previous, ready)) = replaced {
+                if ready.load(Ordering::SeqCst) {
+                    libc::sigaction(signal, (*previous).as_ptr(), ptr::null_mut());
+                } else {
+                    let mut default: libc::sigaction = std::mem::zeroed();
+                    default.sa_sigaction = libc::SIG_DFL;
+                    libc::sigaction(signal, &default, ptr::null_mut());
+                }
             }
             libc::raise(signal);
+        }
+    }
+
+    /// The signal a deferral recorded, for tests that drive the handler through
+    /// the creation window directly.
+    #[cfg(test)]
+    pub(super) fn deferred_signal() -> Option<i32> {
+        match PENDING_SIGNAL.load(Ordering::SeqCst) {
+            NO_SIGNAL => None,
+            signal => Some(signal),
         }
     }
 
@@ -416,7 +565,56 @@ mod interrupt_cleanup {
     pub(super) fn arm() {}
 
     pub(super) fn disarm() {}
+
+    /// No handler is installed, so no signal is ever deferred.
+    pub(super) fn resume_pending_signal(_holds_lock: bool) -> Option<i32> {
+        None
+    }
 }
+
+/// Test-only seam inside [`GitIndexLock::acquire`], between the lock file
+/// existing and the cleanup being armed.
+///
+/// A real signal cannot be aimed at that window from a test, and the window is
+/// exactly where an interrupt used to be able to leave a stale `index.lock`
+/// behind. The hook lets a test stand in for the kernel and deliver one there.
+#[cfg(all(test, unix))]
+mod lock_hooks {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static IN_CREATION_WINDOW: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    }
+
+    /// Installs `hook` for the current thread until the returned guard drops.
+    pub(super) fn install(hook: Box<dyn FnMut()>) -> HookGuard {
+        IN_CREATION_WINDOW.with(|cell| *cell.borrow_mut() = Some(hook));
+        HookGuard
+    }
+
+    pub(super) struct HookGuard;
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            IN_CREATION_WINDOW.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+
+    /// Takes the hook out before running it, so it may itself re-enter the
+    /// acquire path without recursing or borrowing twice.
+    pub(super) fn after_lock_created() {
+        let hook = IN_CREATION_WINDOW.with(|cell| cell.borrow_mut().take());
+        if let Some(mut hook) = hook {
+            hook();
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+use lock_hooks::after_lock_created;
+
+#[cfg(not(all(test, unix)))]
+fn after_lock_created() {}
 
 fn ensure_destination_untracked(
     plan: &CopyPlan,
@@ -959,10 +1157,12 @@ mod tests {
     /// window having already deleted the index lock it is still relying on.
     ///
     /// `SIGUSR2` stands in for `SIGINT`/`SIGTERM` so the test never changes the
-    /// dispositions the test process actually runs under.
+    /// dispositions the test process actually runs under. That disposition is
+    /// process-global, so this test shares the lock with the others.
     #[cfg(unix)]
     #[test]
     fn interrupt_handlers_leave_an_inherited_ignore_alone() {
+        let _serialized = one_lock_at_a_time();
         extern "C" fn never_called(_signal: libc::c_int) {}
 
         unsafe fn disposition(signal: libc::c_int) -> libc::sighandler_t {
@@ -1041,6 +1241,220 @@ mod tests {
         interrupt_cleanup::remove_armed_lock();
         assert!(lock.exists());
         fs::remove_file(&lock).unwrap();
+    }
+
+    /// Counts `SIGUSR2` deliveries and restores the previous disposition on
+    /// drop.
+    ///
+    /// `SIGUSR2` stands in for `SIGINT`/`SIGTERM`, whose dispositions the test
+    /// process actually runs under. The code under test re-raises whatever it
+    /// is handed, so the test needs a disposition it can survive and count.
+    #[cfg(unix)]
+    struct CountedSignal {
+        previous: libc::sigaction,
+    }
+
+    #[cfg(unix)]
+    static SIGUSR2_DELIVERIES: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    #[cfg(unix)]
+    impl CountedSignal {
+        fn install() -> Self {
+            extern "C" fn count(_signal: libc::c_int) {
+                SIGUSR2_DELIVERIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            SIGUSR2_DELIVERIES.store(0, std::sync::atomic::Ordering::SeqCst);
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = count as usize;
+                libc::sigemptyset(&mut action.sa_mask);
+                let mut previous: std::mem::MaybeUninit<libc::sigaction> =
+                    std::mem::MaybeUninit::uninit();
+                assert_eq!(
+                    libc::sigaction(libc::SIGUSR2, &action, previous.as_mut_ptr()),
+                    0
+                );
+                Self {
+                    previous: previous.assume_init(),
+                }
+            }
+        }
+
+        fn delivered(&self) -> usize {
+            SIGUSR2_DELIVERIES.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for CountedSignal {
+        fn drop(&mut self) {
+            unsafe {
+                libc::sigaction(libc::SIGUSR2, &self.previous, std::ptr::null_mut());
+            }
+        }
+    }
+
+    /// A signal delivered after `create_new` produced the lock file and before
+    /// the cleanup is armed. Terminating there would leave `index.lock` on disk
+    /// and block every later Git and waft operation on that repository.
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_between_lock_creation_and_arming_takes_the_lock_with_it() {
+        let _serialized = one_lock_at_a_time();
+        let counted = CountedSignal::install();
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        let lock = temp.path().join("index.lock");
+
+        let observed = std::rc::Rc::new(std::cell::Cell::new(None));
+        let in_window = std::rc::Rc::clone(&observed);
+        let window_lock = lock.clone();
+        let _hooks = lock_hooks::install(Box::new(move || {
+            // Stand in for the kernel delivering a signal inside the window.
+            interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+            in_window.set(Some((
+                window_lock.exists(),
+                interrupt_cleanup::deferred_signal(),
+                SIGUSR2_DELIVERIES.load(std::sync::atomic::Ordering::SeqCst),
+            )));
+        }));
+
+        let acquired = GitIndexLock::acquire(&index);
+
+        assert_eq!(
+            observed.get(),
+            Some((true, Some(libc::SIGUSR2), 0)),
+            "inside the window the handler must record the signal, unlink nothing, and neither \
+             re-raise nor terminate the process"
+        );
+        assert!(
+            !lock.exists(),
+            "the deferred signal must take the just-created lock with it"
+        );
+        assert_eq!(
+            counted.delivered(),
+            1,
+            "a deferred signal must be re-raised, never dropped"
+        );
+        assert_eq!(interrupt_cleanup::deferred_signal(), None);
+        let Err(error) = acquired else {
+            panic!("an interrupt in the creation window must abandon the acquisition");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(
+            error.to_string().contains("interrupted by signal"),
+            "got: {error}"
+        );
+    }
+
+    /// Either side of that window the behavior is unchanged: an armed lock is
+    /// removed by the handler itself, and a signal arriving with no publication
+    /// in progress is re-raised immediately rather than deferred to a check
+    /// that will never come.
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_outside_the_creation_window_is_never_deferred() {
+        let _serialized = one_lock_at_a_time();
+        let counted = CountedSignal::install();
+        let temp = tempfile::TempDir::new().unwrap();
+        let armed = temp.path().join("index.lock");
+        fs::write(&armed, b"waft\n").unwrap();
+
+        interrupt_cleanup::stage(&armed);
+        interrupt_cleanup::arm();
+        interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+        assert!(
+            !armed.exists(),
+            "an armed lock is removed by the handler itself"
+        );
+        assert_eq!(
+            interrupt_cleanup::deferred_signal(),
+            None,
+            "an armed lock leaves nothing to defer"
+        );
+        assert_eq!(counted.delivered(), 1);
+
+        fs::write(&armed, b"someone else\n").unwrap();
+        interrupt_cleanup::disarm();
+        interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+        assert!(armed.exists(), "a lock waft does not hold is never removed");
+        assert_eq!(interrupt_cleanup::deferred_signal(), None);
+        assert_eq!(counted.delivered(), 2);
+        fs::remove_file(&armed).unwrap();
+    }
+
+    /// A failed acquisition has to close the staged window behind it. Leaving
+    /// it open would make every later interrupt defer into a check that never
+    /// comes — a signal silently swallowed for the rest of the run.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_acquisition_leaves_no_window_for_a_signal_to_fall_into() {
+        let _serialized = one_lock_at_a_time();
+        let counted = CountedSignal::install();
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        let lock = temp.path().join("index.lock");
+        fs::write(&lock, b"held by concurrent Git\n").unwrap();
+
+        let Err(error) = GitIndexLock::acquire(&index) else {
+            panic!("a permanently held lock must not be acquired");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+
+        interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+        assert_eq!(
+            interrupt_cleanup::deferred_signal(),
+            None,
+            "with nothing staged a signal must be acted on, not recorded"
+        );
+        assert_eq!(counted.delivered(), 1);
+        assert!(
+            lock.exists(),
+            "waft must never remove another process's lock"
+        );
+    }
+
+    /// The other half of what the handler cannot know: the staged path may
+    /// still be another writer's lock. A deferred signal must not take that
+    /// file with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_deferred_interrupt_never_removes_another_writers_lock() {
+        let _serialized = one_lock_at_a_time();
+        let counted = CountedSignal::install();
+        let temp = tempfile::TempDir::new().unwrap();
+        let contested = temp.path().join("index.lock");
+        fs::write(&contested, b"held by concurrent Git\n").unwrap();
+
+        interrupt_cleanup::stage(&contested);
+        interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+        assert_eq!(
+            interrupt_cleanup::deferred_signal(),
+            Some(libc::SIGUSR2),
+            "a staged path is the window: the signal is recorded, not acted on"
+        );
+        assert_eq!(counted.delivered(), 0);
+        assert!(contested.exists());
+
+        assert_eq!(
+            interrupt_cleanup::resume_pending_signal(false),
+            Some(libc::SIGUSR2)
+        );
+        assert!(
+            contested.exists(),
+            "a lock this process did not create is not waft's to remove"
+        );
+        assert_eq!(counted.delivered(), 1);
+        assert_eq!(interrupt_cleanup::deferred_signal(), None);
+
+        // Nothing is staged any more, so a later signal is not deferred into a
+        // record nobody will read.
+        interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+        assert_eq!(interrupt_cleanup::deferred_signal(), None);
+        assert_eq!(counted.delivered(), 2);
+        fs::remove_file(&contested).unwrap();
     }
 
     #[test]
