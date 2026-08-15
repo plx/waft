@@ -219,11 +219,19 @@ repository's own `core.ignoreCase`, which Git records per checkout after
 probing the filesystem. When it is true, a differently-cased spelling of a
 tracked path is protected as that tracked path, and a differently-cased
 spelling of a registered submodule directory is treated as that submodule
-boundary. When it is false, both comparisons are exact — a case-sensitive
-volume really does hold two distinct files — except that a tracked path is
-still protected when the filesystem itself resolves both spellings to the same
-entry. If the key is absent entirely, macOS and Windows fall back to folding
-and other platforms to exact comparison.
+boundary. When it is false, tracked-path comparison is exact — a
+case-sensitive volume really does hold two distinct files — except that a
+tracked path is still protected when the filesystem itself resolves both
+spellings to the same entry. If the key is absent entirely, macOS and Windows
+fall back to folding and other platforms to exact comparison.
+
+Repository-boundary comparisons (registered submodules during walks and
+project-config discovery) stay folded on macOS and Windows regardless of the
+key: those filesystems may alias case even when `core.ignoreCase` is false,
+and treating a case-aliased submodule directory as ordinary source content
+would select another repository's files. On other platforms the key decides,
+so a case-sensitive checkout keeps `Vendor/` distinct from a registered
+`vendor/` submodule.
 
 This answer is read once per run, so a single invocation cannot apply folded
 protection to some paths and exact matching to others. Editing `core.ignoreCase`

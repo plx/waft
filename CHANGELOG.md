@@ -52,13 +52,16 @@ Until the first supported release, changes remain under `Unreleased`.
 - Decide case sensitivity from the repository's own `core.ignoreCase` rather
   than assuming macOS and Windows always fold case. On a case-sensitive volume
   configured `core.ignoreCase = false`, a distinct untracked file whose name
-  folds onto a tracked one stays eligible, and a directory such as `Vendor/` is
-  no longer treated as the registered `vendor/` submodule boundary. Folded
-  protection is kept when the key is true, and when the key is absent the
-  platform default still decides. Exclusion pattern matching keeps its own,
-  deliberately more conservative rule: it stays case-insensitive on macOS and
-  Windows regardless, because a missed safety exclusion leaks a file while a
-  spurious one only withholds one.
+  folds onto a tracked one stays eligible, and on platforms that never alias
+  case a directory such as `Vendor/` is no longer treated as the registered
+  `vendor/` submodule boundary. Folded protection is kept when the key is
+  true, and when the key is absent the platform default still decides.
+  Repository-boundary and config-discovery comparisons, like exclusion
+  pattern matching, keep a deliberately more conservative rule: on macOS and
+  Windows they stay folded regardless of the key, because those filesystems
+  may alias case anyway and walking into a registered submodule (or trusting
+  its config) is the failure that must not happen, while a spurious boundary
+  only leaves one directory unscanned.
 - Resolve `core.ignoreCase` once per repository per run, so a run cannot apply
   folded protection to some paths and exact matching to others, and so the
   per-file tracked-state recheck does not repeat a config lookup under the

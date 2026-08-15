@@ -644,6 +644,62 @@ fn claude_root_only_nested_negation_matches_between_backends() {
     assert!(output.contains("sub/nested.env"));
 }
 
+/// A registered submodule stays a walk boundary even when its on-disk
+/// spelling differs from the index gitlink only by case, the checkout is
+/// configured `core.ignoreCase = false`, and no `.git` marker exists inside
+/// it — on an aliasing filesystem the spelling difference is not evidence
+/// of a different directory, and the boundary comparison must stay folded
+/// (Codex review of PR #27).
+#[test]
+fn gitlink_boundary_holds_for_case_aliased_spelling_on_folding_volumes() {
+    let repo = make_repo();
+    if !filesystem_folds_case(repo.path()) {
+        eprintln!("skipping: filesystem does not alias case");
+        return;
+    }
+    git(repo.path(), &["config", "core.ignorecase", "false"]);
+    std::fs::write(repo.path().join(".gitignore"), "*.env\n").unwrap();
+    std::fs::write(repo.path().join(".worktreeinclude"), "*.env\n").unwrap();
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+
+    // Register the gitlink under one spelling; materialize the directory
+    // under another, with no `.git` marker inside — the index entry is the
+    // only thing standing between the walkers and the submodule's files.
+    git(
+        repo.path(),
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,1111111111111111111111111111111111111111,Vendor",
+        ],
+    );
+    git(repo.path(), &["commit", "-m", "setup"]);
+    let vendor = repo.path().join("vendor");
+    std::fs::create_dir_all(&vendor).unwrap();
+    std::fs::write(vendor.join("inner.env"), "inner\n").unwrap();
+    std::fs::write(repo.path().join("top.env"), "top\n").unwrap();
+
+    let source = repo.path().to_string_lossy().to_string();
+    for backend in ["gix", "cli"] {
+        let out = run_waft(repo.path(), backend, &["list", "--source", &source]);
+        assert!(
+            out.status.success(),
+            "{backend} backend failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("top.env"),
+            "{backend}: top-level candidate missing: {stdout}"
+        );
+        assert!(
+            !stdout.contains("inner.env"),
+            "{backend}: walked into the case-aliased registered submodule: {stdout}"
+        );
+    }
+}
+
 /// Both backends must skip nested Git checkouts: registered submodules
 /// (gitlink entries in the index) and independent nested clones (their own
 /// `.git` directory). Otherwise the gix backend would copy files out of
