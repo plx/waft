@@ -345,6 +345,15 @@ pub fn root_rule_file_is_consulted(repo_root: &Path, symlink_policy: SymlinkPoli
     !(symlink_policy == SymlinkPolicy::Ignore && is_symlink(&wti_path))
 }
 
+/// The largest target [`rule_file_is_readable`] will read to answer its
+/// question.
+///
+/// A `.worktreeinclude` is a hand-written list of path patterns; a megabyte of
+/// them is already far past any real one, so the bound never rules out a file a
+/// user meant as a rule file. It exists to keep a diagnosis-only probe from
+/// paying for the contents of whatever a symlink happens to point at.
+pub const MAX_PROBED_RULE_FILE_BYTES: u64 = 1024 * 1024;
+
 /// Whether following `path` reaches something a rule-file reader can consume:
 /// a regular file whose bytes read back as text.
 ///
@@ -363,14 +372,33 @@ pub fn root_rule_file_is_consulted(repo_root: &Path, symlink_policy: SymlinkPoli
 /// through in [`crate::validate`], because opening is strictly weaker than
 /// reading: a file holding invalid UTF-8 opens and then fails to decode, so an
 /// open-only test advertises a remedy that errors out on the next run.
-/// Agreeing with validation is the whole contract here, including its absence
-/// of a size guard — a cap on this side alone would put the two back out of
-/// step, which is the drift this predicate exists to prevent.
+///
+/// The single place this deliberately stops short of validation is size. It
+/// runs on a path the active policy specifically declined to read, purely to
+/// decide whether to print a hint, so the probe must never cost more than the
+/// hint is worth: without a bound, a symlink to a sparse or multi-gigabyte
+/// target has `read_to_string` allocate and decode the whole thing during an
+/// otherwise empty `list`, `info`, or `copy`. A target larger than
+/// [`MAX_PROBED_RULE_FILE_BYTES`] is therefore reported unreadable *without*
+/// being read. The asymmetry is deliberate and safe in that direction: the
+/// bound can only ever withhold `--worktreeinclude-symlink-policy follow`,
+/// never advertise it where validation would fail, and withholding sends an
+/// implausibly shaped rule file to the absent-rule note that the active
+/// `ignore` policy already implies — the same landing place as a dangling or
+/// undecodable link. Under the bound the check is exactly validation's.
 ///
 /// [`fs::metadata`] resolves symlinks, so the regular-file test also excludes
-/// FIFOs and devices — which is what keeps the read from blocking.
+/// FIFOs and devices — which is what keeps the read from blocking. The size
+/// comes off that same resolved-target metadata, so the bound costs no extra
+/// syscall.
 pub fn rule_file_is_readable(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) && fs::read_to_string(path).is_ok()
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() > MAX_PROBED_RULE_FILE_BYTES {
+        return false;
+    }
+    fs::read_to_string(path).is_ok()
 }
 
 /// Whether `SymlinkPolicy::Follow` would leave the repo-root `.worktreeinclude`
@@ -386,6 +414,21 @@ pub fn rule_file_is_readable(path: &Path) -> bool {
 pub fn root_rule_file_becomes_readable_under_follow(repo_root: &Path) -> bool {
     root_rule_file_is_consulted(repo_root, SymlinkPolicy::Follow)
         && rule_file_is_readable(&repo_root.join(".worktreeinclude"))
+}
+
+/// Whether anything at all occupies the repo-root `.worktreeinclude` name —
+/// a regular file, a symlink of any health, a directory.
+///
+/// Deliberately the weakest of the predicates here: it neither follows nor
+/// judges what it finds. That is what makes it the right question for "would a
+/// `follow` run have to read a root rule file", which the diagnosis in
+/// [`crate::subcommands`] needs before it can point a user at nested rules. A
+/// root entry that `follow` cannot read fails validation under every
+/// semantics, so no remedy naming `follow` survives one — including a dangling
+/// link, which [`root_rule_file_is_consulted`] cannot see because resolving it
+/// is exactly what fails.
+pub fn root_rule_file_entry_exists(repo_root: &Path) -> bool {
+    fs::symlink_metadata(repo_root.join(".worktreeinclude")).is_ok()
 }
 
 /// True if `path` itself is a symlink (without following).

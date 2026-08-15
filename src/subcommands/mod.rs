@@ -108,6 +108,11 @@ pub(crate) enum EmptySelectionCause {
     /// symlink, which the active symlink policy skips — repo-wide, or just at
     /// the root when the semantics read the root file only.
     RuleFileSymlinkIgnored,
+    /// The active semantics read the root file only, no root rule file exists,
+    /// and the one readable rule file in the repo is a nested symlink the
+    /// active policy skips. Both settings are load-bearing, so this is the one
+    /// cause whose remedy is a pair of flags rather than one.
+    NestedRuleFileSymlinkIgnored,
 }
 
 /// Explain an empty selection, or decline to.
@@ -133,14 +138,20 @@ pub(crate) enum EmptySelectionCause {
 /// the symlink policy explains that. Reporting the absence of a root file
 /// there would be false, and its remedy — Git semantics — would leave the
 /// root symlink just as skipped, so the run would stay empty.
+///
+/// They also compose the other way, where neither remedy is enough by itself:
+/// a symlinked rule file that exists only in a subdirectory is hidden twice
+/// over, once by the policy and once by the semantics, so the note has to name
+/// both knobs. Each single-flag remedy would be a true statement about one
+/// obstacle and a false promise about the run.
 fn diagnose_empty_selection(
     git: &dyn GitBackend,
     source_root: &Path,
     policy: &ResolvedPolicy,
     rule_file_found: bool,
 ) -> Result<Option<EmptySelectionCause>> {
+    let root_only = policy.semantics == WorktreeincludeSemantics::Claude202604;
     if rule_file_found {
-        let root_only = policy.semantics == WorktreeincludeSemantics::Claude202604;
         if root_only
             && !crate::worktreeinclude::root_rule_file_is_consulted(
                 source_root,
@@ -191,6 +202,27 @@ fn diagnose_empty_selection(
             &git.gitlinks(source_root)?,
         )
     {
+        // The walk above is repo-wide, and root-only semantics are not: the
+        // readable rule file it found is only reachable by the recommended run
+        // if it is the root one. Ask that separately before promising `follow`
+        // alone, or the note sends a `claude-2026-04` user from one silent
+        // empty result to another.
+        if root_only {
+            if crate::worktreeinclude::root_rule_file_becomes_readable_under_follow(source_root) {
+                return Ok(Some(EmptySelectionCause::RuleFileSymlinkIgnored));
+            }
+            // Nothing occupies the root name at all, so the readable file the
+            // walk found is nested: reaching it needs the policy to stop
+            // skipping it *and* the semantics to look outside the root.
+            if !crate::worktreeinclude::root_rule_file_entry_exists(source_root) {
+                return Ok(Some(EmptySelectionCause::NestedRuleFileSymlinkIgnored));
+            }
+            // A root entry exists that following cannot read. Every remedy
+            // naming `follow` makes validation read it and fail, so there is
+            // no remedy to advertise; fall through to the absent-rule note the
+            // active `ignore` policy already implies.
+            return Ok(Some(EmptySelectionCause::NoRuleFile));
+        }
         return Ok(Some(EmptySelectionCause::RuleFileSymlinkIgnored));
     }
 
@@ -292,6 +324,10 @@ pub(crate) fn note_empty_selection(policy: &ResolvedPolicy, pass: &Eligibility, 
         ),
         EmptySelectionCause::RuleFileSymlinkIgnored => eprintln!(
             "note: .worktreeinclude is a symlink and the active symlink policy skips it; pass --worktreeinclude-symlink-policy follow to use it"
+        ),
+        EmptySelectionCause::NestedRuleFileSymlinkIgnored => eprintln!(
+            "note: the only readable .worktreeinclude is a symlink outside the repository root; the active symlink policy skips it and {} semantics ignore nested rule files (use --worktreeinclude-semantics git --worktreeinclude-symlink-policy follow to read it)",
+            policy.semantics.as_str()
         ),
     }
 }

@@ -605,6 +605,220 @@ fn list_does_not_recommend_following_a_root_symlink_to_invalid_utf8() {
     following_symlinks_fails_to_read_the_rule_file(repo.path(), "claude");
 }
 
+/// A readable rule-file symlink that exists only in a subdirectory, read by
+/// root-only semantics under the policy that skips symlinks. Following it is
+/// necessary and not sufficient: `claude-2026-04` never opens a nested rule
+/// file, so `--worktreeinclude-symlink-policy follow` alone moves the run from
+/// one silent empty result to another. Git semantics alone are equally inert,
+/// because the file they would read is the one `ignore` skips. Only the pair
+/// selects anything, so only the pair is honest to print.
+#[cfg(unix)]
+#[test]
+fn list_pairs_both_knobs_for_a_nested_rule_file_symlink_under_root_only_semantics() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), "sub/rules.txt", ".env\n");
+    std::os::unix::fs::symlink("rules.txt", repo.path().join("sub/.worktreeinclude")).unwrap();
+    git(
+        repo.path(),
+        &["add", ".gitignore", "sub/rules.txt", "sub/.worktreeinclude"],
+    );
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), "sub/.env", "secret\n");
+
+    let stderr = note_from_every_backend(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-symlink-policy",
+            "ignore",
+        ],
+    );
+
+    assert!(
+        !stderr.contains("pass --worktreeinclude-symlink-policy follow to use it"),
+        "following alone leaves root-only semantics ignoring this file, so the \
+         bare follow remedy must not be advertised: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "the only readable .worktreeinclude is a symlink outside the repository root"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "use --worktreeinclude-semantics git --worktreeinclude-symlink-policy follow"
+        ),
+        "the note must name the combination that actually reads the file: {stderr}"
+    );
+
+    // The remedy the note names selects the file.
+    let both = run_list(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-semantics",
+            "git",
+            "--worktreeinclude-symlink-policy",
+            "follow",
+        ],
+    );
+    assert!(both.status.success(), "{both:?}");
+    assert!(
+        String::from_utf8_lossy(&both.stdout).contains("sub/.env"),
+        "both knobs together should select sub/.env; got {:?}",
+        String::from_utf8_lossy(&both.stdout)
+    );
+
+    // And neither half of it does on its own — the asymmetry that makes the
+    // pairing, rather than either single flag, the true remedy.
+    let follow_only = run_list(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-symlink-policy",
+            "follow",
+        ],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&follow_only.stdout),
+        "",
+        "root-only semantics must not read a nested rule file just because the \
+         policy stopped skipping it"
+    );
+    let git_semantics_only = run_list(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-semantics",
+            "git",
+            "--worktreeinclude-symlink-policy",
+            "ignore",
+        ],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&git_semantics_only.stdout),
+        "",
+        "Git semantics must not rescue a rule file the active policy skips"
+    );
+}
+
+/// The same shape with a root entry the recommended run would choke on: a
+/// dangling root symlink beside the readable nested one. Pairing the knobs
+/// would be false here — under `follow` validation reads the dangling root
+/// link and fails before anything is selected — so no remedy naming `follow`
+/// applies, and the diagnosis falls back to the absent-rule note that the
+/// active `ignore` policy already implies.
+#[cfg(unix)]
+#[test]
+fn list_does_not_pair_the_knobs_when_the_root_rule_file_symlink_is_broken() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), "sub/rules.txt", ".env\n");
+    std::os::unix::fs::symlink("rules.txt", repo.path().join("sub/.worktreeinclude")).unwrap();
+    std::os::unix::fs::symlink("no-such-rules.txt", repo.path().join(".worktreeinclude")).unwrap();
+    git(
+        repo.path(),
+        &["add", ".gitignore", "sub/rules.txt", "sub/.worktreeinclude"],
+    );
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), "sub/.env", "secret\n");
+
+    let stderr = note_from_every_backend(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-symlink-policy",
+            "ignore",
+        ],
+    );
+
+    assert!(
+        !stderr.contains("--worktreeinclude-symlink-policy follow"),
+        "a broken root rule file makes every follow-based remedy fail: {stderr}"
+    );
+    assert!(stderr.contains(CLAUDE_MISSING_RULE_FILE_NOTE), "{stderr}");
+
+    // Both halves of the remedy the previous test names, applied here, fail
+    // outright rather than selecting anything.
+    following_symlinks_fails_to_read_the_rule_file(repo.path(), "claude");
+    let both = run_list(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-semantics",
+            "git",
+            "--worktreeinclude-symlink-policy",
+            "follow",
+        ],
+    );
+    assert!(
+        !both.status.success()
+            && String::from_utf8_lossy(&both.stderr).contains("cannot read file"),
+        "expected the paired remedy to fail on the dangling root link; got {both:?}"
+    );
+}
+
+/// Diagnosis must not pay for the file it is only asking about. The active
+/// `ignore` policy skipped this symlink; the follow-remedy probe is the only
+/// thing that ever looks behind it, so a multi-gigabyte target must not be
+/// allocated and decoded just to decide whether to print a hint. The bound
+/// also settles the answer: a `.worktreeinclude` that size is not a rule file,
+/// so the remedy is withheld and the absent-rule note stands.
+#[cfg(unix)]
+#[test]
+fn list_does_not_read_an_implausibly_large_symlink_target_to_diagnose() {
+    use std::os::unix::fs::MetadataExt;
+
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    let big = repo.path().join("rules.big");
+    let Ok(file) = fs::File::create(&big) else {
+        return;
+    };
+    if file.set_len(2 * 1024 * 1024 * 1024).is_err() {
+        return;
+    }
+    drop(file);
+    // Only meaningful while the file stays sparse; a filesystem that
+    // materialized two gigabytes here cannot host this case cheaply.
+    match fs::metadata(&big) {
+        Ok(metadata) if metadata.blocks() * 512 <= 64 * 1024 * 1024 => {}
+        _ => return,
+    }
+    std::os::unix::fs::symlink("rules.big", repo.path().join(".worktreeinclude")).unwrap();
+    git(repo.path(), &["add", ".gitignore"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+
+    let started = std::time::Instant::now();
+    let stderr = note_from_every_backend(repo.path(), &["--compat-profile", "git"]);
+    let elapsed = started.elapsed();
+
+    assert!(
+        !stderr.contains("--worktreeinclude-symlink-policy follow"),
+        "a target too large to be a rule file must not be advertised as fixable \
+         by following it: {stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "note: no .worktreeinclude found; the git profile selects nothing without one"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "diagnosing an empty selection should not read the symlink target; took {elapsed:?}"
+    );
+}
+
 /// `wt` selects every git-ignored untracked file without a rule file, so only
 /// an explicit `--when-missing-worktreeinclude blank` can blank it. Naming the
 /// profile there would point at the one setting that is not responsible.
