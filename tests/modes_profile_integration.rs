@@ -570,6 +570,41 @@ fn list_does_not_recommend_following_an_unreadable_root_symlink_under_root_only_
     following_symlinks_fails_to_read_the_rule_file(repo.path(), "claude");
 }
 
+/// The last way a resolvable link fails the remedy: the target is a regular
+/// file this process opens without complaint, and the rule-file reader still
+/// cannot consume it. Rule files are read as text, so invalid UTF-8 fails the
+/// recommended run at validation exactly like a dangling link does. The gate
+/// is what the reader does, not what the OS permits.
+#[cfg(unix)]
+#[test]
+fn list_does_not_recommend_following_a_root_symlink_to_invalid_utf8() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    fs::write(repo.path().join("rules.bin"), b"\xff\xfe.env\n").unwrap();
+    std::os::unix::fs::symlink("rules.bin", repo.path().join(".worktreeinclude")).unwrap();
+    git(repo.path(), &["add", ".gitignore", "rules.bin"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+
+    let stderr = note_from_every_backend(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "claude",
+            "--worktreeinclude-symlink-policy",
+            "ignore",
+        ],
+    );
+
+    assert!(
+        !stderr.contains("--worktreeinclude-symlink-policy follow"),
+        "a target the rule-file reader cannot decode must not be advertised as \
+         fixable by following it: {stderr}"
+    );
+    assert!(stderr.contains(CLAUDE_MISSING_RULE_FILE_NOTE), "{stderr}");
+    following_symlinks_fails_to_read_the_rule_file(repo.path(), "claude");
+}
+
 /// `wt` selects every git-ignored untracked file without a rule file, so only
 /// an explicit `--when-missing-worktreeinclude blank` can blank it. Naming the
 /// profile there would point at the one setting that is not responsible.

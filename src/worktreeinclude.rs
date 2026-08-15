@@ -346,7 +346,7 @@ pub fn root_rule_file_is_consulted(repo_root: &Path, symlink_policy: SymlinkPoli
 }
 
 /// Whether following `path` reaches something a rule-file reader can consume:
-/// a regular file that opens for reading.
+/// a regular file whose bytes read back as text.
 ///
 /// The existence checks above — and the repo-wide walk in [`crate::git`] —
 /// answer "is a rule file named here", which is the right gate for selection:
@@ -354,14 +354,23 @@ pub fn root_rule_file_is_consulted(repo_root: &Path, symlink_policy: SymlinkPoli
 /// and `when_missing` must not fire behind it. It is the wrong question for
 /// recommending `--worktreeinclude-symlink-policy follow`, because a symlink
 /// can name a rule file that following cannot read — a dangling link, a link
-/// to a directory, or a link to a file this process cannot open. Each leaves
-/// the recommended run just as empty, and `waft validate` rejects it under
-/// `follow` with `cannot read file`.
+/// to a directory, a link to a file this process cannot open, or a link to a
+/// file whose contents are not UTF-8. Each leaves the recommended run just as
+/// empty, and `waft validate` rejects it under `follow` with `cannot read
+/// file`.
+///
+/// The read is [`fs::read_to_string`], the same call every rule file goes
+/// through in [`crate::validate`], because opening is strictly weaker than
+/// reading: a file holding invalid UTF-8 opens and then fails to decode, so an
+/// open-only test advertises a remedy that errors out on the next run.
+/// Agreeing with validation is the whole contract here, including its absence
+/// of a size guard — a cap on this side alone would put the two back out of
+/// step, which is the drift this predicate exists to prevent.
 ///
 /// [`fs::metadata`] resolves symlinks, so the regular-file test also excludes
-/// FIFOs and devices — which is what keeps the open from blocking.
+/// FIFOs and devices — which is what keeps the read from blocking.
 pub fn rule_file_is_readable(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) && fs::File::open(path).is_ok()
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) && fs::read_to_string(path).is_ok()
 }
 
 /// Whether `SymlinkPolicy::Follow` would leave the repo-root `.worktreeinclude`
