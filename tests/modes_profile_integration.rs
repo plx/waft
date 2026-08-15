@@ -128,6 +128,243 @@ fn f2_wt_profile_all_ignored() {
     );
 }
 
+// --- Empty-selection hint ---
+//
+// An empty result is ambiguous: it can mean "your rules select nothing" or
+// "no rules were consulted". Only the second is worth a nudge, and it splits
+// further — no rule file at all, one the active semantics never read, one the
+// symlink policy skipped — because each names a different thing to change.
+// The note must be true of the case it fires on, so each case is pinned.
+
+/// The exact note the `claude` profile emits for F2.
+const CLAUDE_MISSING_RULE_FILE_NOTE: &str = "note: no .worktreeinclude found; the claude profile selects nothing without one (see waft validate)";
+
+fn run_list(source: &Path, extra_args: &[&str]) -> std::process::Output {
+    waft()
+        .args(["list", "--source"])
+        .arg(source)
+        .args(extra_args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn list_notes_a_missing_rule_file_without_polluting_stdout() {
+    let repo = setup_f2();
+    let output = run_list(repo.path(), &["--compat-profile", "claude"]);
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(CLAUDE_MISSING_RULE_FILE_NOTE), "{stderr}");
+    // `list` writes machine-readable output to stdout; the note must not
+    // reach it.
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+#[test]
+fn list_names_the_active_profile_in_the_note() {
+    let repo = setup_f2();
+    let output = run_list(repo.path(), &["--compat-profile", "git"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("the git profile selects nothing without one"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn list_note_is_suppressed_under_quiet() {
+    let repo = setup_f2();
+    let output = run_list(repo.path(), &["--compat-profile", "claude", "--quiet"]);
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+/// Under `wt` (and `--when-missing-worktreeinclude all-ignored`) an absent
+/// rule file still selects files, so its absence is never the explanation for
+/// an empty result.
+#[test]
+fn list_does_not_note_a_missing_rule_file_for_all_ignored_profiles() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    git(repo.path(), &["add", ".gitignore"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    // Nothing ignored exists, so `wt` selects nothing either — but for a
+    // reason the note would misdescribe.
+
+    let output = run_list(repo.path(), &["--compat-profile", "wt"]);
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("no .worktreeinclude found"), "{stderr}");
+}
+
+/// A rule file that selects nothing is a legitimate configuration, not a
+/// missing one.
+#[test]
+fn list_does_not_note_a_rule_file_that_selects_nothing() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), ".worktreeinclude", "nothing-matches-this\n");
+    git(repo.path(), &["add", ".gitignore", ".worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+
+    let output = run_list(repo.path(), &["--compat-profile", "claude"]);
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr, "", "a present rule file needs no note");
+}
+
+/// `claude-2026-04` reads the root rule file only. A rule file that exists
+/// exclusively in a subdirectory is therefore never consulted, and the run is
+/// the same silent, empty, exit-0 result the note exists to explain — so it
+/// must speak, and it must not claim the file is absent.
+#[test]
+fn list_notes_a_rule_file_the_root_only_semantics_never_read() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), "sub/.worktreeinclude", ".env\n");
+    git(repo.path(), &["add", ".gitignore", "sub/.worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+    write_file(repo.path(), "sub/.env", "secret\n");
+
+    let output = run_list(repo.path(), &["--compat-profile", "claude"]);
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "note: no .worktreeinclude in the repository root; claude-2026-04 semantics ignore nested rule files"
+        ),
+        "{stderr}"
+    );
+    // The file exists; denying that would send the user looking for it.
+    assert!(!stderr.contains("no .worktreeinclude found"), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+/// The same fixture under per-directory semantics selects the nested file, so
+/// there is nothing to explain.
+#[test]
+fn list_does_not_note_a_nested_rule_file_the_git_semantics_read() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), "sub/.worktreeinclude", ".env\n");
+    git(repo.path(), &["add", ".gitignore", "sub/.worktreeinclude"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), "sub/.env", "secret\n");
+
+    let output = run_list(repo.path(), &["--compat-profile", "git"]);
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("sub/.env"),
+        "expected the nested rule file to select sub/.env"
+    );
+}
+
+/// A symlinked rule file under `symlink-policy = ignore` (the `git` preset)
+/// reads as absent to the selection gate. Reporting that as "no
+/// .worktreeinclude found" tells the user a file they can see does not exist;
+/// the note must name the policy that skipped it instead.
+#[test]
+fn list_note_names_the_symlink_policy_that_skipped_a_rule_file() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), "rules.txt", ".env\n");
+    std::os::unix::fs::symlink("rules.txt", repo.path().join(".worktreeinclude")).unwrap();
+    git(repo.path(), &["add", ".gitignore", "rules.txt"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+
+    let output = run_list(repo.path(), &["--compat-profile", "git"]);
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr
+            .contains("note: .worktreeinclude is a symlink and the active symlink policy skips it"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("no .worktreeinclude found"), "{stderr}");
+
+    // And the remedy the note names actually works.
+    let followed = run_list(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "git",
+            "--worktreeinclude-symlink-policy",
+            "follow",
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&followed.stdout).contains(".env"),
+        "following the symlink should select .env"
+    );
+}
+
+/// `wt` selects every git-ignored untracked file without a rule file, so only
+/// an explicit `--when-missing-worktreeinclude blank` can blank it. Naming the
+/// profile there would point at the one setting that is not responsible.
+#[test]
+fn list_note_names_the_knob_not_the_profile_when_a_knob_blanks_selection() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    git(repo.path(), &["add", ".gitignore"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+
+    let output = run_list(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "wt",
+            "--when-missing-worktreeinclude",
+            "blank",
+        ],
+    );
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "note: no .worktreeinclude found; --when-missing-worktreeinclude blank selects nothing without one"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("the wt profile"), "{stderr}");
+
+    // Same repo, same profile, without the knob: `wt` selects the file, which
+    // is what makes blaming the profile wrong.
+    let unblanked = run_list(repo.path(), &["--compat-profile", "wt"]);
+    assert!(
+        String::from_utf8_lossy(&unblanked.stdout).contains(".env"),
+        "wt without the knob should select .env"
+    );
+}
+
+#[test]
+fn info_notes_a_missing_rule_file() {
+    let repo = setup_f2();
+    let output = waft()
+        .arg("-C")
+        .arg(repo.path())
+        .args(["info", ".env"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(CLAUDE_MISSING_RULE_FILE_NOTE), "{stderr}");
+}
+
 // --- Scenario F7: tool-state-directory ---
 //
 // Setup:

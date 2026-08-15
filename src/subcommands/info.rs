@@ -75,11 +75,9 @@ pub(crate) fn run_info_with_context(
         rel_paths.push(rp);
     }
 
-    let eligible_set: HashSet<_> =
-        super::eligible_records(git, &ctx.source_root, policy, ctx.core_ignore_case)?
-            .into_iter()
-            .map(|record| record.path)
-            .collect();
+    let pass = super::eligible_records(git, &ctx.source_root, policy, ctx.core_ignore_case)?;
+    super::note_empty_selection(policy, &pass, cli.quiet);
+    let eligible_set: HashSet<_> = pass.records.into_iter().map(|record| record.path).collect();
 
     // Check tracked status for all paths
     let tracked_set = git.tracked_paths(&ctx.source_root, &rel_paths)?;

@@ -73,10 +73,36 @@ waft copy --source /path/to/main --dest /path/to/linked
 
 ## Copy options
 
-| Option          | Description                                                  |
-| --------------- | ------------------------------------------------------------ |
-| `-n, --dry-run` | Show what would be done without copying.                     |
-| `--overwrite`   | Compatibility flag; fails on existing destination conflicts. |
+| Option          | Description                                                                                                                       |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `-n, --dry-run` | Show what would be done without copying.                                                                                          |
+| `--overwrite`   | Replace untracked destinations that differ, and repair untracked destinations whose content matches but whose permissions do not. |
+
+## Copy output
+
+A copy run reports each published file (`copied:`, `replaced:`,
+`repaired permissions:`) and each file it left alone, with the reason:
+
+```text
+skip: .env (untracked conflict; --overwrite replaces the destination)
+```
+
+Skips are not failures; the run still exits 0. `--quiet` suppresses all of it
+except per-file failures.
+
+If the active configuration selects nothing and no `.worktreeinclude` was
+consulted, `copy`, `list`, and `info` say so once on standard error:
+
+```text
+note: no .worktreeinclude found; the claude profile selects nothing without one (see waft validate)
+```
+
+The note names whatever is responsible, so it also covers a rule file that
+exists but is never read — one outside the repository root under root-only
+`claude-2026-04` semantics, or a symlinked one under
+`--worktreeinclude-symlink-policy ignore`. A consulted rule file that
+legitimately matches nothing is not flagged. Standard output stays
+machine-readable, and `--quiet` suppresses the note.
 
 ## Inspect selection
 

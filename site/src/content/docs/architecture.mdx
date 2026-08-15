@@ -39,8 +39,10 @@ The pipeline is read-only through copy planning.
 6. Apply policy filters.
 7. Confirm ignored status through Git.
 8. Build a copy plan.
-9. For `copy` without `--dry-run`, verify planned state and publish each file
-   without replacing an existing pathname.
+9. For `copy` without `--dry-run`, verify planned state and publish each file.
+   An existing pathname is replaced only under `--overwrite`, only when it is
+   untracked, and only after it still matches the state recorded while
+   planning.
 
 `validate` stops after rule parsing. `list` and `info` stop after
 classification. `copy --dry-run` stops after planning.

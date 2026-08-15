@@ -12,7 +12,9 @@ mod validate;
 
 use std::path::Path;
 
-use crate::config::{ResolvedPolicy, WhenMissingWorktreeinclude, WorktreeincludeSemantics};
+use crate::config::{
+    ResolvedPolicy, SymlinkPolicy, WhenMissingWorktreeinclude, WorktreeincludeSemantics,
+};
 use crate::error::{Error, Result};
 use crate::git::{GitBackend, IgnoreCheckRecord};
 use crate::model::WorktreeincludeStatus;
@@ -40,11 +42,16 @@ pub use validate::{ValidateArgs, run_validate};
 /// The returned set is only the profile selection stage. Call
 /// [`eligible_records`] to apply exclusions, Git-ignore membership, and
 /// physical source-type checks.
+///
+/// The returned flag is the gate above: whether a `.worktreeinclude` existed
+/// anywhere in the repo under the active symlink policy. It says nothing
+/// about whether the active *semantics* read that file — see
+/// [`diagnose_empty_selection`], which refines it.
 pub(crate) fn select_candidates(
     git: &dyn GitBackend,
     source_root: &Path,
     policy: &ResolvedPolicy,
-) -> Result<Vec<RepoRelPath>> {
+) -> Result<(Vec<RepoRelPath>, bool)> {
     if git.worktreeinclude_exists_anywhere(source_root, policy.symlink_policy)? {
         // The wt-0.39 engine is too unusual for the per-path
         // `list_worktreeinclude_candidates` shape (it's purely subtractive
@@ -52,19 +59,112 @@ pub(crate) fn select_candidates(
         // helper. when_missing is not consulted here because a rule file
         // exists; explicit-selection mode is engaged.
         if policy.semantics == WorktreeincludeSemantics::Wt039 {
-            return crate::worktreeinclude_engine::wt_collect_candidates(
+            let candidates = crate::worktreeinclude_engine::wt_collect_candidates(
                 source_root,
                 git,
                 policy.symlink_policy,
-            );
+            )?;
+            return Ok((candidates, true));
         }
-        git.list_worktreeinclude_candidates(source_root, policy.semantics, policy.symlink_policy)
+        let candidates = git.list_worktreeinclude_candidates(
+            source_root,
+            policy.semantics,
+            policy.symlink_policy,
+        )?;
+        Ok((candidates, true))
     } else {
-        match policy.when_missing {
-            WhenMissingWorktreeinclude::Blank => Ok(Vec::new()),
-            WhenMissingWorktreeinclude::AllIgnored => git.list_ignored_untracked(source_root),
-        }
+        let candidates = match policy.when_missing {
+            WhenMissingWorktreeinclude::Blank => Vec::new(),
+            WhenMissingWorktreeinclude::AllIgnored => git.list_ignored_untracked(source_root)?,
+        };
+        Ok((candidates, false))
     }
+}
+
+/// Result of the shared eligibility pass.
+pub(crate) struct Eligibility {
+    /// Paths that satisfy the complete eligibility contract.
+    pub records: Vec<IgnoreCheckRecord>,
+    /// Why an empty `records` is a configuration artifact rather than an
+    /// empty repository, when it is one. Always `None` when `records` is
+    /// non-empty.
+    pub empty_selection_cause: Option<EmptySelectionCause>,
+}
+
+/// An empty selection that the configuration, not the repository, explains.
+///
+/// Each variant is a claim printed to the user, so each must be true on its
+/// own terms — "no rule file" is not interchangeable with "a rule file the
+/// active configuration never reads".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EmptySelectionCause {
+    /// No `.worktreeinclude` exists anywhere in the repo, and the effective
+    /// `when_missing` selects nothing without one.
+    NoRuleFile,
+    /// A `.worktreeinclude` exists, but not at the repository root, and the
+    /// active semantics read the root file only.
+    NoRootRuleFile,
+    /// The `.worktreeinclude` files that exist are all symlinks, which the
+    /// active symlink policy skips.
+    RuleFileSymlinkIgnored,
+}
+
+/// Explain an empty selection, or decline to.
+///
+/// `rule_file_found` is the coarse repo-wide answer [`select_candidates`]
+/// gates `when_missing` on. Turning it into something worth printing takes
+/// two refinements it cannot make on its own:
+///
+/// - It is symlink-policy-relative. Under `SymlinkPolicy::Ignore` a symlinked
+///   rule file reads as absent, and telling a user that a file they can see
+///   does not exist is worse than saying nothing.
+/// - It is semantics-agnostic. `claude-2026-04` reads the root file only, so
+///   a rule file that exists exclusively in a subdirectory is found here and
+///   still never consulted — the one case where a rule file exists and the
+///   empty result is nonetheless a configuration mistake.
+///
+/// `when_missing` gates only the two "no rule file was consulted" variants.
+/// [`EmptySelectionCause::NoRootRuleFile`] ignores it because a rule file was
+/// found, so `when_missing` never applied to this run at all.
+fn diagnose_empty_selection(
+    git: &dyn GitBackend,
+    source_root: &Path,
+    policy: &ResolvedPolicy,
+    rule_file_found: bool,
+) -> Result<Option<EmptySelectionCause>> {
+    if rule_file_found {
+        let root_only = policy.semantics == WorktreeincludeSemantics::Claude202604;
+        if root_only
+            && !crate::worktreeinclude::root_rule_file_is_consulted(
+                source_root,
+                policy.symlink_policy,
+            )
+        {
+            return Ok(Some(EmptySelectionCause::NoRootRuleFile));
+        }
+        // A consulted rule file that selects nothing is a legitimate
+        // configuration, not a missing one.
+        return Ok(None);
+    }
+
+    if policy.when_missing != WhenMissingWorktreeinclude::Blank {
+        // An absent rule file still selects every git-ignored untracked file,
+        // so an empty result means the repository has nothing to copy.
+        return Ok(None);
+    }
+
+    // Nothing was found under the active symlink policy. Re-ask while
+    // following symlinks: if that finds one, the policy is what hid it, and
+    // the honest note names the policy rather than denying the file exists.
+    // Only reached on an already-empty selection, so the second walk is off
+    // the common path.
+    if policy.symlink_policy == SymlinkPolicy::Ignore
+        && git.worktreeinclude_exists_anywhere(source_root, SymlinkPolicy::Follow)?
+    {
+        return Ok(Some(EmptySelectionCause::RuleFileSymlinkIgnored));
+    }
+
+    Ok(Some(EmptySelectionCause::NoRuleFile))
 }
 
 /// Evaluate the complete, command-independent eligibility contract.
@@ -78,8 +178,8 @@ pub(crate) fn eligible_records(
     source_root: &Path,
     policy: &ResolvedPolicy,
     core_ignore_case: bool,
-) -> Result<Vec<IgnoreCheckRecord>> {
-    let mut candidates = select_candidates(git, source_root, policy)?;
+) -> Result<Eligibility> {
+    let (mut candidates, rule_file_found) = select_candidates(git, source_root, policy)?;
     candidates.sort();
     candidates.dedup();
 
@@ -90,7 +190,15 @@ pub(crate) fn eligible_records(
         crate::policy_filter::effective_case_insensitive(core_ignore_case),
     )?;
     if candidates.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Eligibility {
+            records: Vec::new(),
+            empty_selection_cause: diagnose_empty_selection(
+                git,
+                source_root,
+                policy,
+                rule_file_found,
+            )?,
+        });
     }
 
     let mut eligible = Vec::new();
@@ -117,7 +225,60 @@ pub(crate) fn eligible_records(
 
     eligible.sort_by(|a, b| a.path.cmp(&b.path));
     eligible.dedup_by(|a, b| a.path == b.path);
-    Ok(eligible)
+    let empty_selection_cause = if eligible.is_empty() {
+        diagnose_empty_selection(git, source_root, policy, rule_file_found)?
+    } else {
+        None
+    };
+    Ok(Eligibility {
+        records: eligible,
+        empty_selection_cause,
+    })
+}
+
+/// Print the diagnosis from [`diagnose_empty_selection`], if there is one.
+///
+/// An empty result is otherwise indistinguishable from "nothing to do", and
+/// the cases below are the ones where the configuration, not the repository,
+/// is the answer. Each variant names the specific thing the user can change.
+///
+/// The note goes to stderr; `list` and `info` write machine-readable data to
+/// stdout and it must stay parseable.
+pub(crate) fn note_empty_selection(policy: &ResolvedPolicy, pass: &Eligibility, quiet: bool) {
+    if quiet {
+        return;
+    }
+    let Some(cause) = pass.empty_selection_cause else {
+        return;
+    };
+    match cause {
+        EmptySelectionCause::NoRuleFile => eprintln!(
+            "note: no .worktreeinclude found; {} selects nothing without one (see waft validate)",
+            blank_selection_subject(policy)
+        ),
+        EmptySelectionCause::NoRootRuleFile => eprintln!(
+            "note: no .worktreeinclude in the repository root; {} semantics ignore nested rule files (use --worktreeinclude-semantics git to read them)",
+            policy.semantics.as_str()
+        ),
+        EmptySelectionCause::RuleFileSymlinkIgnored => eprintln!(
+            "note: .worktreeinclude is a symlink and the active symlink policy skips it; pass --worktreeinclude-symlink-policy follow to use it"
+        ),
+    }
+}
+
+/// Name whatever is responsible for selecting nothing without a rule file.
+///
+/// The profile is only a fair answer when the profile's own preset is what
+/// blanks the selection. Under `--compat-profile wt
+/// --when-missing-worktreeinclude blank` the explicit knob overrode a profile
+/// that otherwise selects every git-ignored untracked file, and blaming `wt`
+/// would send the user to change the one setting that is not at fault.
+fn blank_selection_subject(policy: &ResolvedPolicy) -> String {
+    if policy.profile.selects_without_rule_file() {
+        "--when-missing-worktreeinclude blank".to_string()
+    } else {
+        format!("the {} profile", policy.profile.as_str())
+    }
 }
 
 /// Render a per-path explanation without contradicting the canonical

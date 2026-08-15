@@ -12,8 +12,9 @@ without `--dry-run` publishes files.
 
 - **Tracked files are not overwritten.** Tracked status is checked during
   planning and again under Git's index lock before publication.
-- **Existing paths are not replaced.** Publication uses no-clobber semantics,
-  including when `--overwrite` is supplied.
+- **Existing paths are not replaced by default.** Publication uses no-clobber
+  semantics. Only `--overwrite` replaces an untracked destination, and only
+  after proving it is still the file that was planned against.
 - **Symlink traversal is blocked on Unix.** Source and destination components
   are opened relative to canonical worktree directory handles with
   `O_NOFOLLOW`.
@@ -66,13 +67,31 @@ Review the selected files and the reason for each decision.
 
 ## Overwrite behavior
 
-Existing destination paths are always preserved. `--overwrite` is accepted for
-command-line compatibility but still fails on a conflict. Review and remove a
-conflicting path explicitly before copying:
+Without `--overwrite`, an existing destination is preserved exactly as it is.
+The run names every file it skipped and why, and still exits 0:
 
-```sh
-rm path/to/reviewed-conflict
-waft copy
+```text
+skip: .env (untracked conflict; --overwrite replaces the destination)
 ```
 
-`waft` does not remove the conflict.
+`--overwrite` acts on untracked destinations only, and distinguishes two
+cases:
+
+- **untracked conflict** — the content differs. The replacement is prepared in
+  a temporary file and swapped into place atomically, reported as `replaced:`.
+- **content equal, permissions differ** — only the mode is wrong. The mode is
+  repaired on the verified file descriptor and no content is rewritten,
+  reported as `repaired permissions:`.
+
+```sh
+waft copy --overwrite
+```
+
+Both actions require the destination to still match the device, inode, length,
+content fingerprint, and mode observed while planning. A destination that
+changed in between is reported as a per-file failure; where the filesystem
+supports an atomic exchange it is left untouched, and on filesystems without
+one a lost race can instead leave the other writer's file at the destination
+with waft's prepared content preserved under a named temporary. The rest of
+the run continues either way. Tracked destinations are never written, with or
+without the flag.

@@ -131,8 +131,8 @@ export const siteConfig = {
       },
       {
         "eyebrow": "Safety",
-        "title": "Reject existing destinations",
-        "body": "waft rejects source symlinks and existing destination paths. On Unix, destination traversal does not follow symlinks.",
+        "title": "Protect what is already there",
+        "body": "waft refuses tracked overwrites, source symlinks, and symlinked destination parents. Replacing an existing untracked file requires --overwrite.",
         "linkLabel": "Read safety details",
         "href": "safety/"
       }

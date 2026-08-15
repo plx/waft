@@ -310,13 +310,10 @@ pub fn evaluate_root_only_path(
     case_insensitive: bool,
     symlink_policy: SymlinkPolicy,
 ) -> WorktreeincludeStatus {
+    if !root_rule_file_is_consulted(repo_root, symlink_policy) {
+        return WorktreeincludeStatus::NoMatch;
+    }
     let wti_path = repo_root.join(".worktreeinclude");
-    if !wti_path.is_file() {
-        return WorktreeincludeStatus::NoMatch;
-    }
-    if symlink_policy == SymlinkPolicy::Ignore && is_symlink(&wti_path) {
-        return WorktreeincludeStatus::NoMatch;
-    }
 
     let content = match fs::read_to_string(&wti_path) {
         Ok(c) => c,
@@ -330,6 +327,22 @@ pub fn evaluate_root_only_path(
     let full_path: PathBuf = repo_root.join(rel_path).components().collect();
     evaluate_against_context(&ctx, &full_path, rel_path, is_dir, repo_root)
         .unwrap_or(WorktreeincludeStatus::NoMatch)
+}
+
+/// Whether the repo-root `.worktreeinclude` is a file the root-only engine
+/// would actually read.
+///
+/// This is the existence gate of [`evaluate_root_only_path`], which calls it,
+/// so the two cannot drift. Callers outside the engine use it to tell "there
+/// are no rules here" apart from "the rules that exist are somewhere this
+/// engine never looks" — a distinction the repo-wide existence check in
+/// `GitBackend::worktreeinclude_exists_anywhere` cannot make.
+pub fn root_rule_file_is_consulted(repo_root: &Path, symlink_policy: SymlinkPolicy) -> bool {
+    let wti_path = repo_root.join(".worktreeinclude");
+    if !wti_path.is_file() {
+        return false;
+    }
+    !(symlink_policy == SymlinkPolicy::Ignore && is_symlink(&wti_path))
 }
 
 /// True if `path` itself is a symlink (without following).

@@ -122,8 +122,18 @@ pub fn execute(
             PlannedEntry::NoOp(_) => {
                 up_to_date += 1;
             }
-            PlannedEntry::Skip(_) => {
+            PlannedEntry::Skip(entry) => {
+                // A skip is the outcome a user is least likely to expect, so
+                // it travels with the rest of the results instead of only
+                // moving a counter.
                 skipped += 1;
+                results.push(CopyResult {
+                    rel_path: entry.rel_path.clone(),
+                    kind: CopyResultKind::File,
+                    outcome: CopyOutcome::Skipped {
+                        reason: entry.reason.clone(),
+                    },
+                });
             }
             PlannedEntry::Failure(entry) => {
                 // Planning could not describe this file. Report it like any
@@ -782,6 +792,12 @@ pub fn render_report(report: &CopyReport, quiet: bool) {
                     eprintln!("repaired permissions: {}", result.rel_path)
                 }
             },
+            // Same sentence `--dry-run` uses, so nobody has to re-run the
+            // command in another mode to find out which file was left alone
+            // and what would change that.
+            CopyOutcome::Skipped { reason } => match &result.kind {
+                CopyResultKind::File => eprintln!("skip: {} ({reason})", result.rel_path),
+            },
         }
     }
 
@@ -1051,6 +1067,32 @@ mod tests {
         let calls = fs.copy_file_calls.borrow();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].2, DestinationExpectation::Missing);
+    }
+
+    /// A skip has to survive execution as a result, not just a counter, or
+    /// the report has nothing to name the file with.
+    #[test]
+    fn execute_reports_each_skip_with_its_reason() {
+        let entry = PlannedEntry::Skip(crate::model::SkipEntry {
+            rel_path: rel(".env"),
+            reason: crate::model::SkipReason::UntrackedConflict,
+        });
+
+        let report = execute(
+            &plan(entry, false),
+            &MockFs::default(),
+            &MockGit::default(),
+            CopyStrategy::SimpleCopy,
+        );
+
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].rel_path, rel(".env"));
+        let CopyOutcome::Skipped { reason } = &report.results[0].outcome else {
+            panic!("a skipped file should be reported as skipped");
+        };
+        assert_eq!(*reason, crate::model::SkipReason::UntrackedConflict);
+        assert!(report_has_failures(&report).is_none());
     }
 
     #[test]

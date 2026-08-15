@@ -82,6 +82,23 @@ A file is eligible for copying when **all** of these are true:
 5. It is not dropped by the active exclusion set
    (`--builtin-exclude-set`, `--extra-exclude`)
 
+Under the `claude` and `git` profiles, a repository with no `.worktreeinclude`
+selects nothing at all. Because that is far more often an unconfigured
+repository than a deliberate one, `copy`, `list`, and `info` say so once on
+stderr — stdout stays machine-readable, and `--quiet` suppresses the note:
+
+```text
+note: no .worktreeinclude found; the claude profile selects nothing without one (see waft validate)
+```
+
+The note names whatever is actually responsible, so it also covers a rule file
+that exists but the active configuration never reads — one outside the
+repository root under root-only `claude-2026-04` semantics, or a symlinked one
+under `--worktreeinclude-symlink-policy ignore`. It is not printed for a
+consulted rule file that legitimately matches nothing, nor for a configuration
+that still selects without one (`wt`, or `--when-missing-worktreeinclude
+all-ignored`).
+
 ## Commands
 
 | Command | Description |
@@ -112,6 +129,17 @@ A file is eligible for copying when **all** of these are true:
 Without `--overwrite`, a destination that exists and differs is skipped and
 left exactly as it is. Tracked destinations are never written, with or without
 the flag.
+
+Every skipped file is named on stderr with its reason, in the same words
+`--dry-run` uses, so a run that copied nothing still says why:
+
+```text
+skip: .env (untracked conflict; --overwrite replaces the destination)
+```
+
+A skip is not a failure and does not change the exit status. `--quiet`
+suppresses these lines along with the rest of the non-error output; per-file
+failures print either way.
 
 `--overwrite` distinguishes two cases, and both name the file they act on:
 

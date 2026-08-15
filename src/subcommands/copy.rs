@@ -71,11 +71,9 @@ pub(crate) fn run_copy_with_context(
         }
     }
 
-    let eligible: Vec<_> =
-        super::eligible_records(git, &ctx.source_root, policy, ctx.core_ignore_case)?
-            .into_iter()
-            .map(|r| r.path)
-            .collect();
+    let pass = super::eligible_records(git, &ctx.source_root, policy, ctx.core_ignore_case)?;
+    super::note_empty_selection(policy, &pass, cli.quiet);
+    let eligible: Vec<_> = pass.records.into_iter().map(|r| r.path).collect();
 
     if eligible.is_empty() {
         if !cli.quiet {

@@ -392,18 +392,71 @@ impl GitGix {
     }
 
     fn discover_repo(&self, path: &Path) -> Result<gix::Repository> {
-        gix::discover(path).map_err(|e| Error::Git {
-            message: format!(
-                "gix failed to discover repository from {}: {e}",
-                path.display()
-            ),
-        })
+        gix::discover(path).map_err(|error| discovery_error(path, error))
     }
 
     fn normalize_ignore_source(path: &Path, source_root: &Path) -> PathBuf {
         path.strip_prefix(source_root)
             .map(Path::to_path_buf)
             .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+/// A backend's own account of a discovery failure.
+///
+/// Only ever carried as the source of [`Error::NotAGitRepository`], where the
+/// user-facing sentence is deliberately plain and the backend's wording is
+/// what `--verbose` reveals.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct DiscoveryDetail(String);
+
+/// Classify a `gix` discovery failure.
+///
+/// "Nothing here is a repository" is the one discovery failure a user can act
+/// on without knowing anything about waft's internals, so it becomes a
+/// first-class error with a plain message. Every other failure — an
+/// unreadable directory, an untrusted repository — keeps the backend's own
+/// description, because those are genuinely about `gix` and not about the
+/// user's working directory.
+fn discovery_error(path: &Path, error: gix::discover::Error) -> Error {
+    let missing = matches!(
+        &error,
+        gix::discover::Error::Discover(
+            gix::discover::upwards::Error::NoGitRepository { .. }
+                | gix::discover::upwards::Error::NoGitRepositoryWithinCeiling { .. }
+                | gix::discover::upwards::Error::NoGitRepositoryWithinFs { .. }
+        )
+    );
+    if missing {
+        return Error::NotAGitRepository {
+            searched_from: path.to_path_buf(),
+            source: Box::new(error),
+        };
+    }
+    Error::Git {
+        message: format!(
+            "gix failed to discover repository from {}: {error}",
+            path.display()
+        ),
+    }
+}
+
+/// Classify a `git rev-parse` failure the same way [`discovery_error`] does.
+///
+/// The CLI reports a discovery miss only in prose, so the phrase is the whole
+/// signal. Anything else — a broken `git`, a permissions problem — is passed
+/// through untouched rather than mislabeled as "no repository here".
+fn cli_discovery_error(path: &Path, error: Error) -> Error {
+    let Error::Git { message } = &error else {
+        return error;
+    };
+    if !message.to_lowercase().contains("not a git repository") {
+        return error;
+    }
+    Error::NotAGitRepository {
+        searched_from: path.to_path_buf(),
+        source: Box::new(DiscoveryDetail(message.clone())),
     }
 }
 
@@ -463,7 +516,9 @@ fn gitlinks_from_gix_index(index: &gix::index::State) -> Result<HashSet<String>>
 
 impl GitBackend for GitCli {
     fn show_toplevel(&self, path: &Path) -> Result<PathBuf> {
-        let output = self.run_git(path, &["rev-parse", "--show-toplevel"])?;
+        let output = self
+            .run_git(path, &["rev-parse", "--show-toplevel"])
+            .map_err(|error| cli_discovery_error(path, error))?;
         let path_bytes = trim_git_line_ending(&output);
         let raw = path_buf_from_git_bytes(path_bytes, "repository root")?;
         Ok(normalize_repo_path(&raw))
