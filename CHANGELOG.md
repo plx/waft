@@ -32,7 +32,12 @@ Until the first supported release, changes remain under `Unreleased`.
   `chmod`-ed and reported as a successful repair while holding content that is
   not the source's. The pinned content is required once more after the `chmod`
   lands: a destination rewritten in that last window has the mode it was found
-  with restored and is reported as a per-file failure instead of a repair.
+  with restored and is reported as a per-file failure instead of a repair. That
+  same read-back compares the mode as well, so a destination another writer
+  `chmod`-ed on top of waft's repair is also reported as a per-file failure
+  rather than a repair the file no longer carries. Its mode is left exactly as
+  that writer set it: waft does not answer a concurrent `chmod` with another
+  one.
 - Report a replacement whose swapped-out file could not be removed as a
   per-file failure naming the full `.waft-copy-*` path it was left under,
   instead of returning success. The destination holds the planned content, but
@@ -40,17 +45,44 @@ Until the first supported release, changes remain under `Unreleased`.
   were there before.
 - Never unlink a file waft has not just proven is the one it planned against.
   If a recovery step fails and strands another writer's file under a
-  `.waft-copy-*` name, or strands the prepared replacement after the previous
-  destination is already gone, the file is kept and named in the per-file
-  error instead of being cleaned up. Undoing a lost race is held to the same
-  standard: the identity of the file this run wrote is pinned before the
-  exchange, and both the undo swap and the cleanup that follows it are
+  `.waft-copy-*` name, or strands the prepared replacement because the
+  destination name is held by somebody else, the file is kept and named in the
+  per-file error instead of being cleaned up. Undoing a lost race is held to
+  the same standard: the identity of the file this run wrote is pinned before
+  the exchange, and both the undo swap and the cleanup that follows it are
   performed only after re-proving that the name they act on still holds that
   file. A third writer taking the destination name mid-undo would otherwise be
   swapped under the temporary name and deleted there; instead nothing is moved
   or removed, and the error names the full path of every file left behind.
+- Replace destinations on filesystems without an atomic exchange — the
+  documented SMB, NFS, and exFAT fallback — by moving the destination aside
+  with a plain rename and publishing into the name it left, instead of
+  unlinking that name and publishing over it. The unlink was by pathname: a
+  writer that published its own file over the destination between the
+  descriptor proof and the unlink had that brand-new file deleted. A rename
+  deletes nothing, so the displaced file can be identified afterwards. If it is
+  the inode that was planned against, the replacement is published with
+  no-clobber semantics and the displaced file is unlinked only after re-proving
+  it still holds that inode; if it is not, it is moved back with a no-clobber
+  restore and the file is reported as changed during publication; if it cannot
+  be moved back — the destination name has been taken again, or the filesystem
+  has no atomic no-clobber move — it is kept under the name it was displaced to
+  and the error names it. The residual is a concurrent writer's file being
+  briefly displaced and restored: for a few syscalls the destination name does
+  not resolve and that file carries a `.waft-copy-*.displaced` name. It is
+  never modified and never deleted. On this path the previous destination is no
+  longer "already gone" after a failed publication; it is on disk under one of
+  the two names the error spells out.
 - Remove `.waft-copy-*` staging files from a drop guard so an unwinding panic
-  during publication cannot leave them behind.
+  during publication cannot leave them behind — and only while the name still
+  holds the file this run created under it, whose identity the guard pins from
+  the open descriptor at creation. The staging name is visible for the whole
+  publication window, so cleanup, from `Drop` as well as from the explicit
+  removal, re-proves the inode first; a name another process re-pointed is left
+  alone, silently on the way out of a panic and as a per-file error naming the
+  file otherwise. POSIX has no conditional unlink, so a two-syscall window
+  between the proof and the `unlinkat` remains on a fresh 128-bit random name
+  nothing but waft creates; that residual is irreducible rather than closed.
 - Unlink the live Git `index.lock` from `SIGINT`/`SIGTERM` handlers on Unix
   before re-raising under the previous disposition, so an interrupt during the
   publish window cannot leave a stale lock. A signal the process inherited as
