@@ -28,6 +28,24 @@ pub enum FileComparison {
     ContentDiffers,
 }
 
+/// What a source path turned out to be, from a single look that never follows
+/// its final component.
+///
+/// The distinction that matters to planning is between "this was examined and
+/// is not a file waft copies" and "this could not be examined at all". The
+/// first is an ordinary skip; the second is a path that was eligible when it
+/// was discovered and is not there now, which is a per-file failure rather than
+/// a file quietly dropped from the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    /// A regular file: the only thing waft copies.
+    RegularFile,
+    /// A symlink, whatever it points at — including a broken one.
+    Symlink,
+    /// Something else that is there: a directory, socket, device, or FIFO.
+    Other,
+}
+
 /// Whether this platform can act on a destination that already exists.
 ///
 /// Replacing or repairing an existing destination needs the anchored
@@ -97,6 +115,30 @@ pub trait FileSystem {
             fingerprint_bytes(&data),
             0,
             None,
+        ))
+    }
+
+    /// Classify a source path without following its final component,
+    /// propagating the error if it cannot be examined at all.
+    ///
+    /// The error is what separates a source waft will not copy from a source
+    /// that is no longer there; callers that only ask "is this a regular file?"
+    /// cannot tell those apart. The default answers from the boolean probes
+    /// above, which collapse every failure into "does not exist";
+    /// implementations that can report the real error should override it.
+    fn source_kind(&self, path: &Path) -> io::Result<SourceKind> {
+        if self.is_symlink(path) {
+            return Ok(SourceKind::Symlink);
+        }
+        if self.is_file(path) {
+            return Ok(SourceKind::RegularFile);
+        }
+        if self.exists(path) {
+            return Ok(SourceKind::Other);
+        }
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no such file or directory",
         ))
     }
 
@@ -185,6 +227,20 @@ impl FileSystem for RealFs {
 
     fn file_snapshot(&self, path: &Path) -> io::Result<FileSnapshot> {
         snapshot_regular_file(path)
+    }
+
+    fn source_kind(&self, path: &Path) -> io::Result<SourceKind> {
+        // One `lstat`, so the type answer is a single observation rather than
+        // two probes that a concurrent writer can make disagree, and a failure
+        // is reported as the error it actually was.
+        let file_type = fs::symlink_metadata(path)?.file_type();
+        Ok(if file_type.is_symlink() {
+            SourceKind::Symlink
+        } else if file_type.is_file() {
+            SourceKind::RegularFile
+        } else {
+            SourceKind::Other
+        })
     }
 
     fn parent_has_symlink(&self, path: &Path) -> bool {
@@ -648,6 +704,15 @@ fn copy_file_anchored_unix(
         before_permission_repair();
         destination.set_permissions(source_metadata.permissions())?;
         after_permission_repair();
+        // Three things have to hold for this to be reportable as a repair: the
+        // content is still the content that was verified, the mode is now the
+        // source's, and the destination name still resolves to the inode both
+        // of those were read from. The two descriptor facts are proved first
+        // and the name last, so the claim actually reported — "the file at this
+        // name carries the source's mode over the planned bytes" — is the one
+        // proved closest to reporting it. A name proved earlier would say
+        // nothing about the inode the reads after it landed on.
+        //
         // A writer can rewrite this inode in place, or `chmod` it again,
         // between the proof above and the moment this repair is reported. Both
         // would leave waft claiming a repair it does not have: the source's
@@ -686,6 +751,37 @@ fn copy_file_anchored_unix(
                      writer set it",
                 ));
             }
+        }
+        // Everything above was proved through the descriptor, which is the only
+        // way to prove content and mode at all — but a descriptor keeps
+        // answering after its name has been handed to somebody else's file.
+        // Another process renaming its own file onto the destination between
+        // the identity check that opened this descriptor and here leaves the
+        // repaired inode unlinked and the visible destination untouched, and
+        // every check above would still pass. So the name is proved last: what
+        // this run reports is a repair of the file at the name it was asked
+        // about, not of an inode that used to be there.
+        //
+        // Nothing is chased or undone. The `fchmod` landed on an inode that has
+        // since lost the name, and the file now at the destination is another
+        // writer's, published after waft's last proof and never verified here;
+        // `chmod`-ing that would be waft acting on a file it has no claim to.
+        // Both are left exactly as they are and this file is reported as a
+        // failure.
+        //
+        // A rename landing after this check is still possible. That residual is
+        // the same irreducible class as the content and mode windows above — a
+        // writer can always land after whatever check is last — and it is
+        // bounded the same way: waft never reports a repair it did not
+        // re-verify, and never touches what it did not prove.
+        if ensure_name_refers_to_file(&destination_parent, &destination_name, destination).is_err()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "destination changed during publication; another file took the destination name \
+                 after the repair, so the file now there was never touched and no repair is \
+                 reported",
+            ));
         }
         // The directory entry is untouched, so only the inode needs syncing.
         rustix::fs::fsync(&*destination)?;
@@ -2324,6 +2420,70 @@ mod tests {
             fs::read_to_string(&dst).unwrap(),
             "same\n",
             "a repair must never write the destination's content"
+        );
+        assert!(no_temporaries_left(&destination_root));
+    }
+
+    /// The window no descriptor can see: another writer publishes its own file
+    /// over the destination *name* after waft's `fchmod` has landed and been
+    /// read back. Content and mode still verify — on an inode that no longer
+    /// answers to that name — so the name itself has to be re-proved, or waft
+    /// reports a repair of a file nobody can reach while the file that is
+    /// actually at the destination was never touched.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_permission_repair_refuses_when_the_destination_name_is_taken_after_the_chmod() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "same\n");
+        let src = source_root.join("file.env");
+        let dst = destination_root.join("file.env");
+        write(&dst, "same\n");
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o600)).unwrap();
+        let planned = existing_snapshot(&dst);
+
+        let root = destination_root.clone();
+        let _hooks = publish_hooks::install(publish_hooks::Hooks {
+            after_permission_repair: Some(Box::new(move || {
+                // A different inode takes the destination name in the instant
+                // between waft's `fchmod` and the checks that read it back. The
+                // descriptor waft holds still has the planned bytes and now has
+                // the source's mode; it just is not the destination any more.
+                substitute_destination(&root, "file.env", "someone else's file\n");
+                fs::set_permissions(root.join("file.env"), fs::Permissions::from_mode(0o640))
+                    .unwrap();
+            })),
+            ..publish_hooks::Hooks::default()
+        });
+
+        let outcome = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::RepairPermissions(planned),
+            &mut || Ok(()),
+        );
+
+        let Err(error) = outcome else {
+            panic!("a repair whose name was taken must not be reported as one: {outcome:?}");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(
+            error
+                .to_string()
+                .contains("destination changed during publication"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&dst).unwrap(),
+            "someone else's file\n",
+            "the file that took the name must not be written"
+        );
+        assert_eq!(
+            fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o640,
+            "the file that took the name must keep the mode its own writer set"
         );
         assert!(no_temporaries_left(&destination_root));
     }

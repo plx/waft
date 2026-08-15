@@ -516,12 +516,21 @@ mod interrupt_cleanup {
             action.sa_flags = libc::SA_RESTART;
             libc::sigemptyset(&mut action.sa_mask);
 
-            if install_unless_ignored(libc::SIGINT, &action, PREVIOUS_INTERRUPT.0.get()) {
-                INTERRUPT_PREVIOUS_READY.store(true, Ordering::SeqCst);
-            }
-            if install_unless_ignored(libc::SIGTERM, &action, PREVIOUS_TERMINATE.0.get()) {
-                TERMINATE_PREVIOUS_READY.store(true, Ordering::SeqCst);
-            }
+            // Each call publishes its own readiness flag, in the only order
+            // that is safe against a delivery arriving mid-installation, so
+            // there is nothing left for this caller to do with the answer.
+            install_unless_ignored(
+                libc::SIGINT,
+                &action,
+                PREVIOUS_INTERRUPT.0.get(),
+                &INTERRUPT_PREVIOUS_READY,
+            );
+            install_unless_ignored(
+                libc::SIGTERM,
+                &action,
+                PREVIOUS_TERMINATE.0.get(),
+                &TERMINATE_PREVIOUS_READY,
+            );
         });
     }
 
@@ -534,21 +543,50 @@ mod interrupt_cleanup {
     /// race the lock exists to prevent. `nohup` and non-job-control background
     /// jobs make this the normal case for `SIGINT`.
     ///
+    /// The disposition is therefore *queried* first, with a null new action, and
+    /// waft's handler is installed only if the answer is something other than
+    /// `SIG_IGN`. Installing first and putting an inherited `SIG_IGN` back
+    /// afterwards would leave a window in which the signal was already waft's:
+    /// a delivery inside it would run a handler whose recorded previous
+    /// disposition was not yet published, which restores `SIG_DFL` and kills a
+    /// process that was started to ignore that signal outright.
+    ///
+    /// Query-then-install is race-free here because nothing else in this process
+    /// changes dispositions: they are installed exactly once, from a `Once`,
+    /// before any worker exists, and never touched again. The only other writer
+    /// would be a signal handler, and the only handler waft installs is the one
+    /// being installed here. So the disposition read below is still the live one
+    /// at the moment it is replaced.
+    ///
+    /// `ready` is set before the installation, never after, so any delivery that
+    /// lands the instant waft's handler becomes live already finds the
+    /// disposition it must put back. Setting it afterwards is the same window in
+    /// a different place.
+    ///
     /// Returns whether waft's handler is now installed for `signal`.
     pub(super) unsafe fn install_unless_ignored(
         signal: libc::c_int,
         action: &libc::sigaction,
         previous: *mut MaybeUninit<libc::sigaction>,
+        ready: &AtomicBool,
     ) -> bool {
         unsafe {
-            // `sigaction` fills the old disposition before the new handler can
-            // run, so the saved value is complete by the time it is readable.
-            if libc::sigaction(signal, action, (*previous).as_mut_ptr()) != 0 {
+            let mut current: MaybeUninit<libc::sigaction> = MaybeUninit::uninit();
+            // A null new action means "report the disposition, change nothing":
+            // an inherited `SIG_IGN` is never even momentarily displaced.
+            if libc::sigaction(signal, ptr::null(), current.as_mut_ptr()) != 0 {
                 return false;
             }
-            let old = (*previous).assume_init_ref();
-            if old.sa_sigaction == libc::SIG_IGN {
-                libc::sigaction(signal, old, ptr::null_mut());
+            let current = current.assume_init();
+            if current.sa_sigaction == libc::SIG_IGN {
+                return false;
+            }
+            (*previous).write(current);
+            ready.store(true, Ordering::SeqCst);
+            if libc::sigaction(signal, action, ptr::null_mut()) != 0 {
+                // Nothing was replaced, so there is nothing to put back; a
+                // handler that is not installed can never read the flag anyway.
+                ready.store(false, Ordering::SeqCst);
                 return false;
             }
             true
@@ -1152,9 +1190,17 @@ mod tests {
         fs::remove_file(&armed).unwrap();
     }
 
-    /// A signal inherited as ignored must stay ignored. If waft handled it,
-    /// `raise` would return and the handler would fall back into the publish
-    /// window having already deleted the index lock it is still relying on.
+    /// A signal inherited as ignored must stay ignored, and must never be
+    /// waft's even for an instant. If waft handled it, `raise` would return and
+    /// the handler would fall back into the publish window having already
+    /// deleted the index lock it is still relying on; and a delivery inside a
+    /// momentary takeover would run that handler before the disposition it has
+    /// to put back was recorded, restoring `SIG_DFL` and killing a process that
+    /// was started to ignore the signal outright.
+    ///
+    /// So the disposition is queried and only then replaced, which is what this
+    /// test pins: on an inherited ignore nothing is installed, nothing is
+    /// recorded, and the storage the handler reads is never even written.
     ///
     /// `SIGUSR2` stands in for `SIGINT`/`SIGTERM` so the test never changes the
     /// dispositions the test process actually runs under. That disposition is
@@ -1162,8 +1208,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn interrupt_handlers_leave_an_inherited_ignore_alone() {
+        use std::sync::atomic::AtomicBool;
+
         let _serialized = one_lock_at_a_time();
         extern "C" fn never_called(_signal: libc::c_int) {}
+        extern "C" fn inherited_handler(_signal: libc::c_int) {}
+        /// Never installed as a disposition; only ever a marker in storage.
+        extern "C" fn never_installed(_signal: libc::c_int) {}
 
         unsafe fn disposition(signal: libc::c_int) -> libc::sighandler_t {
             unsafe {
@@ -1190,20 +1241,62 @@ mod tests {
             let mut waft_handler: libc::sigaction = std::mem::zeroed();
             waft_handler.sa_sigaction = never_called as usize;
             libc::sigemptyset(&mut waft_handler.sa_mask);
+
+            // A recognizable value in the previous-disposition storage. It is
+            // never installed as a disposition; it is only there so the test
+            // can tell "waft recorded what it replaced" from "waft wrote
+            // nothing because it replaced nothing".
+            let sentinel = never_installed as libc::sighandler_t;
             let mut previous: std::mem::MaybeUninit<libc::sigaction> =
                 std::mem::MaybeUninit::uninit();
+            let mut sentinel_action: libc::sigaction = std::mem::zeroed();
+            sentinel_action.sa_sigaction = sentinel;
+            previous.write(sentinel_action);
+            let ready = AtomicBool::new(false);
 
             set(libc::SIGUSR2, libc::SIG_IGN);
             let installed = interrupt_cleanup::install_unless_ignored(
                 libc::SIGUSR2,
                 &waft_handler,
                 &raw mut previous,
+                &ready,
             );
             assert!(!installed, "an inherited SIG_IGN must not be taken over");
             assert_eq!(
                 disposition(libc::SIGUSR2),
                 libc::SIG_IGN,
-                "the ignore must be put back exactly as it was"
+                "the ignore must be left exactly as it was, never replaced and restored"
+            );
+            assert!(
+                !ready.load(std::sync::atomic::Ordering::SeqCst),
+                "nothing was replaced, so no previous disposition may be claimed"
+            );
+            assert_eq!(
+                previous.assume_init().sa_sigaction,
+                sentinel,
+                "an inherited ignore must leave the handler's storage untouched"
+            );
+
+            // The ordinary path: whatever was there is recorded first and
+            // waft's handler installed second, so a delivery the instant the
+            // handler goes live already finds what to put back.
+            set(libc::SIGUSR2, inherited_handler as libc::sighandler_t);
+            let installed = interrupt_cleanup::install_unless_ignored(
+                libc::SIGUSR2,
+                &waft_handler,
+                &raw mut previous,
+                &ready,
+            );
+            assert!(installed, "a handled disposition is waft's to replace");
+            assert_eq!(disposition(libc::SIGUSR2), never_called as usize);
+            assert!(
+                ready.load(std::sync::atomic::Ordering::SeqCst),
+                "the recorded disposition must be readable as soon as the handler is live"
+            );
+            assert_eq!(
+                previous.assume_init().sa_sigaction,
+                inherited_handler as libc::sighandler_t,
+                "the disposition waft replaced is the one it must restore"
             );
 
             set(libc::SIGUSR2, libc::SIG_DFL);
@@ -1211,9 +1304,11 @@ mod tests {
                 libc::SIGUSR2,
                 &waft_handler,
                 &raw mut previous,
+                &ready,
             );
             assert!(installed, "a default disposition is waft's to handle");
             assert_eq!(disposition(libc::SIGUSR2), never_called as usize);
+            assert_eq!(previous.assume_init().sa_sigaction, libc::SIG_DFL);
 
             set(libc::SIGUSR2, libc::SIG_DFL);
         }

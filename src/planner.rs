@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use crate::eligibility_groups::EligibilityGroups;
 use crate::error::Result;
-use crate::fs::{FileComparison, FileSystem};
+use crate::fs::{FileComparison, FileSystem, SourceKind};
 use crate::git::GitBackend;
 use crate::model::{
     CopyOp, CopyPlan, DestinationExpectation, DestinationState, FailureEntry, NoOpEntry,
@@ -100,22 +100,31 @@ pub(crate) fn plan_with_overwrite_support(
         let src_abs = rel_path.to_path(&ctx.source_root);
         let dst_abs = rel_path.to_path(dest_root);
 
-        // Check source type
-        if !fs.is_file(&src_abs) {
-            entries.push(PlannedEntry::Skip(SkipEntry {
-                rel_path,
-                reason: SkipReason::UnsupportedSourceType,
-            }));
-            continue;
-        }
-
-        // Check if source is a symlink
-        if fs.is_symlink(&src_abs) {
-            entries.push(PlannedEntry::Skip(SkipEntry {
-                rel_path,
-                reason: SkipReason::UnsupportedSourceType,
-            }));
-            continue;
+        // Check source type. A source that was examined and is not a regular
+        // file — a directory, a symlink, a device — is nothing waft copies, and
+        // skipping it is the whole answer. A source that could not be examined
+        // at all is a different thing: it was eligible when it was discovered,
+        // so it has vanished or become unreachable since, and reporting that as
+        // an unsupported type would drop a file the caller asked for from both
+        // the plan and the exit status. That is the same per-file failure the
+        // snapshot below records, moved to the first place the loss can be
+        // seen.
+        match fs.source_kind(&src_abs) {
+            Ok(SourceKind::RegularFile) => {}
+            Ok(SourceKind::Symlink | SourceKind::Other) => {
+                entries.push(PlannedEntry::Skip(SkipEntry {
+                    rel_path,
+                    reason: SkipReason::UnsupportedSourceType,
+                }));
+                continue;
+            }
+            Err(error) => {
+                entries.push(PlannedEntry::Failure(FailureEntry {
+                    rel_path,
+                    message: format!("failed to examine source {}: {error}", src_abs.display()),
+                }));
+                continue;
+            }
         }
 
         // Classify destination state
@@ -688,6 +697,13 @@ mod tests {
         }
     }
 
+    /// The replacement-planning logic itself, exercised on every platform.
+    ///
+    /// The capability is supplied explicitly because the public [`plan`] reads
+    /// it from the host: on a platform without the anchored replacement path
+    /// this conflict is a planning failure instead, which
+    /// `plan_reports_overwrite_as_unsupported_where_the_platform_cannot_replace`
+    /// covers.
     #[test]
     fn plan_untracked_conflict_becomes_a_snapshot_pinned_replacement_with_overwrite() {
         let fs = MockFs::new();
@@ -698,7 +714,7 @@ mod tests {
         let ctx = test_ctx();
         let paths = vec![RepoRelPath::from_normalized(".env".to_string())];
 
-        let plan = plan(
+        let plan = plan_with_overwrite_support(
             &ctx,
             ValidationReport::default(),
             EligibilityGroups::from_files(paths),
@@ -706,6 +722,7 @@ mod tests {
             &fs,
             true,
             false,
+            true,
         )
         .unwrap();
 
@@ -862,6 +879,66 @@ mod tests {
             other => panic!("expected a per-file failure, got {other:?}"),
         }
         assert!(matches!(plan.entries[1], PlannedEntry::Copy(_)));
+
+        let report =
+            crate::executor::execute(&plan, &fs, &git, crate::config::CopyStrategy::SimpleCopy);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.copied, 1);
+        assert!(crate::executor::report_has_failures(&report).is_some());
+    }
+
+    /// The same loss one step earlier: the source is already gone when the
+    /// planner asks what it is. Answering "unsupported source type" there would
+    /// drop an eligible file from the plan and still exit zero, which is the
+    /// silent omission the per-file failure exists to prevent.
+    #[test]
+    fn plan_source_that_vanished_before_the_type_check_fails_only_that_file() {
+        let fs = MockFs::new();
+        // `gone.env` was eligible when discovery listed it; nothing in the
+        // filesystem answers for it now.
+        fs.add_file("/source/kept.env", b"kept");
+
+        let git = MockPlannerGit::new(vec![]);
+        let ctx = test_ctx();
+        let paths = vec![rel("gone.env"), rel("kept.env")];
+
+        let dry_run = plan(
+            &ctx,
+            ValidationReport::default(),
+            EligibilityGroups::from_files(paths.clone()),
+            &git,
+            &fs,
+            false,
+            true,
+        )
+        .unwrap();
+        let plan = plan(
+            &ctx,
+            ValidationReport::default(),
+            EligibilityGroups::from_files(paths),
+            &git,
+            &fs,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(plan.entries.len(), 2);
+        match &plan.entries[0] {
+            PlannedEntry::Failure(failure) => {
+                assert_eq!(failure.rel_path.as_str(), "gone.env");
+                assert!(
+                    failure.message.contains("gone.env"),
+                    "the failure must name the source it could not examine: {failure:?}"
+                );
+            }
+            other => panic!("expected a per-file failure, got {other:?}"),
+        }
+        assert!(matches!(plan.entries[1], PlannedEntry::Copy(_)));
+
+        // The dry run describes exactly what the executed run reports, and
+        // exits the same way.
+        assert_eq!(planning_failures(&dry_run), Some((1, 2)));
 
         let report =
             crate::executor::execute(&plan, &fs, &git, crate::config::CopyStrategy::SimpleCopy);
@@ -1070,6 +1147,8 @@ mod tests {
     #[test]
     fn plan_full_directory_still_checks_each_source_file_type() {
         let fs = MockFs::new();
+        // The manifest names a file; the source tree has a directory there.
+        fs.add_dir("/source/cfg/a.conf");
         let git = MockPlannerGit::new(vec![]);
         let ctx = test_ctx();
 

@@ -37,7 +37,13 @@ Until the first supported release, changes remain under `Unreleased`.
   `chmod`-ed on top of waft's repair is also reported as a per-file failure
   rather than a repair the file no longer carries. Its mode is left exactly as
   that writer set it: waft does not answer a concurrent `chmod` with another
-  one.
+  one. The destination *name* is proved last, after both descriptor facts: a
+  file another process renames onto that name while waft holds the planned
+  inode open would leave every descriptor check passing on a file nobody can
+  reach any more, and the visible destination unrepaired. Neither is chased —
+  the file that took the name was never verified here and is not touched, the
+  repaired inode is not followed — and the run reports a per-file failure
+  instead of a repair.
 - Report a replacement whose swapped-out file could not be removed as a
   per-file failure naming the full `.waft-copy-*` path it was left under,
   instead of returning success. The destination holds the planned content, but
@@ -88,7 +94,12 @@ Until the first supported release, changes remain under `Unreleased`.
   publish window cannot leave a stale lock. A signal the process inherited as
   ignored (`nohup`, background jobs without job control) is left ignored:
   handling it would delete the live lock and then return into the publish
-  window without it. A signal arriving while the lock is being created — after
+  window without it. The disposition is queried before anything is installed,
+  so an inherited ignore is never waft's even momentarily; installing first and
+  putting the ignore back afterwards left a window in which a delivery ran
+  waft's handler before it had recorded what to restore, fell back to
+  `SIG_DFL`, and terminated a process that was started to ignore the signal
+  outright. A signal arriving while the lock is being created — after
   `create_new` may have produced the file but before cleanup is armed — is
   recorded and deferred rather than re-raised: the handler cannot tell whether
   a lock exists yet or whether it is waft's, and terminating there would leave
@@ -133,7 +144,13 @@ Until the first supported release, changes remain under `Unreleased`.
   instead of aborting the whole run with nothing copied. The failure is
   reported, counted, and reflected in the exit status; every other file still
   proceeds. `--dry-run` reports the same failures on stderr — including under
-  `--quiet` — and exits nonzero like the run it describes.
+  `--quiet` — and exits nonzero like the run it describes. This covers the
+  first look at the source as well as the snapshot that follows it: a path that
+  was eligible when discovery listed it and cannot be examined at all when
+  planning reaches it is that same per-file failure, not an "unsupported source
+  type" skip that would drop the file from the run and still exit zero. A
+  source that was examined and simply is not a regular file — a directory, a
+  symlink, a device — remains an ordinary skip.
 - Update `scripts/self-test.sh` to pin the new `--overwrite` contract:
   untracked conflicts are replaced and the run succeeds, while a tracked
   destination is still never written.
