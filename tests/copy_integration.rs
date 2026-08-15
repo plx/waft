@@ -179,6 +179,46 @@ fn copy_fails_closed_while_destination_index_is_locked() {
     assert!(lock.exists(), "waft must not remove another process's lock");
 }
 
+/// A transient index writer (IDE, fsmonitor, background `git status`) must not
+/// turn into a sporadic per-file failure.
+#[test]
+fn copy_retries_past_a_transient_destination_index_lock() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+    write_file(main_dir.path(), ".env", "SECRET=value\n");
+
+    let index = git_path(&wt_path, "index");
+    let mut lock_name = index.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    let lock = std::path::PathBuf::from(lock_name);
+    fs::write(&lock, b"transient writer\n").unwrap();
+
+    let releaser = {
+        let lock = lock.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            let _ = fs::remove_file(&lock);
+        })
+    };
+
+    waft()
+        .args([
+            "copy",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    releaser.join().unwrap();
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "SECRET=value\n"
+    );
+}
+
 #[test]
 fn copy_dry_run_does_not_copy() {
     let (main_dir, wt_dir) = setup_worktrees();
@@ -281,7 +321,7 @@ fn copy_skips_untracked_conflict_without_overwrite() {
 }
 
 #[test]
-fn copy_overwrite_flag_fails_closed_on_existing_untracked_file() {
+fn copy_overwrite_replaces_differing_untracked_destination() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");
 
@@ -298,20 +338,18 @@ fn copy_overwrite_flag_fails_closed_on_existing_untracked_file() {
             wt_path.to_str().unwrap(),
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "--overwrite cannot safely replace existing untracked destination",
-        ));
+        .success()
+        .stderr(predicate::str::contains("replaced: .env"))
+        .stderr(predicate::str::contains("1 replaced"));
 
-    // The destination remains untouched; the user must review and remove it.
     assert_eq!(
         fs::read_to_string(wt_path.join(".env")).unwrap(),
-        "DEST_SECRET\n"
+        "SOURCE_SECRET\n"
     );
 }
 
 #[test]
-fn copy_overwrite_conflict_aborts_the_whole_plan_before_mutation() {
+fn copy_overwrite_continues_past_a_conflict_and_copies_the_rest() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");
 
@@ -329,19 +367,214 @@ fn copy_overwrite_conflict_aborts_the_whole_plan_before_mutation() {
             wt_path.to_str().unwrap(),
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "--overwrite cannot safely replace existing untracked destination",
-        ));
+        .success()
+        .stderr(predicate::str::contains("copied: a.secret"))
+        .stderr(predicate::str::contains("replaced: z.secret"));
 
-    assert!(
-        !wt_path.join("a.secret").exists(),
-        "a missing destination must not be copied before the conflict is reported"
+    assert_eq!(
+        fs::read_to_string(wt_path.join("a.secret")).unwrap(),
+        "COPY_CANDIDATE\n"
     );
     assert_eq!(
         fs::read_to_string(wt_path.join("z.secret")).unwrap(),
-        "DEST_CONFLICT\n"
+        "SOURCE_CONFLICT\n"
     );
+}
+
+/// The migration case for destinations written by pre-release waft, which
+/// always published mode `0600`.
+#[cfg(unix)]
+#[test]
+fn copy_overwrite_repairs_permission_only_destination_without_rewriting_it() {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=same\n");
+    write_file(&wt_path, ".env", "SECRET=same\n");
+    fs::set_permissions(
+        main_dir.path().join(".env"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    fs::set_permissions(wt_path.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
+    let before = fs::metadata(wt_path.join(".env")).unwrap().ino();
+
+    waft()
+        .args([
+            "copy",
+            "--overwrite",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("repaired permissions: .env"))
+        .stderr(predicate::str::contains("1 permissions repaired"));
+
+    let after = fs::metadata(wt_path.join(".env")).unwrap();
+    assert_eq!(after.permissions().mode() & 0o777, 0o644);
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "SECRET=same\n"
+    );
+    assert_eq!(
+        after.ino(),
+        before,
+        "a permissions repair must not rewrite the file"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_names_permission_only_conflict_and_its_remedy_when_skipping() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=same\n");
+    write_file(&wt_path, ".env", "SECRET=same\n");
+    fs::set_permissions(
+        main_dir.path().join(".env"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    fs::set_permissions(wt_path.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
+
+    waft()
+        .args([
+            "copy",
+            "--dry-run",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "skip: .env (content equal, permissions differ; --overwrite repairs the permissions)",
+        ));
+
+    // Without the flag the destination is left exactly as it was.
+    assert_eq!(
+        fs::metadata(wt_path.join(".env"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn copy_overwrite_dry_run_names_planned_replacements_without_touching_anything() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
+    write_file(&wt_path, ".env", "DEST_SECRET\n");
+
+    waft()
+        .args([
+            "copy",
+            "--dry-run",
+            "--overwrite",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "replace: .env (untracked conflict)",
+        ));
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "DEST_SECRET\n"
+    );
+}
+
+/// A source that cannot be snapshotted is one file's failure. The dry run has
+/// to say so on stderr and exit the way the real run would, or `--dry-run
+/// --quiet` becomes a silent success that hides a file waft cannot copy.
+#[cfg(unix)]
+#[test]
+fn copy_dry_run_reports_planning_failures_and_exits_nonzero() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=value\n");
+    write_file(main_dir.path(), "keep.secret", "READABLE\n");
+    let unreadable = main_dir.path().join(".env");
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&unreadable).is_ok() {
+        // Running as root, where permissions cannot make a file unreadable.
+        return;
+    }
+
+    waft()
+        .args([
+            "copy",
+            "--dry-run",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("copy: keep.secret"))
+        .stderr(predicate::str::contains("FAILED: .env"));
+
+    // `--quiet` suppresses the plan, never the reason the run exits nonzero.
+    waft()
+        .args([
+            "copy",
+            "--dry-run",
+            "--quiet",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("FAILED: .env"));
+
+    assert!(!wt_path.join("keep.secret").exists());
+
+    // The real run reports the same failure and still copies everything else.
+    waft()
+        .args([
+            "copy",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("FAILED: .env"));
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join("keep.secret")).unwrap(),
+        "READABLE\n",
+        "a source waft cannot read must not stop the rest of the run"
+    );
+
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 #[test]
@@ -491,7 +724,7 @@ fn copy_strategy_via_env_var() {
 }
 
 #[test]
-fn copy_overwrite_with_cow_also_fails_closed() {
+fn copy_overwrite_with_cow_also_replaces() {
     let (main_dir, wt_dir) = setup_worktrees();
     let wt_path = wt_dir.path().join("linked");
 
@@ -510,12 +743,85 @@ fn copy_overwrite_with_cow_also_fails_closed() {
             wt_path.to_str().unwrap(),
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "--overwrite cannot safely replace existing untracked destination",
-        ));
+        .success()
+        .stderr(predicate::str::contains("replaced: .env"));
 
-    assert_eq!(fs::read_to_string(wt_path.join(".env")).unwrap(), "OLD\n");
+    assert_eq!(fs::read_to_string(wt_path.join(".env")).unwrap(), "NEW\n");
+}
+
+/// Even under `--overwrite`, a tracked destination is never written. The
+/// tracked recheck runs under Git's index lock immediately before publication.
+#[test]
+fn copy_overwrite_never_replaces_tracked_destination_that_differs() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
+    write_file(&wt_path, ".env", "DEST_TRACKED\n");
+    git(&wt_path, &["add", "-f", ".env"]);
+    git(&wt_path, &["commit", "-m", "track .env in dest"]);
+
+    waft()
+        .args([
+            "copy",
+            "--overwrite",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("skipped"));
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "DEST_TRACKED\n"
+    );
+}
+
+/// Even under `--overwrite`, a tracked destination whose permissions are the
+/// only difference is left alone.
+#[cfg(unix)]
+#[test]
+fn copy_overwrite_never_repairs_permissions_of_tracked_destination() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=same\n");
+    write_file(&wt_path, ".env", "SECRET=same\n");
+    git(&wt_path, &["add", "-f", ".env"]);
+    git(&wt_path, &["commit", "-m", "track .env in dest"]);
+    fs::set_permissions(
+        main_dir.path().join(".env"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    fs::set_permissions(wt_path.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
+
+    waft()
+        .args([
+            "copy",
+            "--overwrite",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("skipped"));
+
+    assert_eq!(
+        fs::metadata(wt_path.join(".env"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
 }
 
 #[test]

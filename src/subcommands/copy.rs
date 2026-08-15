@@ -17,7 +17,9 @@ pub struct CopyArgs {
     #[arg(short = 'n', long)]
     pub dry_run: bool,
 
-    /// Compatibility flag; existing destination conflicts fail closed.
+    /// Replace untracked destination files that differ, and repair
+    /// destinations whose content matches but whose permissions do not.
+    /// Tracked destinations are never written.
     #[arg(long)]
     pub overwrite: bool,
 }
@@ -94,8 +96,12 @@ pub(crate) fn run_copy_with_context(
     let plan = crate::planner::plan(ctx, report, groups, git, &fs, args.overwrite, args.dry_run)?;
 
     if args.dry_run {
-        if !cli.quiet {
-            crate::planner::render_dry_run(&plan);
+        crate::planner::render_dry_run(&plan, cli.quiet);
+        // A file planning could not describe is a failure of this run whether
+        // or not anything would have been written, so a dry run exits the same
+        // way the real run would.
+        if let Some((failed, total)) = crate::planner::planning_failures(&plan) {
+            return Err(Error::CopyFailed { failed, total });
         }
         return Ok(());
     }

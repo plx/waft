@@ -219,10 +219,20 @@ pub(crate) fn run_info_with_context(
                                 println!("planned_action: no-op");
                             }
                         }
+                        crate::model::DestinationState::PermissionsDiffer => {
+                            println!("destination: permissions-differ");
+                            if eligible {
+                                println!(
+                                    "planned_action: skip (content equal, permissions differ; --overwrite repairs)"
+                                );
+                            }
+                        }
                         crate::model::DestinationState::UntrackedConflict => {
                             println!("destination: untracked-conflict");
                             if eligible {
-                                println!("planned_action: skip (untracked conflict)");
+                                println!(
+                                    "planned_action: skip (untracked conflict; --overwrite replaces)"
+                                );
                             }
                         }
                         crate::model::DestinationState::TrackedConflict => {

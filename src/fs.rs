@@ -14,8 +14,19 @@ use std::os::fd::OwnedFd;
 use std::path::Component;
 
 use crate::config::CopyStrategy;
-use crate::model::{DestinationExpectation, FileSnapshot};
+use crate::model::{DestinationExpectation, FileSnapshot, PublishOutcome};
 use crate::path::RepoRelPath;
+
+/// How a source file relates to an existing destination file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileComparison {
+    /// Byte-identical content and identical relevant permission bits.
+    Equal,
+    /// Byte-identical content, differing permission bits.
+    PermissionsDiffer,
+    /// Differing content (length or bytes).
+    ContentDiffers,
+}
 
 /// Immutable inputs for one conditional file publication.
 #[derive(Debug, Clone, Copy)]
@@ -30,7 +41,8 @@ pub struct CopyFileRequest<'a> {
     pub strategy: CopyStrategy,
     /// Exact source state captured while planning.
     pub expected_source: &'a FileSnapshot,
-    /// Expected destination state. Existing destinations are rejected.
+    /// Expected destination state. An existing destination is only touched
+    /// when it still matches the snapshot recorded here.
     pub expected_destination: &'a DestinationExpectation,
 }
 
@@ -53,8 +65,15 @@ pub trait FileSystem {
 
     /// Compare two regular files without requiring implementations to retain
     /// their complete contents in memory.
-    fn files_equal(&self, left: &Path, right: &Path) -> io::Result<bool> {
-        Ok(self.read(left)? == self.read(right)?)
+    ///
+    /// Content equality and permission equality are reported separately so
+    /// callers can distinguish "needs a rewrite" from "needs a `chmod`".
+    fn compare_files(&self, left: &Path, right: &Path) -> io::Result<FileComparison> {
+        if self.read(left)? == self.read(right)? {
+            Ok(FileComparison::Equal)
+        } else {
+            Ok(FileComparison::ContentDiffers)
+        }
     }
 
     /// Capture a bounded-memory snapshot used to detect destination changes
@@ -77,15 +96,20 @@ pub trait FileSystem {
     ///
     /// Implementations receive repository roots and a validated relative path
     /// so they can anchor traversal to directory handles rather than resolving
-    /// independently mutable absolute pathnames. The destination is published
-    /// only if it is still missing; replacement of existing paths is rejected.
+    /// independently mutable absolute pathnames.
+    ///
+    /// A destination expected to be [`DestinationExpectation::Missing`] is
+    /// published with no-clobber semantics. A destination expected to exist is
+    /// re-opened and must still match its planning snapshot exactly; only then
+    /// is it replaced by atomic exchange or repaired in place.
+    ///
     /// `before_publish` runs after content preparation and immediately before
-    /// final namespace validation and no-clobber publication.
+    /// final namespace validation and publication.
     fn copy_file(
         &self,
         request: CopyFileRequest<'_>,
         before_publish: &mut dyn FnMut() -> io::Result<()>,
-    ) -> io::Result<()>;
+    ) -> io::Result<PublishOutcome>;
 }
 
 /// Real filesystem implementation.
@@ -115,14 +139,14 @@ impl FileSystem for RealFs {
         fs::read(path)
     }
 
-    fn files_equal(&self, left: &Path, right: &Path) -> io::Result<bool> {
+    fn compare_files(&self, left: &Path, right: &Path) -> io::Result<FileComparison> {
         let (mut left_file, left_metadata) = open_stable_regular_file(left)?;
         let (mut right_file, right_metadata) = open_stable_regular_file(right)?;
 
-        if left_metadata.len() != right_metadata.len()
-            || permission_signature(&left_metadata) != permission_signature(&right_metadata)
-        {
-            return Ok(false);
+        let permissions_equal =
+            permission_signature(&left_metadata) == permission_signature(&right_metadata);
+        if left_metadata.len() != right_metadata.len() {
+            return Ok(FileComparison::ContentDiffers);
         }
 
         let mut left_buffer = [0u8; 64 * 1024];
@@ -131,7 +155,7 @@ impl FileSystem for RealFs {
             let left_read = left_file.read(&mut left_buffer)?;
             let right_read = right_file.read(&mut right_buffer)?;
             if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
-                return Ok(false);
+                return Ok(FileComparison::ContentDiffers);
             }
             if left_read == 0 {
                 break;
@@ -140,7 +164,11 @@ impl FileSystem for RealFs {
 
         ensure_open_file_unchanged(left, &left_file, &left_metadata)?;
         ensure_open_file_unchanged(right, &right_file, &right_metadata)?;
-        Ok(true)
+        Ok(if permissions_equal {
+            FileComparison::Equal
+        } else {
+            FileComparison::PermissionsDiffer
+        })
     }
 
     fn file_snapshot(&self, path: &Path) -> io::Result<FileSnapshot> {
@@ -169,28 +197,20 @@ impl FileSystem for RealFs {
         &self,
         request: CopyFileRequest<'_>,
         before_publish: &mut dyn FnMut() -> io::Result<()>,
-    ) -> io::Result<()> {
-        if matches!(
-            request.expected_destination,
-            DestinationExpectation::ExistingUntracked(_)
-        ) {
-            return Err(overwrite_disabled_error(request.rel_path));
-        }
-
+    ) -> io::Result<PublishOutcome> {
         #[cfg(unix)]
         {
-            copy_file_anchored_unix(
-                request.source_root,
-                request.destination_root,
-                request.rel_path,
-                request.strategy,
-                request.expected_source,
-                before_publish,
-            )
+            copy_file_anchored_unix(request, before_publish)
         }
 
         #[cfg(not(unix))]
         {
+            if request.expected_destination.existing_snapshot().is_some() {
+                // Windows has no `renameat2`/`renameatx_np` equivalent that can
+                // exchange two names atomically while proving the outgoing
+                // inode is the one that was planned against.
+                return Err(replacement_unsupported_error(request.rel_path));
+            }
             copy_file_path_fallback(
                 &request.rel_path.to_path(request.source_root),
                 &request.rel_path.to_path(request.destination_root),
@@ -371,11 +391,12 @@ fn file_identity(_metadata: &fs::Metadata) -> Option<(u64, u64)> {
     None
 }
 
-fn overwrite_disabled_error(rel_path: &RepoRelPath) -> io::Error {
+#[cfg(not(unix))]
+fn replacement_unsupported_error(rel_path: &RepoRelPath) -> io::Error {
     io::Error::new(
-        io::ErrorKind::PermissionDenied,
+        io::ErrorKind::Unsupported,
         format!(
-            "{rel_path}: replacing an existing destination is disabled because it cannot be made race-safe; review and remove the destination file, then rerun"
+            "{rel_path}: replacing an existing destination is not supported on this platform; review and remove the destination file, then rerun"
         ),
     )
 }
@@ -386,17 +407,61 @@ const DIRECTORY_FLAGS: rustix::fs::OFlags = rustix::fs::OFlags::RDONLY
     .union(rustix::fs::OFlags::NOFOLLOW)
     .union(rustix::fs::OFlags::CLOEXEC);
 
+/// Removes an anchored temporary name unless it has been disarmed.
+///
+/// Cleanup runs from `Drop`, so an unwinding panic between temp creation and
+/// publication cannot leave a `.waft-copy-*` file behind.
+#[cfg(unix)]
+struct AnchoredTempGuard<'a> {
+    parent: &'a OwnedFd,
+    name: OsString,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl<'a> AnchoredTempGuard<'a> {
+    fn new(parent: &'a OwnedFd, name: OsString) -> Self {
+        Self {
+            parent,
+            name,
+            armed: true,
+        }
+    }
+
+    fn name(&self) -> &OsStr {
+        &self.name
+    }
+
+    /// Stop tracking the temporary name; the caller has consumed it.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    /// Remove the temporary name now and stop tracking it.
+    fn remove_now(&mut self) -> io::Result<()> {
+        self.armed = false;
+        unlink_anchored(self.parent, &self.name)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for AnchoredTempGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = unlink_anchored(self.parent, &self.name);
+        }
+    }
+}
+
 #[cfg(unix)]
 fn copy_file_anchored_unix(
-    source_root: &Path,
-    destination_root: &Path,
-    rel_path: &RepoRelPath,
-    strategy: CopyStrategy,
-    expected_source: &FileSnapshot,
+    request: CopyFileRequest<'_>,
     before_publish: &mut dyn FnMut() -> io::Result<()>,
-) -> io::Result<()> {
-    let source_root = open_canonical_directory(source_root)?;
-    let destination_root = open_canonical_directory(destination_root)?;
+) -> io::Result<PublishOutcome> {
+    let rel_path = request.rel_path;
+    let expected_destination = request.expected_destination;
+    let source_root = open_canonical_directory(request.source_root)?;
+    let destination_root = open_canonical_directory(request.destination_root)?;
 
     // Open the source through a no-follow component walk. From this point on,
     // renames of source path components cannot redirect the bytes being read.
@@ -419,7 +484,7 @@ fn copy_file_anchored_unix(
         ));
     }
     let actual_source = snapshot_open_regular_file(&mut source, &source_metadata)?;
-    if &actual_source != expected_source {
+    if &actual_source != request.expected_source {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
             "source changed after planning",
@@ -432,7 +497,53 @@ fn copy_file_anchored_unix(
     let (destination_parent, destination_name) =
         open_relative_parent(&destination_root, rel_path, true)?;
 
-    let try_reflink = match strategy {
+    // An expected-existing destination is pinned to a descriptor and matched
+    // against its planning snapshot before anything is prepared. Every later
+    // step compares against this descriptor's identity, never a pathname.
+    let expected_destination_snapshot = expected_destination.existing_snapshot();
+    let mut verified_destination = match expected_destination_snapshot {
+        Some(expected) => Some(open_verified_destination(
+            &destination_parent,
+            &destination_name,
+            expected,
+        )?),
+        None => None,
+    };
+
+    if matches!(
+        expected_destination,
+        DestinationExpectation::RepairPermissions(_)
+    ) {
+        let expected = expected_destination_snapshot
+            .expect("a repair expectation always carries a destination snapshot");
+        let destination = verified_destination
+            .as_mut()
+            .expect("a repair expectation always carries a destination snapshot");
+        // A repair changes only the mode, so it is only ever correct when the
+        // destination already holds the source's bytes. Planning proved that
+        // with a full byte comparison, but the source and destination
+        // snapshots are separate reads: re-establish the premise here from the
+        // pinned data itself. Both snapshots have just been matched against
+        // live descriptors, so agreeing with each other means the two files
+        // agree right now.
+        if !expected.content_matches(request.expected_source) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "destination content no longer matches the source; refusing to repair permissions",
+            ));
+        }
+        ensure_open_handle_unchanged(&source, &source_metadata)?;
+        before_publish()?;
+        ensure_same_relative_parent(&destination_root, rel_path, &destination_parent)?;
+        ensure_name_refers_to_file(&destination_parent, &destination_name, destination)?;
+        ensure_open_snapshot_matches(destination, expected)?;
+        destination.set_permissions(source_metadata.permissions())?;
+        // The directory entry is untouched, so only the inode needs syncing.
+        rustix::fs::fsync(&*destination)?;
+        return Ok(PublishOutcome::PermissionsRepaired);
+    }
+
+    let try_reflink = match request.strategy {
         CopyStrategy::SimpleCopy => false,
         CopyStrategy::CowCopy => true,
         CopyStrategy::Auto => cfg!(target_os = "macos"),
@@ -443,40 +554,333 @@ fn copy_file_anchored_unix(
     } else {
         None
     };
-    let (temporary_name, temporary) = match prepared {
-        Some(prepared) => prepared,
+    let (temporary_name, mut temporary, needs_stream) = match prepared {
+        Some((name, file)) => (name, file, false),
         None => {
-            source.seek(SeekFrom::Start(0))?;
-            let (name, mut file) = create_anchored_temp(&destination_parent)?;
-            if let Err(error) = io::copy(&mut source, &mut file) {
-                let _ = unlink_anchored(&destination_parent, &name);
-                return Err(error);
-            }
-            (name, file)
+            let (name, file) = create_anchored_temp(&destination_parent)?;
+            (name, file, true)
         }
     };
-
-    let mut published = false;
-    let result = (|| {
-        ensure_open_handle_unchanged(&source, &source_metadata)?;
-        temporary.set_permissions(source_metadata.permissions())?;
-        temporary.sync_all()?;
-
-        // This callback performs the final tracked-index check. Revalidate the
-        // parent capability after it returns, then issue NOREPLACE immediately.
-        before_publish()?;
-        ensure_same_relative_parent(&destination_root, rel_path, &destination_parent)?;
-        ensure_name_refers_to_file(&destination_parent, &temporary_name, &temporary)?;
-        publish_noreplace(&destination_parent, &temporary_name, &destination_name)?;
-        published = true;
-        rustix::fs::fsync(&destination_parent)?;
-        Ok(())
-    })();
-
-    if !published {
-        let _ = unlink_anchored(&destination_parent, &temporary_name);
+    // Everything from here on is guarded: any early return, `?`, or unwinding
+    // panic removes the temporary name.
+    let mut temporary_guard = AnchoredTempGuard::new(&destination_parent, temporary_name);
+    if needs_stream {
+        source.seek(SeekFrom::Start(0))?;
+        io::copy(&mut source, &mut temporary)?;
     }
-    result
+
+    ensure_open_handle_unchanged(&source, &source_metadata)?;
+    temporary.set_permissions(source_metadata.permissions())?;
+    temporary.sync_all()?;
+
+    // This callback performs the final tracked-index check under Git's
+    // cooperative index lock. Revalidate the parent capability after it
+    // returns, then publish immediately.
+    before_publish()?;
+    ensure_same_relative_parent(&destination_root, rel_path, &destination_parent)?;
+    ensure_name_refers_to_file(&destination_parent, temporary_guard.name(), &temporary)?;
+
+    let outcome = match verified_destination.as_mut() {
+        None => {
+            publish_noreplace(
+                &destination_parent,
+                temporary_guard.name(),
+                &destination_name,
+            )?;
+            temporary_guard.disarm();
+            PublishOutcome::Created
+        }
+        Some(destination) => {
+            let expected = expected_destination_snapshot
+                .expect("an existing-destination expectation always carries a snapshot");
+            replace_verified_destination(
+                &destination_parent,
+                &mut temporary_guard,
+                &destination_name,
+                destination,
+                expected,
+            )?;
+            PublishOutcome::Replaced
+        }
+    };
+    rustix::fs::fsync(&destination_parent)?;
+    Ok(outcome)
+}
+
+/// Open the destination by name under an already-authorized parent handle and
+/// require it to still match the state recorded while planning.
+#[cfg(unix)]
+fn open_verified_destination(
+    parent: &OwnedFd,
+    name: &OsStr,
+    expected: &FileSnapshot,
+) -> io::Result<fs::File> {
+    let fd = rustix::fs::openat(
+        parent,
+        name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?;
+    let mut destination = fs::File::from(fd);
+    ensure_open_snapshot_matches(&mut destination, expected)?;
+    Ok(destination)
+}
+
+/// Require an open regular file to still hold exactly the bytes and mode
+/// recorded in `expected`.
+///
+/// Identity alone is not enough: a writer can truncate and rewrite the same
+/// inode in place, so the content fingerprint is re-read from the descriptor.
+#[cfg(unix)]
+fn ensure_open_snapshot_matches(file: &mut fs::File, expected: &FileSnapshot) -> io::Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination is not a regular file",
+        ));
+    }
+    let actual = snapshot_open_regular_file(file, &metadata)?;
+    if actual != *expected {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "destination changed after planning; refusing to replace it",
+        ));
+    }
+    Ok(())
+}
+
+/// Replace `destination_name` with the prepared temporary, proving that the
+/// pathname still resolves to `verified` — with exactly the planned bytes and
+/// mode — at the moment of the swap.
+///
+/// The exchange makes the destination name point at the new content and the
+/// temporary name point at the outgoing inode in a single atomic step. If the
+/// file that was swapped out is not the one that was planned against, the
+/// exchange is undone and this file is reported as a per-file failure rather
+/// than a silent clobber.
+#[cfg(unix)]
+fn replace_verified_destination(
+    parent: &OwnedFd,
+    temporary_guard: &mut AnchoredTempGuard<'_>,
+    destination_name: &OsStr,
+    verified: &mut fs::File,
+    expected: &FileSnapshot,
+) -> io::Result<()> {
+    ensure_name_refers_to_file(parent, destination_name, verified)?;
+    ensure_open_snapshot_matches(verified, expected)?;
+    let verified_stat = rustix::fs::fstat(&*verified)?;
+
+    after_destination_verified();
+
+    match exchange_anchored(parent, temporary_guard.name(), destination_name) {
+        Ok(()) => {
+            let swapped_out_as_planned =
+                swapped_out_matches(parent, temporary_guard.name(), &verified_stat)
+                    .unwrap_or(false)
+                    && ensure_open_snapshot_matches(verified, expected).is_ok();
+            if swapped_out_as_planned {
+                // The temporary name now holds the outgoing inode.
+                let _ = temporary_guard.remove_now();
+                return Ok(());
+            }
+            // Another writer changed the destination between the identity
+            // proof and the exchange. Put both names back and fail this file.
+            before_exchange_back();
+            match exchange_anchored(parent, temporary_guard.name(), destination_name) {
+                Ok(()) => Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "destination changed during publication; it was left untouched",
+                )),
+                Err(undo_error) => {
+                    // The undo failed, so the destination name may still hold
+                    // the newly prepared content and the temporary name holds
+                    // a file this process never verified. Deleting that file
+                    // would destroy another writer's data, so the guard is
+                    // released and the situation is described instead.
+                    let stranded = temporary_guard.name().to_os_string();
+                    temporary_guard.disarm();
+                    Err(io::Error::other(format!(
+                        "destination changed during publication and the swap could not be undone \
+                         ({undo_error}): {} may now hold newly published content and the file \
+                         that was there was left as {}; nothing was deleted",
+                        Path::new(destination_name).display(),
+                        Path::new(&stranded).display(),
+                    )))
+                }
+            }
+        }
+        Err(error) if rename_flag_unsupported(error) => {
+            // Without an atomic exchange the best available sequence is
+            // "unlink the inode we proved, then publish with no-clobber". If
+            // anything recreates the name in that window, NOREPLACE fails and
+            // the file is reported as failed; it is never clobbered.
+            ensure_name_refers_to_file(parent, destination_name, verified)?;
+            ensure_open_snapshot_matches(verified, expected)?;
+            unlink_anchored(parent, destination_name)?;
+            after_destination_removed();
+            match publish_noreplace(parent, temporary_guard.name(), destination_name) {
+                Ok(()) => {
+                    temporary_guard.disarm();
+                    Ok(())
+                }
+                Err(publish_error) => {
+                    // The verified destination is already unlinked and this
+                    // filesystem offers no way to put it back. The prepared
+                    // replacement is the only copy of this file's content left
+                    // on disk, so keep it and name it rather than letting the
+                    // guard delete it on the way out.
+                    let stranded = temporary_guard.name().to_os_string();
+                    temporary_guard.disarm();
+                    Err(io::Error::new(
+                        publish_error.kind(),
+                        format!(
+                            "could not publish over the removed destination ({publish_error}): \
+                             this filesystem cannot exchange two names atomically, so {} was \
+                             removed and the prepared replacement was left as {}",
+                            Path::new(destination_name).display(),
+                            Path::new(&stranded).display(),
+                        ),
+                    ))
+                }
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Atomically swap two names under `parent`.
+#[cfg(unix)]
+fn exchange_anchored(parent: &OwnedFd, from: &OsStr, to: &OsStr) -> Result<(), rustix::io::Errno> {
+    if exchange_forced_unsupported() {
+        return Err(rustix::io::Errno::NOTSUP);
+    }
+    rustix::fs::renameat_with(parent, from, parent, to, rustix::fs::RenameFlags::EXCHANGE)
+}
+
+/// After an exchange, check that the temporary name holds the inode that was
+/// previously verified at the destination name.
+#[cfg(unix)]
+fn swapped_out_matches(
+    parent: &OwnedFd,
+    temporary_name: &OsStr,
+    verified: &rustix::fs::Stat,
+) -> io::Result<bool> {
+    let swapped_out = rustix::fs::openat(
+        parent,
+        temporary_name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )?;
+    let swapped_out = rustix::fs::fstat(&swapped_out)?;
+    Ok(swapped_out.st_dev == verified.st_dev && swapped_out.st_ino == verified.st_ino)
+}
+
+/// Errnos that mean "this filesystem cannot exchange two names atomically".
+#[cfg(unix)]
+fn rename_flag_unsupported(error: rustix::io::Errno) -> bool {
+    error == rustix::io::Errno::NOTSUP
+        || error == rustix::io::Errno::OPNOTSUPP
+        || error == rustix::io::Errno::INVAL
+        || error == rustix::io::Errno::NOSYS
+}
+
+/// Test-only seams inside the publication window.
+///
+/// The destructive recovery branches of [`replace_verified_destination`] — the
+/// undo of a failed exchange, and the unlink-then-publish fallback used where
+/// exchange is unsupported — cannot be provoked from an ordinary test volume:
+/// the guards that run before the swap reject any change made from
+/// `before_publish`, and every filesystem CI runs on supports exchange. These
+/// hooks let unit tests reach both branches so they are covered rather than
+/// merely argued about.
+#[cfg(all(test, unix))]
+mod publish_hooks {
+    use std::cell::RefCell;
+
+    /// Callbacks and forced failures for one test.
+    #[derive(Default)]
+    pub(super) struct Hooks {
+        /// Runs after the destination identity proof and before the swap.
+        pub(super) after_destination_verified: Option<Box<dyn FnMut()>>,
+        /// Runs after a mismatch is detected and before the undo swap.
+        pub(super) before_exchange_back: Option<Box<dyn FnMut()>>,
+        /// Runs in the exchange-less fallback, after the verified destination
+        /// has been unlinked and before the replacement is published.
+        pub(super) after_destination_removed: Option<Box<dyn FnMut()>>,
+        /// Makes every exchange report the filesystem as unable to swap names.
+        pub(super) exchange_unsupported: bool,
+    }
+
+    thread_local! {
+        static HOOKS: RefCell<Hooks> = RefCell::new(Hooks::default());
+    }
+
+    /// Installs `hooks` for the current thread until the returned guard drops.
+    pub(super) fn install(hooks: Hooks) -> HookGuard {
+        HOOKS.with(|cell| *cell.borrow_mut() = hooks);
+        HookGuard
+    }
+
+    pub(super) struct HookGuard;
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            HOOKS.with(|cell| *cell.borrow_mut() = Hooks::default());
+        }
+    }
+
+    pub(super) fn after_destination_verified() {
+        run(|hooks| hooks.after_destination_verified.take());
+    }
+
+    pub(super) fn before_exchange_back() {
+        run(|hooks| hooks.before_exchange_back.take());
+    }
+
+    pub(super) fn after_destination_removed() {
+        run(|hooks| hooks.after_destination_removed.take());
+    }
+
+    pub(super) fn exchange_forced_unsupported() -> bool {
+        HOOKS.with(|cell| cell.borrow().exchange_unsupported)
+    }
+
+    /// Takes a callback out of the hook set before running it, so a hook can
+    /// itself re-enter the publication path without recursing or deadlocking
+    /// on the `RefCell`.
+    fn run(select: impl FnOnce(&mut Hooks) -> Option<Box<dyn FnMut()>>) {
+        let callback = HOOKS.with(|cell| select(&mut cell.borrow_mut()));
+        if let Some(mut callback) = callback {
+            callback();
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+use publish_hooks::{
+    after_destination_removed, after_destination_verified, before_exchange_back,
+    exchange_forced_unsupported,
+};
+
+#[cfg(all(not(test), unix))]
+fn after_destination_verified() {}
+
+#[cfg(all(not(test), unix))]
+fn before_exchange_back() {}
+
+#[cfg(all(not(test), unix))]
+fn after_destination_removed() {}
+
+#[cfg(all(not(test), unix))]
+fn exchange_forced_unsupported() -> bool {
+    false
 }
 
 #[cfg(unix)]
@@ -755,7 +1159,11 @@ fn publish_noreplace(parent: &OwnedFd, temporary: &OsStr, destination: &OsStr) -
         rustix::fs::RenameFlags::NOREPLACE,
     ) {
         Ok(()) => Ok(()),
-        Err(error) if error == rustix::io::Errno::NOSYS || error == rustix::io::Errno::INVAL => {
+        // NOSYS/INVAL mean the kernel or filesystem does not implement the
+        // flag; NOTSUP/OPNOTSUPP are what macOS returns for SMB, NFS, and
+        // exFAT destinations. All four are "no RENAME_NOREPLACE here", not
+        // "this rename is wrong".
+        Err(error) if rename_flag_unsupported(error) => {
             // A hard link is also an atomic no-replace publication for a
             // regular file. The temporary name is then removed.
             rustix::fs::linkat(
@@ -784,7 +1192,7 @@ fn copy_file_path_fallback(
     strategy: CopyStrategy,
     expected_source: &FileSnapshot,
     before_publish: &mut dyn FnMut() -> io::Result<()>,
-) -> io::Result<()> {
+) -> io::Result<PublishOutcome> {
     if &snapshot_regular_file(src)? != expected_source {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
@@ -807,7 +1215,7 @@ fn copy_file_path_fallback(
         fs::File::open(&tmp_path)?.sync_all()?;
         before_publish()?;
         tmp_path.persist_noclobber(dst).map_err(|e| e.error)?;
-        return Ok(());
+        return Ok(PublishOutcome::Created);
     }
 
     let (mut source, source_metadata) = open_stable_regular_file(src)?;
@@ -823,7 +1231,7 @@ fn copy_file_path_fallback(
     before_publish()?;
     temporary
         .persist_noclobber(dst)
-        .map(|_| ())
+        .map(|_| PublishOutcome::Created)
         .map_err(|error| error.error)
 }
 
@@ -925,7 +1333,7 @@ mod tests {
         strategy: CopyStrategy,
         expected: &DestinationExpectation,
         before_publish: &mut dyn FnMut() -> io::Result<()>,
-    ) -> io::Result<()> {
+    ) -> io::Result<PublishOutcome> {
         let expected_source = RealFs.file_snapshot(&source_root.join(rel))?;
         let rel_path = RepoRelPath::from_normalized(rel.to_string());
         RealFs.copy_file(
@@ -962,33 +1370,467 @@ mod tests {
         assert_eq!(fs::read_to_string(dst).unwrap(), "appeared\n");
     }
 
-    #[test]
-    fn realfs_overwrite_is_always_rejected_before_callback() {
-        use std::cell::Cell;
+    #[cfg(unix)]
+    fn existing_snapshot(path: &Path) -> FileSnapshot {
+        RealFs.file_snapshot(path).unwrap()
+    }
 
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_replaces_a_verified_differing_destination() {
+        use std::os::unix::fs::MetadataExt;
+
+        for strategy in [CopyStrategy::SimpleCopy, CopyStrategy::CowCopy] {
+            let tmp = TempDir::new().unwrap();
+            let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+            let dst = destination_root.join("file.env");
+            write(&dst, "old\n");
+            let before = fs::metadata(&dst).unwrap().ino();
+
+            let outcome = copy(
+                &source_root,
+                &destination_root,
+                "file.env",
+                strategy,
+                &DestinationExpectation::ReplaceExisting(existing_snapshot(&dst)),
+                &mut || Ok(()),
+            )
+            .unwrap();
+
+            assert_eq!(outcome, PublishOutcome::Replaced);
+            assert_eq!(fs::read_to_string(&dst).unwrap(), "new\n");
+            assert_ne!(
+                fs::metadata(&dst).unwrap().ino(),
+                before,
+                "a replacement publishes a new inode"
+            );
+            assert!(no_temporaries_left(&destination_root));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_repairs_permissions_without_rewriting_content() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "same\n");
+        let src = source_root.join("file.env");
+        let dst = destination_root.join("file.env");
+        write(&dst, "same\n");
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o600)).unwrap();
+        let before = fs::metadata(&dst).unwrap().ino();
+
+        let outcome = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::RepairPermissions(existing_snapshot(&dst)),
+            &mut || Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, PublishOutcome::PermissionsRepaired);
+        assert_eq!(
+            fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "same\n");
+        assert_eq!(fs::metadata(&dst).unwrap().ino(), before);
+        assert!(no_temporaries_left(&destination_root));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_refuses_a_destination_that_changed_after_planning() {
         let tmp = TempDir::new().unwrap();
         let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
         let dst = destination_root.join("file.env");
         write(&dst, "old\n");
-        let snapshot = RealFs.file_snapshot(&dst).unwrap();
-        let callback_called = Cell::new(false);
+        let planned = existing_snapshot(&dst);
+        // The destination is edited after the plan was built.
+        write(&dst, "edited by someone else\n");
 
         let error = copy(
             &source_root,
             &destination_root,
             "file.env",
             CopyStrategy::SimpleCopy,
-            &DestinationExpectation::ExistingUntracked(snapshot),
-            &mut || {
-                callback_called.set(true);
-                Ok(())
-            },
+            &DestinationExpectation::ReplaceExisting(planned),
+            &mut || Ok(()),
         )
         .unwrap_err();
 
-        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
-        assert!(!callback_called.get());
-        assert_eq!(fs::read_to_string(dst).unwrap(), "old\n");
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            fs::read_to_string(&dst).unwrap(),
+            "edited by someone else\n"
+        );
+        assert!(no_temporaries_left(&destination_root));
+    }
+
+    /// The interesting window: the destination is rewritten *in place*, keeping
+    /// its inode, after verification and while the publication is in flight.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_refuses_a_destination_rewritten_during_publication() {
+        for strategy in [CopyStrategy::SimpleCopy, CopyStrategy::CowCopy] {
+            let tmp = TempDir::new().unwrap();
+            let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+            let dst = destination_root.join("file.env");
+            write(&dst, "old\n");
+            let planned = existing_snapshot(&dst);
+            let mut rewrite_destination_in_place = || {
+                // `write` truncates and rewrites the same inode, so an
+                // identity check alone would not notice this.
+                fs::write(&dst, "concurrent edit\n")?;
+                Ok(())
+            };
+
+            let error = copy(
+                &source_root,
+                &destination_root,
+                "file.env",
+                strategy,
+                &DestinationExpectation::ReplaceExisting(planned),
+                &mut rewrite_destination_in_place,
+            )
+            .unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            assert_eq!(fs::read_to_string(&dst).unwrap(), "concurrent edit\n");
+            assert!(no_temporaries_left(&destination_root));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn realfs_permission_repair_refuses_a_destination_rewritten_during_publication() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "same\n");
+        let src = source_root.join("file.env");
+        let dst = destination_root.join("file.env");
+        write(&dst, "same\n");
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o600)).unwrap();
+        let planned = existing_snapshot(&dst);
+        let mut rewrite_destination_in_place = || {
+            fs::write(&dst, "concurrent edit\n")?;
+            Ok(())
+        };
+
+        let error = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::RepairPermissions(planned),
+            &mut rewrite_destination_in_place,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "concurrent edit\n");
+        assert_eq!(
+            fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    /// A repair may only ever change the mode, so it must refuse to run when
+    /// the bytes it was told are equal are not: the byte comparison that
+    /// classified this file and the snapshot pinned into the plan are separate
+    /// reads, and a writer can land between them.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_permission_repair_refuses_a_destination_whose_content_is_not_the_source() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "source\n");
+        let src = source_root.join("file.env");
+        let dst = destination_root.join("file.env");
+        write(&dst, "not the source at all\n");
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let error = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            // A repair expectation that the destination still matches exactly,
+            // but whose premise — equal content — does not hold.
+            &DestinationExpectation::RepairPermissions(existing_snapshot(&dst)),
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "not the source at all\n");
+        assert_eq!(
+            fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "a refused repair must not change the mode either"
+        );
+    }
+
+    /// Swap the destination name onto a different inode, imitating another
+    /// writer publishing its own file there.
+    #[cfg(unix)]
+    fn substitute_destination(destination_root: &Path, rel: &str, content: &str) {
+        let interloper = destination_root.join("interloper");
+        write(&interloper, content);
+        fs::rename(&interloper, destination_root.join(rel)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn temporaries(directory: &Path) -> Vec<std::path::PathBuf> {
+        let mut found: Vec<_> = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(".waft-copy-")
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The window the identity proof cannot cover: the destination is
+    /// substituted after every guard has passed and before the swap.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_undoes_the_swap_when_the_destination_changed_at_the_last_instant() {
+        for strategy in [CopyStrategy::SimpleCopy, CopyStrategy::CowCopy] {
+            let tmp = TempDir::new().unwrap();
+            let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+            let dst = destination_root.join("file.env");
+            write(&dst, "old\n");
+            let planned = existing_snapshot(&dst);
+
+            let root = destination_root.clone();
+            let _hooks = publish_hooks::install(publish_hooks::Hooks {
+                after_destination_verified: Some(Box::new(move || {
+                    substitute_destination(&root, "file.env", "someone else's file\n");
+                })),
+                ..publish_hooks::Hooks::default()
+            });
+
+            let error = copy(
+                &source_root,
+                &destination_root,
+                "file.env",
+                strategy,
+                &DestinationExpectation::ReplaceExisting(planned),
+                &mut || Ok(()),
+            )
+            .unwrap_err();
+
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            assert_eq!(
+                fs::read_to_string(&dst).unwrap(),
+                "someone else's file\n",
+                "the swap must be undone, leaving the other writer's file in place"
+            );
+            assert!(no_temporaries_left(&destination_root));
+        }
+    }
+
+    /// If the undo itself fails, the file left under the temporary name belongs
+    /// to another writer. It must survive, and the error must say where it is.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_keeps_the_stranded_file_when_the_swap_cannot_be_undone() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+        let dst = destination_root.join("file.env");
+        write(&dst, "old\n");
+        let planned = existing_snapshot(&dst);
+
+        let substitute_root = destination_root.clone();
+        let removed_dst = dst.clone();
+        let _hooks = publish_hooks::install(publish_hooks::Hooks {
+            after_destination_verified: Some(Box::new(move || {
+                substitute_destination(&substitute_root, "file.env", "someone else's file\n");
+            })),
+            // Removing the destination name makes the undo swap fail: an
+            // exchange needs both names to exist.
+            before_exchange_back: Some(Box::new(move || {
+                fs::remove_file(&removed_dst).unwrap();
+            })),
+            ..publish_hooks::Hooks::default()
+        });
+
+        let error = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::ReplaceExisting(planned),
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+
+        let stranded = temporaries(&destination_root);
+        assert_eq!(
+            stranded.len(),
+            1,
+            "the unverified file must not be deleted on the way out"
+        );
+        assert_eq!(
+            fs::read_to_string(&stranded[0]).unwrap(),
+            "someone else's file\n"
+        );
+        let message = error.to_string();
+        let name = stranded[0].file_name().unwrap().to_string_lossy();
+        assert!(
+            message.contains(&*name),
+            "the error must name the stranded file, got: {message}"
+        );
+    }
+
+    /// Filesystems without an atomic exchange (macOS SMB/NFS/exFAT, some
+    /// overlay setups) take the unlink-then-publish path instead.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_replaces_without_an_atomic_exchange() {
+        for strategy in [CopyStrategy::SimpleCopy, CopyStrategy::CowCopy] {
+            let tmp = TempDir::new().unwrap();
+            let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+            let dst = destination_root.join("file.env");
+            write(&dst, "old\n");
+
+            let _hooks = publish_hooks::install(publish_hooks::Hooks {
+                exchange_unsupported: true,
+                ..publish_hooks::Hooks::default()
+            });
+
+            let outcome = copy(
+                &source_root,
+                &destination_root,
+                "file.env",
+                strategy,
+                &DestinationExpectation::ReplaceExisting(existing_snapshot(&dst)),
+                &mut || Ok(()),
+            )
+            .unwrap();
+
+            assert_eq!(outcome, PublishOutcome::Replaced);
+            assert_eq!(fs::read_to_string(&dst).unwrap(), "new\n");
+            assert!(no_temporaries_left(&destination_root));
+        }
+    }
+
+    /// The inherent gap in the exchange-less fallback: the destination is
+    /// already unlinked when the name is taken by someone else. The no-clobber
+    /// publish refuses, and the prepared replacement must be kept rather than
+    /// deleted — it is the only copy of the new content left.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_without_exchange_keeps_the_replacement_when_the_name_reappears() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+        let dst = destination_root.join("file.env");
+        write(&dst, "old\n");
+        let planned = existing_snapshot(&dst);
+
+        let reappear = dst.clone();
+        let _hooks = publish_hooks::install(publish_hooks::Hooks {
+            exchange_unsupported: true,
+            after_destination_removed: Some(Box::new(move || {
+                write(&reappear, "someone else's file\n");
+            })),
+            ..publish_hooks::Hooks::default()
+        });
+
+        let error = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::ReplaceExisting(planned),
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read_to_string(&dst).unwrap(),
+            "someone else's file\n",
+            "the file that took the name must never be clobbered"
+        );
+        let kept = temporaries(&destination_root);
+        assert_eq!(kept.len(), 1, "the prepared replacement must be kept");
+        assert_eq!(fs::read_to_string(&kept[0]).unwrap(), "new\n");
+        let message = error.to_string();
+        assert!(
+            message.contains(&*kept[0].file_name().unwrap().to_string_lossy()),
+            "the error must name the kept replacement, got: {message}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn realfs_removes_anchored_temp_when_publication_unwinds() {
+        for strategy in [CopyStrategy::SimpleCopy, CopyStrategy::CowCopy] {
+            let tmp = TempDir::new().unwrap();
+            let (source_root, destination_root) = fixture(&tmp, "file.env", "source\n");
+
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = copy(
+                    &source_root,
+                    &destination_root,
+                    "file.env",
+                    strategy,
+                    &DestinationExpectation::Missing,
+                    &mut || panic!("tracked-state recheck exploded"),
+                );
+            }));
+
+            assert!(panicked.is_err());
+            assert!(!destination_root.join("file.env").exists());
+            assert!(
+                no_temporaries_left(&destination_root),
+                "an unwinding panic must not leave a .waft-copy-* file behind"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_flag_fallback_covers_every_unsupported_errno() {
+        // These are the errnos a kernel or filesystem uses to say "this rename
+        // flag is not implemented here" — notably macOS SMB/NFS/exFAT, which
+        // answer ENOTSUP/EOPNOTSUPP rather than ENOSYS/EINVAL.
+        for errno in [
+            rustix::io::Errno::NOSYS,
+            rustix::io::Errno::INVAL,
+            rustix::io::Errno::NOTSUP,
+            rustix::io::Errno::OPNOTSUPP,
+        ] {
+            assert!(rename_flag_unsupported(errno), "{errno:?}");
+        }
+        for errno in [
+            rustix::io::Errno::EXIST,
+            rustix::io::Errno::NOENT,
+            rustix::io::Errno::ACCESS,
+            rustix::io::Errno::XDEV,
+        ] {
+            assert!(!rename_flag_unsupported(errno), "{errno:?}");
+        }
+    }
+
+    fn no_temporaries_left(directory: &Path) -> bool {
+        fs::read_dir(directory).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".waft-copy-")
+        })
     }
 
     #[test]
@@ -1083,7 +1925,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn realfs_file_equality_includes_unix_permissions() {
+    fn realfs_file_comparison_separates_permission_differences() {
         let tmp = TempDir::new().unwrap();
         let left = tmp.path().join("left");
         let right = tmp.path().join("right");
@@ -1092,7 +1934,10 @@ mod tests {
         fs::set_permissions(&left, fs::Permissions::from_mode(0o755)).unwrap();
         fs::set_permissions(&right, fs::Permissions::from_mode(0o644)).unwrap();
 
-        assert!(!RealFs.files_equal(&left, &right).unwrap());
+        assert_eq!(
+            RealFs.compare_files(&left, &right).unwrap(),
+            FileComparison::PermissionsDiffer
+        );
     }
 
     #[cfg(unix)]

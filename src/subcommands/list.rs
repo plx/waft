@@ -133,6 +133,9 @@ pub(crate) fn run_list_with_context(
                     let action_str = match state {
                         crate::model::DestinationState::Missing => "copy",
                         crate::model::DestinationState::UpToDate => "no-op",
+                        crate::model::DestinationState::PermissionsDiffer => {
+                            "skip (content equal, permissions differ; --overwrite repairs)"
+                        }
                         crate::model::DestinationState::UntrackedConflict => {
                             "skip (untracked conflict)"
                         }

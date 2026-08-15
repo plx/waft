@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 use crate::config::CopyStrategy;
 use crate::fs::{CopyFileRequest, FileSystem};
 use crate::git::GitBackend;
-use crate::model::{CopyOutcome, CopyPlan, CopyReport, CopyResult, CopyResultKind, PlannedEntry};
+use crate::model::{
+    CopyOutcome, CopyPlan, CopyReport, CopyResult, CopyResultKind, DestinationExpectation,
+    PlannedEntry, PublishOutcome,
+};
 
 /// Execute a copy plan, returning a report of outcomes.
 ///
@@ -27,6 +30,8 @@ pub fn execute(
 ) -> CopyReport {
     let mut results = Vec::new();
     let mut copied = 0usize;
+    let mut replaced = 0usize;
+    let mut permissions_repaired = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
     let mut up_to_date = 0usize;
@@ -35,11 +40,24 @@ pub fn execute(
         match entry {
             PlannedEntry::Copy(op) => {
                 if plan.dry_run {
-                    copied += 1;
+                    let outcome = match &op.expected_destination {
+                        DestinationExpectation::Missing => {
+                            copied += 1;
+                            CopyOutcome::Copied
+                        }
+                        DestinationExpectation::ReplaceExisting(_) => {
+                            replaced += 1;
+                            CopyOutcome::Replaced
+                        }
+                        DestinationExpectation::RepairPermissions(_) => {
+                            permissions_repaired += 1;
+                            CopyOutcome::PermissionsRepaired
+                        }
+                    };
                     results.push(CopyResult {
                         rel_path: op.rel_path.clone(),
                         kind: CopyResultKind::File,
-                        outcome: CopyOutcome::Copied,
+                        outcome,
                     });
                     continue;
                 }
@@ -79,12 +97,16 @@ pub fn execute(
                 // Release only after the filesystem primitive has returned.
                 drop(index_lock);
                 match result {
-                    Ok(()) => {
-                        copied += 1;
+                    Ok(outcome) => {
+                        match outcome {
+                            PublishOutcome::Created => copied += 1,
+                            PublishOutcome::Replaced => replaced += 1,
+                            PublishOutcome::PermissionsRepaired => permissions_repaired += 1,
+                        }
                         results.push(CopyResult {
                             rel_path: op.rel_path.clone(),
                             kind: CopyResultKind::File,
-                            outcome: CopyOutcome::Copied,
+                            outcome: outcome.into(),
                         });
                     }
                     Err(msg) => {
@@ -103,17 +125,42 @@ pub fn execute(
             PlannedEntry::Skip(_) => {
                 skipped += 1;
             }
+            PlannedEntry::Failure(entry) => {
+                // Planning could not describe this file. Report it like any
+                // other per-file failure so the run's exit status reflects it
+                // while every other entry still executes.
+                failed += 1;
+                results.push(CopyResult {
+                    rel_path: entry.rel_path.clone(),
+                    kind: CopyResultKind::File,
+                    outcome: CopyOutcome::Failed {
+                        message: format!("{}: {}", entry.rel_path, entry.message),
+                    },
+                });
+            }
         }
     }
 
     CopyReport {
         results,
         copied,
+        replaced,
+        permissions_repaired,
         failed,
         skipped,
         up_to_date,
     }
 }
+
+/// Delays between attempts to take the destination index lock.
+///
+/// An IDE, fsmonitor, or background `git status` holds `index.lock` for a few
+/// milliseconds at a time. Retrying briefly keeps those from turning into
+/// sporadic per-file failures without hiding a genuinely stuck lock.
+const INDEX_LOCK_RETRY_DELAYS: &[std::time::Duration] = &[
+    std::time::Duration::from_millis(50),
+    std::time::Duration::from_millis(100),
+];
 
 /// A cooperative Git index writer lock.
 ///
@@ -131,29 +178,47 @@ impl GitIndexLock {
         let mut lock_name = index_path.as_os_str().to_os_string();
         lock_name.push(".lock");
         let path = PathBuf::from(lock_name);
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        format!(
-                            "destination Git index is locked at {}; refusing to publish",
-                            path.display()
-                        ),
-                    )
-                } else {
-                    io::Error::new(
+
+        // Install the handlers and stage the path *before* the file exists, so
+        // arming afterwards is a single atomic store. Anything between creating
+        // the lock and arming is a window where an interrupt would leave the
+        // lock behind, and this makes that window as small as it can be.
+        interrupt_cleanup::stage(&path);
+
+        let mut attempt = 0usize;
+        let file = loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => break file,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let Some(delay) = INDEX_LOCK_RETRY_DELAYS.get(attempt) else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!(
+                                "destination Git index is locked at {} after {} attempt(s); refusing to publish",
+                                path.display(),
+                                INDEX_LOCK_RETRY_DELAYS.len() + 1
+                            ),
+                        ));
+                    };
+                    attempt += 1;
+                    std::thread::sleep(*delay);
+                }
+                Err(error) => {
+                    return Err(io::Error::new(
                         error.kind(),
                         format!(
                             "failed to lock destination Git index at {}: {error}",
                             path.display()
                         ),
-                    )
+                    ));
                 }
-            })?;
+            }
+        };
+
+        // The lock now exists and is ours, so the staged path becomes live: an
+        // interrupt during the publish window will not leave a stale lock
+        // behind for the next Git command.
+        interrupt_cleanup::arm();
         Ok(Self {
             path,
             file: Some(file),
@@ -166,7 +231,191 @@ impl Drop for GitIndexLock {
         // Windows cannot unlink an open file; close first on every platform.
         drop(self.file.take());
         let _ = fs::remove_file(&self.path);
+        // Disarm last. An interrupt arriving mid-`Drop` then still finds the
+        // path armed and unlinks it; unlinking an already-removed path is a
+        // harmless `ENOENT`, whereas disarming first would leave a window in
+        // which neither the handler nor this function removes the lock.
+        interrupt_cleanup::disarm();
     }
+}
+
+/// Signal-safe removal of the one lock file this process may hold.
+///
+/// Unix installs `SIGINT`/`SIGTERM` handlers that unlink the recorded path and
+/// then re-raise the signal under its previous disposition. On other platforms
+/// this degrades to a no-op: an interrupt can still leave a stale
+/// `.git/**/index.lock` that the user must delete.
+#[cfg(unix)]
+mod interrupt_cleanup {
+    use std::cell::UnsafeCell;
+    use std::mem::MaybeUninit;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+    use std::ptr;
+    use std::sync::Once;
+    use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
+    /// Longer than `PATH_MAX` on every platform waft supports.
+    const PATH_CAPACITY: usize = 4096;
+
+    const EMPTY: u8 = 0;
+    const WRITING: u8 = 1;
+    const STAGED: u8 = 2;
+    const ARMED: u8 = 3;
+
+    struct SignalCell<T>(UnsafeCell<T>);
+    // Access is confined to the single-threaded acquire/release path and to a
+    // signal handler that only reads once `STATE` says the value is complete.
+    unsafe impl<T> Sync for SignalCell<T> {}
+
+    static STATE: AtomicU8 = AtomicU8::new(EMPTY);
+    static PATH: SignalCell<[u8; PATH_CAPACITY]> = SignalCell(UnsafeCell::new([0; PATH_CAPACITY]));
+
+    static HANDLERS_INSTALLED: Once = Once::new();
+    static INTERRUPT_PREVIOUS_READY: AtomicBool = AtomicBool::new(false);
+    static TERMINATE_PREVIOUS_READY: AtomicBool = AtomicBool::new(false);
+    static PREVIOUS_INTERRUPT: SignalCell<MaybeUninit<libc::sigaction>> =
+        SignalCell(UnsafeCell::new(MaybeUninit::uninit()));
+    static PREVIOUS_TERMINATE: SignalCell<MaybeUninit<libc::sigaction>> =
+        SignalCell(UnsafeCell::new(MaybeUninit::uninit()));
+
+    /// Record `path` as the lock this process is about to create.
+    ///
+    /// Staging is separate from arming so that the caller can write the path
+    /// and install the handlers *before* the lock file exists, leaving only a
+    /// single atomic store between "the lock is ours" and "an interrupt will
+    /// clean it up".
+    pub(super) fn stage(path: &Path) {
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.len() >= PATH_CAPACITY {
+            // Nothing safe to record; normal `Drop` cleanup still applies, and
+            // leaving the state `EMPTY` keeps `arm` from publishing a stale
+            // path from an earlier lock.
+            STATE.store(EMPTY, Ordering::SeqCst);
+            return;
+        }
+        install_handlers();
+        STATE.store(WRITING, Ordering::SeqCst);
+        // SAFETY: `STATE` is not `ARMED`, so no handler will read the buffer
+        // while it is being written, and only one lock is live at a time.
+        unsafe {
+            let buffer = &mut *PATH.0.get();
+            buffer[..bytes.len()].copy_from_slice(bytes);
+            buffer[bytes.len()] = 0;
+        }
+        STATE.store(STAGED, Ordering::SeqCst);
+    }
+
+    /// Promote the staged path to the live lock.
+    ///
+    /// Does nothing unless a path was successfully staged, so a lock whose path
+    /// could not be recorded never adopts a previous lock's path.
+    pub(super) fn arm() {
+        let _ = STATE.compare_exchange(STAGED, ARMED, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// Stop treating any path as the live lock.
+    pub(super) fn disarm() {
+        STATE.store(EMPTY, Ordering::SeqCst);
+    }
+
+    /// Unlink the recorded lock path, if one is armed.
+    ///
+    /// Async-signal-safe: an atomic load plus `unlink(2)`.
+    pub(super) fn remove_armed_lock() {
+        if STATE.load(Ordering::SeqCst) != ARMED {
+            return;
+        }
+        // SAFETY: `ARMED` means the buffer holds a complete NUL-terminated
+        // path that stays valid until `disarm`.
+        unsafe {
+            libc::unlink(PATH.0.get().cast::<libc::c_char>());
+        }
+    }
+
+    extern "C" fn handle_interrupt(signal: libc::c_int) {
+        // This handler is only installed for signals whose previous
+        // disposition was not `SIG_IGN`, so reaching here means the process is
+        // going to act on the signal rather than sail past it. Removing the
+        // lock first is therefore safe: nothing resumes publishing afterwards.
+        remove_armed_lock();
+        // Restore what was installed before waft and let it decide the
+        // process's fate.
+        unsafe {
+            let (previous, ready) = match signal {
+                libc::SIGINT => (PREVIOUS_INTERRUPT.0.get(), &INTERRUPT_PREVIOUS_READY),
+                _ => (PREVIOUS_TERMINATE.0.get(), &TERMINATE_PREVIOUS_READY),
+            };
+            if ready.load(Ordering::SeqCst) {
+                libc::sigaction(signal, (*previous).as_ptr(), ptr::null_mut());
+            } else {
+                let mut default: libc::sigaction = std::mem::zeroed();
+                default.sa_sigaction = libc::SIG_DFL;
+                libc::sigaction(signal, &default, ptr::null_mut());
+            }
+            libc::raise(signal);
+        }
+    }
+
+    /// Installed once, from `stage`, before any lock file exists. Nothing is
+    /// armed yet, so a signal arriving during installation finds nothing to
+    /// clean up and simply follows its previous disposition.
+    fn install_handlers() {
+        HANDLERS_INSTALLED.call_once(|| unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = handle_interrupt as usize;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+
+            if install_unless_ignored(libc::SIGINT, &action, PREVIOUS_INTERRUPT.0.get()) {
+                INTERRUPT_PREVIOUS_READY.store(true, Ordering::SeqCst);
+            }
+            if install_unless_ignored(libc::SIGTERM, &action, PREVIOUS_TERMINATE.0.get()) {
+                TERMINATE_PREVIOUS_READY.store(true, Ordering::SeqCst);
+            }
+        });
+    }
+
+    /// Install `action` for `signal`, recording the previous disposition.
+    ///
+    /// A signal that the process inherited as ignored is left ignored. Handling
+    /// it would both make an inherited `SIG_IGN` observable and — because
+    /// `raise` on an ignored signal returns — let the handler delete the live
+    /// index lock and then resume publishing without it, which is exactly the
+    /// race the lock exists to prevent. `nohup` and non-job-control background
+    /// jobs make this the normal case for `SIGINT`.
+    ///
+    /// Returns whether waft's handler is now installed for `signal`.
+    pub(super) unsafe fn install_unless_ignored(
+        signal: libc::c_int,
+        action: &libc::sigaction,
+        previous: *mut MaybeUninit<libc::sigaction>,
+    ) -> bool {
+        unsafe {
+            // `sigaction` fills the old disposition before the new handler can
+            // run, so the saved value is complete by the time it is readable.
+            if libc::sigaction(signal, action, (*previous).as_mut_ptr()) != 0 {
+                return false;
+            }
+            let old = (*previous).assume_init_ref();
+            if old.sa_sigaction == libc::SIG_IGN {
+                libc::sigaction(signal, old, ptr::null_mut());
+                return false;
+            }
+            true
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod interrupt_cleanup {
+    use std::path::Path;
+
+    pub(super) fn stage(_path: &Path) {}
+
+    pub(super) fn arm() {}
+
+    pub(super) fn disarm() {}
 }
 
 fn ensure_destination_untracked(
@@ -196,7 +445,7 @@ fn execute_copy(
     fs: &dyn FileSystem,
     strategy: CopyStrategy,
     before_publish: &mut dyn FnMut() -> io::Result<()>,
-) -> Result<(), String> {
+) -> Result<PublishOutcome, String> {
     fs.copy_file(
         CopyFileRequest {
             source_root,
@@ -208,9 +457,7 @@ fn execute_copy(
         },
         before_publish,
     )
-    .map_err(|e| format!("{}: failed to copy: {e}", op.rel_path))?;
-
-    Ok(())
+    .map_err(|e| format!("{}: failed to copy: {e}", op.rel_path))
 }
 
 /// Render a copy report to stderr.
@@ -221,27 +468,46 @@ pub fn render_report(report: &CopyReport, quiet: bool) {
                 // Quiet suppresses routine progress, never actionable errors.
                 eprintln!("FAILED: {message}");
             }
-            CopyOutcome::Copied if !quiet => match &result.kind {
+            _ if quiet => {}
+            CopyOutcome::Copied => match &result.kind {
+                CopyResultKind::File => eprintln!("copied: {}", result.rel_path),
+            },
+            CopyOutcome::Replaced => match &result.kind {
+                CopyResultKind::File => eprintln!("replaced: {}", result.rel_path),
+            },
+            CopyOutcome::PermissionsRepaired => match &result.kind {
                 CopyResultKind::File => {
-                    eprintln!("copied: {}", result.rel_path);
+                    eprintln!("repaired permissions: {}", result.rel_path)
                 }
             },
-            CopyOutcome::Copied => {}
         }
     }
 
     if !quiet {
-        eprintln!(
-            "{} copied, {} failed, {} skipped, {} up-to-date",
-            report.copied, report.failed, report.skipped, report.up_to_date
-        );
+        // The replace/repair clauses only appear when they happened, so the
+        // common run keeps its familiar one-line summary.
+        let mut summary = format!("{} copied", report.copied);
+        if report.replaced > 0 {
+            summary.push_str(&format!(", {} replaced", report.replaced));
+        }
+        if report.permissions_repaired > 0 {
+            summary.push_str(&format!(
+                ", {} permissions repaired",
+                report.permissions_repaired
+            ));
+        }
+        summary.push_str(&format!(
+            ", {} failed, {} skipped, {} up-to-date",
+            report.failed, report.skipped, report.up_to_date
+        ));
+        eprintln!("{summary}");
     }
 }
 
 /// Check if the copy report has any failures, returning an appropriate exit status.
 pub fn report_has_failures(report: &CopyReport) -> Option<(usize, usize)> {
     if report.failed > 0 {
-        Some((report.failed, report.copied + report.failed))
+        Some((report.failed, report.succeeded() + report.failed))
     } else {
         None
     }
@@ -401,7 +667,7 @@ mod tests {
             &self,
             request: CopyFileRequest<'_>,
             before_publish: &mut dyn FnMut() -> io::Result<()>,
-        ) -> io::Result<()> {
+        ) -> io::Result<PublishOutcome> {
             if self.fail_copy_file {
                 return Err(io::Error::other("copy failed"));
             }
@@ -432,7 +698,11 @@ mod tests {
                 dst,
                 request.expected_destination.clone(),
             ));
-            Ok(())
+            Ok(match request.expected_destination {
+                DestinationExpectation::Missing => PublishOutcome::Created,
+                DestinationExpectation::ReplaceExisting(_) => PublishOutcome::Replaced,
+                DestinationExpectation::RepairPermissions(_) => PublishOutcome::PermissionsRepaired,
+            })
         }
     }
 
@@ -581,8 +851,201 @@ mod tests {
         assert!(message.contains("became tracked"));
     }
 
+    /// Serializes the tests that take an index lock or inspect the
+    /// interrupt-cleanup state.
+    ///
+    /// That state is process-global by necessity — a signal handler cannot
+    /// consult thread-local storage — and a real run only ever has one lock
+    /// live at a time. Test threads have to reproduce that discipline
+    /// explicitly instead of racing each other through it.
+    fn one_lock_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SERIALIZE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn index_lock_retries_past_a_transient_writer() {
+        let _serialized = one_lock_at_a_time();
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        let lock = temp.path().join("index.lock");
+        // Stand in for an IDE or fsmonitor holding the index briefly.
+        fs::write(&lock, b"transient writer\n").unwrap();
+        let releaser = {
+            let lock = lock.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                fs::remove_file(&lock).unwrap();
+            })
+        };
+
+        let Ok(acquired) = GitIndexLock::acquire(&index) else {
+            panic!("retry should win the lock");
+        };
+        releaser.join().unwrap();
+        assert!(lock.exists());
+        drop(acquired);
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn index_lock_gives_a_clear_failure_after_exhausting_retries() {
+        let _serialized = one_lock_at_a_time();
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        let lock = temp.path().join("index.lock");
+        fs::write(&lock, b"held by concurrent Git\n").unwrap();
+
+        let started = std::time::Instant::now();
+        let Err(error) = GitIndexLock::acquire(&index) else {
+            panic!("a permanently held lock must not be acquired");
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            error
+                .to_string()
+                .contains("destination Git index is locked")
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(140),
+            "acquisition should retry for roughly 150ms"
+        );
+        assert!(
+            lock.exists(),
+            "waft must never remove another process's lock"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_cleanup_removes_only_the_armed_lock() {
+        let _serialized = one_lock_at_a_time();
+        let temp = tempfile::TempDir::new().unwrap();
+        let armed = temp.path().join("index.lock");
+        fs::write(&armed, b"waft\n").unwrap();
+
+        // The signal handler is a thin wrapper around this; calling it
+        // directly is the only way to exercise it without killing the test
+        // process.
+        interrupt_cleanup::stage(&armed);
+        interrupt_cleanup::arm();
+        interrupt_cleanup::remove_armed_lock();
+        assert!(!armed.exists(), "an interrupt must not leave a stale lock");
+
+        fs::write(&armed, b"someone else\n").unwrap();
+        interrupt_cleanup::disarm();
+        interrupt_cleanup::remove_armed_lock();
+        assert!(
+            armed.exists(),
+            "cleanup must do nothing once the lock is released"
+        );
+
+        // Staging happens before the lock file is created, when the path may
+        // still belong to whoever currently holds it.
+        interrupt_cleanup::stage(&armed);
+        interrupt_cleanup::remove_armed_lock();
+        assert!(
+            armed.exists(),
+            "a staged but unacquired lock is not waft's to remove"
+        );
+        fs::remove_file(&armed).unwrap();
+    }
+
+    /// A signal inherited as ignored must stay ignored. If waft handled it,
+    /// `raise` would return and the handler would fall back into the publish
+    /// window having already deleted the index lock it is still relying on.
+    ///
+    /// `SIGUSR2` stands in for `SIGINT`/`SIGTERM` so the test never changes the
+    /// dispositions the test process actually runs under.
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_handlers_leave_an_inherited_ignore_alone() {
+        extern "C" fn never_called(_signal: libc::c_int) {}
+
+        unsafe fn disposition(signal: libc::c_int) -> libc::sighandler_t {
+            unsafe {
+                let mut current: std::mem::MaybeUninit<libc::sigaction> =
+                    std::mem::MaybeUninit::uninit();
+                assert_eq!(
+                    libc::sigaction(signal, std::ptr::null(), current.as_mut_ptr()),
+                    0
+                );
+                current.assume_init().sa_sigaction
+            }
+        }
+
+        unsafe fn set(signal: libc::c_int, handler: libc::sighandler_t) {
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = handler;
+                libc::sigemptyset(&mut action.sa_mask);
+                assert_eq!(libc::sigaction(signal, &action, std::ptr::null_mut()), 0);
+            }
+        }
+
+        unsafe {
+            let mut waft_handler: libc::sigaction = std::mem::zeroed();
+            waft_handler.sa_sigaction = never_called as usize;
+            libc::sigemptyset(&mut waft_handler.sa_mask);
+            let mut previous: std::mem::MaybeUninit<libc::sigaction> =
+                std::mem::MaybeUninit::uninit();
+
+            set(libc::SIGUSR2, libc::SIG_IGN);
+            let installed = interrupt_cleanup::install_unless_ignored(
+                libc::SIGUSR2,
+                &waft_handler,
+                &raw mut previous,
+            );
+            assert!(!installed, "an inherited SIG_IGN must not be taken over");
+            assert_eq!(
+                disposition(libc::SIGUSR2),
+                libc::SIG_IGN,
+                "the ignore must be put back exactly as it was"
+            );
+
+            set(libc::SIGUSR2, libc::SIG_DFL);
+            let installed = interrupt_cleanup::install_unless_ignored(
+                libc::SIGUSR2,
+                &waft_handler,
+                &raw mut previous,
+            );
+            assert!(installed, "a default disposition is waft's to handle");
+            assert_eq!(disposition(libc::SIGUSR2), never_called as usize);
+
+            set(libc::SIGUSR2, libc::SIG_DFL);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_lock_arms_and_disarms_interrupt_cleanup() {
+        let _serialized = one_lock_at_a_time();
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        let lock = temp.path().join("index.lock");
+
+        let Ok(held) = GitIndexLock::acquire(&index) else {
+            panic!("an unlocked index should be lockable");
+        };
+        assert!(lock.exists());
+        // While held, an interrupt would remove exactly this path.
+        interrupt_cleanup::remove_armed_lock();
+        assert!(!lock.exists());
+        drop(held);
+
+        // After release nothing is armed, so a later interrupt is inert.
+        fs::write(&lock, b"a later Git writer\n").unwrap();
+        interrupt_cleanup::remove_armed_lock();
+        assert!(lock.exists());
+        fs::remove_file(&lock).unwrap();
+    }
+
     #[test]
     fn execute_holds_destination_index_lock_through_publication() {
+        let _serialized = one_lock_at_a_time();
         let temp = tempfile::TempDir::new().unwrap();
         let index = temp.path().join("index");
         let lock = temp.path().join("index.lock");

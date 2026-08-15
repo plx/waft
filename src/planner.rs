@@ -8,11 +8,11 @@ use std::collections::HashSet;
 
 use crate::eligibility_groups::EligibilityGroups;
 use crate::error::Result;
-use crate::fs::FileSystem;
+use crate::fs::{FileComparison, FileSystem};
 use crate::git::GitBackend;
 use crate::model::{
-    CopyOp, CopyPlan, DestinationExpectation, DestinationState, NoOpEntry, NoOpReason,
-    PlannedEntry, RepoContext, SkipEntry, SkipReason, ValidationReport,
+    CopyOp, CopyPlan, DestinationExpectation, DestinationState, FailureEntry, NoOpEntry,
+    NoOpReason, PlannedEntry, RepoContext, SkipEntry, SkipReason, ValidationReport,
 };
 use crate::path::RepoRelPath;
 
@@ -98,12 +98,22 @@ pub fn plan(
                         reason: SkipReason::UnsafePath,
                     }));
                 } else {
-                    let expected_source =
-                        fs.file_snapshot(&src_abs)
-                            .map_err(|source| crate::error::Error::Io {
-                                context: format!("failed to snapshot source {}", src_abs.display()),
-                                source,
-                            })?;
+                    // A source that vanished or became unreadable between
+                    // selection and snapshotting is one file's problem, not the
+                    // run's. Record it as a per-file failure and keep planning.
+                    let expected_source = match fs.file_snapshot(&src_abs) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            entries.push(PlannedEntry::Failure(FailureEntry {
+                                rel_path,
+                                message: format!(
+                                    "failed to snapshot source {}: {error}",
+                                    src_abs.display()
+                                ),
+                            }));
+                            continue;
+                        }
+                    };
                     entries.push(PlannedEntry::Copy(CopyOp {
                         rel_path,
                         src_abs,
@@ -119,19 +129,69 @@ pub fn plan(
                     reason: NoOpReason::UpToDate,
                 }));
             }
-            DestinationState::UntrackedConflict => {
-                if overwrite {
-                    // POSIX has no atomic "replace this pathname only if it
-                    // still names inode X" operation. Reject the complete plan
-                    // before execution rather than risk clobbering a file that
-                    // changed after a best-effort snapshot.
-                    return Err(crate::error::Error::UnsafeOverwrite { path: dst_abs });
-                } else {
+            DestinationState::UntrackedConflict | DestinationState::PermissionsDiffer => {
+                let permissions_only = dest_state == DestinationState::PermissionsDiffer;
+                if !overwrite {
                     entries.push(PlannedEntry::Skip(SkipEntry {
                         rel_path,
-                        reason: SkipReason::UntrackedConflict,
+                        reason: if permissions_only {
+                            SkipReason::PermissionsDiffer
+                        } else {
+                            SkipReason::UntrackedConflict
+                        },
                     }));
+                    continue;
                 }
+
+                // Both snapshots pin the exact bytes and mode the plan was
+                // built against. Execution re-opens each one and refuses to act
+                // unless it still matches, so a file that changes in between is
+                // a per-file failure rather than a clobber.
+                let expected_source = match fs.file_snapshot(&src_abs) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        entries.push(PlannedEntry::Failure(FailureEntry {
+                            rel_path,
+                            message: format!(
+                                "failed to snapshot source {}: {error}",
+                                src_abs.display()
+                            ),
+                        }));
+                        continue;
+                    }
+                };
+                let expected_dest_snapshot = match fs.file_snapshot(&dst_abs) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        entries.push(PlannedEntry::Failure(FailureEntry {
+                            rel_path,
+                            message: format!(
+                                "failed to snapshot destination {}: {error}",
+                                dst_abs.display()
+                            ),
+                        }));
+                        continue;
+                    }
+                };
+                // Classification proved byte equality, but that proof and the
+                // two snapshots above are separate reads. Only keep the repair
+                // intent if the pinned snapshots themselves still agree on
+                // content; otherwise something was rewritten in between and
+                // this is an ordinary replacement.
+                let expected_destination = if permissions_only
+                    && expected_dest_snapshot.content_matches(&expected_source)
+                {
+                    DestinationExpectation::RepairPermissions(expected_dest_snapshot)
+                } else {
+                    DestinationExpectation::ReplaceExisting(expected_dest_snapshot)
+                };
+                entries.push(PlannedEntry::Copy(CopyOp {
+                    rel_path,
+                    src_abs,
+                    dst_abs,
+                    expected_source,
+                    expected_destination,
+                }));
             }
             DestinationState::TrackedConflict => {
                 entries.push(PlannedEntry::Skip(SkipEntry {
@@ -194,50 +254,110 @@ pub(crate) fn classify_destination(
 
     // It's a regular file — compare content and relevant permissions without
     // retaining both complete files in memory.
-    match fs.files_equal(src_abs, dst_abs) {
-        Ok(true) => DestinationState::UpToDate,
-        Ok(false) | Err(_) => DestinationState::UntrackedConflict,
+    match fs.compare_files(src_abs, dst_abs) {
+        Ok(FileComparison::Equal) => DestinationState::UpToDate,
+        Ok(FileComparison::PermissionsDiffer) => DestinationState::PermissionsDiffer,
+        Ok(FileComparison::ContentDiffers) | Err(_) => DestinationState::UntrackedConflict,
     }
 }
 
-/// Render a dry-run plan to stdout.
-pub fn render_dry_run(plan: &CopyPlan) {
+/// The per-file planning failures in a plan, as `(failed, total)`.
+///
+/// This mirrors [`crate::executor::report_has_failures`] so a dry run reports
+/// and exits exactly like the run it is describing: a file that planning could
+/// not describe is a failure whether or not anything is written.
+pub fn planning_failures(plan: &CopyPlan) -> Option<(usize, usize)> {
+    let failed = plan
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry, PlannedEntry::Failure(_)))
+        .count();
+    if failed == 0 {
+        return None;
+    }
+    let actionable = plan
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry, PlannedEntry::Copy(_)))
+        .count();
+    Some((failed, failed + actionable))
+}
+
+/// Render a dry-run plan.
+///
+/// The plan itself goes to stdout and is suppressed by `quiet`; per-file
+/// failures go to stderr unconditionally, because `quiet` suppresses routine
+/// progress, never the reason a run is about to exit nonzero.
+pub fn render_dry_run(plan: &CopyPlan, quiet: bool) {
+    let mut copies = 0usize;
+    let mut replacements = 0usize;
+    let mut repairs = 0usize;
+    let mut skips = 0usize;
+    let mut noops = 0usize;
+    let mut failures = 0usize;
+
     for entry in &plan.entries {
         match entry {
-            PlannedEntry::Copy(op) => {
-                println!("copy: {}", op.rel_path);
-            }
+            PlannedEntry::Copy(op) => match &op.expected_destination {
+                DestinationExpectation::Missing => {
+                    copies += 1;
+                    if !quiet {
+                        println!("copy: {}", op.rel_path);
+                    }
+                }
+                DestinationExpectation::ReplaceExisting(_) => {
+                    replacements += 1;
+                    if !quiet {
+                        println!("replace: {} (untracked conflict)", op.rel_path);
+                    }
+                }
+                DestinationExpectation::RepairPermissions(_) => {
+                    repairs += 1;
+                    if !quiet {
+                        println!(
+                            "repair permissions: {} (content equal, permissions differ)",
+                            op.rel_path
+                        );
+                    }
+                }
+            },
             PlannedEntry::NoOp(entry) => {
-                println!("no-op: {} ({:?})", entry.rel_path, entry.reason);
+                noops += 1;
+                if !quiet {
+                    println!("no-op: {} ({:?})", entry.rel_path, entry.reason);
+                }
             }
             PlannedEntry::Skip(entry) => {
-                println!("skip: {} ({:?})", entry.rel_path, entry.reason);
+                skips += 1;
+                if !quiet {
+                    println!("skip: {} ({})", entry.rel_path, entry.reason);
+                }
+            }
+            PlannedEntry::Failure(entry) => {
+                failures += 1;
+                // Same channel and prefix as an executed run's failures, so a
+                // dry run that will exit nonzero says so even under `--quiet`.
+                eprintln!("FAILED: {}: {}", entry.rel_path, entry.message);
             }
         }
     }
 
-    let copies = plan
-        .entries
-        .iter()
-        .fold(0usize, |count, entry| match entry {
-            PlannedEntry::Copy(_) => count + 1,
-            _ => count,
-        });
-    let skips = plan
-        .entries
-        .iter()
-        .filter(|e| matches!(e, PlannedEntry::Skip(_)))
-        .count();
-    let noops = plan
-        .entries
-        .iter()
-        .filter(|e| matches!(e, PlannedEntry::NoOp(_)))
-        .count();
+    if quiet {
+        return;
+    }
 
-    eprintln!(
-        "dry run: {} to copy, {} to skip, {} up-to-date",
-        copies, skips, noops
-    );
+    let mut summary = format!("dry run: {copies} to copy");
+    if replacements > 0 {
+        summary.push_str(&format!(", {replacements} to replace"));
+    }
+    if repairs > 0 {
+        summary.push_str(&format!(", {repairs} permission repair(s)"));
+    }
+    summary.push_str(&format!(", {skips} to skip, {noops} up-to-date"));
+    if failures > 0 {
+        summary.push_str(&format!(", {failures} failed"));
+    }
+    eprintln!("{summary}");
 }
 
 #[cfg(test)]
@@ -327,7 +447,7 @@ mod tests {
             &self,
             request: crate::fs::CopyFileRequest<'_>,
             _before_publish: &mut dyn FnMut() -> io::Result<()>,
-        ) -> io::Result<()> {
+        ) -> io::Result<crate::model::PublishOutcome> {
             let src = request.rel_path.to_path(request.source_root);
             let dst = request.rel_path.to_path(request.destination_root);
             let data = self
@@ -336,8 +456,13 @@ mod tests {
                 .get(&src)
                 .cloned()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "not found"))?;
+            let replacing = self.files.borrow().contains_key(&dst);
             self.files.borrow_mut().insert(dst, data);
-            Ok(())
+            Ok(if replacing {
+                crate::model::PublishOutcome::Replaced
+            } else {
+                crate::model::PublishOutcome::Created
+            })
         }
     }
 
@@ -519,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_untracked_conflict_fails_closed_with_overwrite() {
+    fn plan_untracked_conflict_becomes_a_snapshot_pinned_replacement_with_overwrite() {
         let fs = MockFs::new();
         fs.add_file("/source/.env", b"source");
         fs.add_file("/dest/.env", b"different");
@@ -528,7 +653,7 @@ mod tests {
         let ctx = test_ctx();
         let paths = vec![RepoRelPath::from_normalized(".env".to_string())];
 
-        let error = plan(
+        let plan = plan(
             &ctx,
             ValidationReport::default(),
             EligibilityGroups::from_files(paths),
@@ -537,12 +662,97 @@ mod tests {
             true,
             false,
         )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            crate::error::Error::UnsafeOverwrite { path }
-                if path == PathBuf::from("/dest/.env")
-        ));
+        .unwrap();
+
+        assert_eq!(plan.entries.len(), 1);
+        let PlannedEntry::Copy(op) = &plan.entries[0] else {
+            panic!("expected a planned replacement, got {:?}", plan.entries[0]);
+        };
+        let DestinationExpectation::ReplaceExisting(snapshot) = &op.expected_destination else {
+            panic!("expected a replacement expectation");
+        };
+        // The plan pins the destination it observed, so execution can refuse
+        // to act on anything else.
+        assert_eq!(snapshot, &fs.file_snapshot(&op.dst_abs).unwrap());
+    }
+
+    #[test]
+    fn plan_source_that_vanished_fails_only_that_file() {
+        struct VanishingSourceFs {
+            inner: MockFs,
+        }
+
+        impl FileSystem for VanishingSourceFs {
+            fn exists(&self, path: &Path) -> bool {
+                self.inner.exists(path)
+            }
+            fn is_file(&self, path: &Path) -> bool {
+                self.inner.is_file(path)
+            }
+            fn is_dir(&self, path: &Path) -> bool {
+                self.inner.is_dir(path)
+            }
+            fn is_symlink(&self, path: &Path) -> bool {
+                self.inner.is_symlink(path)
+            }
+            fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+                self.inner.read(path)
+            }
+            fn parent_has_symlink(&self, path: &Path) -> bool {
+                self.inner.parent_has_symlink(path)
+            }
+            fn file_snapshot(&self, path: &Path) -> io::Result<crate::model::FileSnapshot> {
+                if path == Path::new("/source/gone.env") {
+                    // Simulates the source disappearing between selection and
+                    // snapshotting.
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "vanished"));
+                }
+                self.inner.file_snapshot(path)
+            }
+            fn copy_file(
+                &self,
+                request: crate::fs::CopyFileRequest<'_>,
+                before_publish: &mut dyn FnMut() -> io::Result<()>,
+            ) -> io::Result<crate::model::PublishOutcome> {
+                self.inner.copy_file(request, before_publish)
+            }
+        }
+
+        let inner = MockFs::new();
+        inner.add_file("/source/gone.env", b"gone");
+        inner.add_file("/source/kept.env", b"kept");
+        let fs = VanishingSourceFs { inner };
+
+        let git = MockPlannerGit::new(vec![]);
+        let ctx = test_ctx();
+        let paths = vec![rel("gone.env"), rel("kept.env")];
+
+        let plan = plan(
+            &ctx,
+            ValidationReport::default(),
+            EligibilityGroups::from_files(paths),
+            &git,
+            &fs,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(plan.entries.len(), 2);
+        match &plan.entries[0] {
+            PlannedEntry::Failure(failure) => {
+                assert_eq!(failure.rel_path.as_str(), "gone.env");
+                assert!(failure.message.contains("vanished"), "{failure:?}");
+            }
+            other => panic!("expected a per-file failure, got {other:?}"),
+        }
+        assert!(matches!(plan.entries[1], PlannedEntry::Copy(_)));
+
+        let report =
+            crate::executor::execute(&plan, &fs, &git, crate::config::CopyStrategy::SimpleCopy);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.copied, 1);
+        assert!(crate::executor::report_has_failures(&report).is_some());
     }
 
     #[test]

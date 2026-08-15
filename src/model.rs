@@ -98,6 +98,9 @@ pub enum PlannedEntry {
     NoOp(NoOpEntry),
     /// A file that will be skipped.
     Skip(SkipEntry),
+    /// A file that could not be planned. Reported and counted as a per-file
+    /// failure so one unreadable entry cannot abort an otherwise valid run.
+    Failure(FailureEntry),
 }
 
 impl PlannedEntry {
@@ -107,8 +110,18 @@ impl PlannedEntry {
             PlannedEntry::Copy(op) => &op.rel_path,
             PlannedEntry::NoOp(entry) => &entry.rel_path,
             PlannedEntry::Skip(entry) => &entry.rel_path,
+            PlannedEntry::Failure(entry) => &entry.rel_path,
         }
     }
+}
+
+/// A file whose plan could not be produced.
+#[derive(Debug)]
+pub struct FailureEntry {
+    /// Repo-relative path.
+    pub rel_path: RepoRelPath,
+    /// Human-readable description of why planning failed for this file.
+    pub message: String,
 }
 
 /// Details for a file that will be copied.
@@ -127,13 +140,44 @@ pub struct CopyOp {
 }
 
 /// Destination state an executor must still observe before publishing a copy.
+///
+/// Every variant that names an existing destination carries the exact state
+/// observed while planning. Execution re-opens the destination and refuses to
+/// touch it unless it still matches that state bit for bit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DestinationExpectation {
     /// The destination did not exist during planning and must not be replaced.
     Missing,
-    /// A legacy planned overwrite state. Real execution rejects this state;
-    /// existing pathname replacement cannot be made race-safe portably.
-    ExistingUntracked(FileSnapshot),
+    /// The destination existed, was untracked, and its content differed from
+    /// the source. `--overwrite` replaces it by atomic exchange.
+    ReplaceExisting(FileSnapshot),
+    /// The destination existed, was untracked, and its content matched the
+    /// source while its permission bits did not. `--overwrite` repairs the
+    /// permissions in place without rewriting content.
+    RepairPermissions(FileSnapshot),
+}
+
+impl DestinationExpectation {
+    /// The planning-time snapshot of an existing destination, if any.
+    pub(crate) fn existing_snapshot(&self) -> Option<&FileSnapshot> {
+        match self {
+            DestinationExpectation::Missing => None,
+            DestinationExpectation::ReplaceExisting(snapshot)
+            | DestinationExpectation::RepairPermissions(snapshot) => Some(snapshot),
+        }
+    }
+}
+
+/// What a successful publication actually did to the destination pathname.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishOutcome {
+    /// A destination that did not exist was created.
+    Created,
+    /// An existing destination's content was replaced.
+    Replaced,
+    /// An existing destination's permission bits were repaired; its content
+    /// already matched the source and was never rewritten.
+    PermissionsRepaired,
 }
 
 /// A stable, bounded-memory fingerprint of a regular file.
@@ -162,6 +206,18 @@ impl FileSnapshot {
             permissions,
             identity,
         }
+    }
+
+    /// Whether two snapshots describe the same bytes, ignoring permissions and
+    /// identity.
+    ///
+    /// This is what makes "content equal, permissions differ" checkable at
+    /// publication time: planning proves byte equality with a full comparison,
+    /// but the source and destination snapshots are separate reads. Carrying
+    /// the equality forward as comparable data lets the publication path
+    /// re-establish it instead of trusting a classification made earlier.
+    pub(crate) fn content_matches(&self, other: &FileSnapshot) -> bool {
+        self.len == other.len && self.content_fingerprint == other.content_fingerprint
     }
 }
 
@@ -195,6 +251,10 @@ pub struct SkipEntry {
 pub enum SkipReason {
     /// Destination has an untracked file that differs and must be preserved.
     UntrackedConflict,
+    /// Destination content already matches the source but its permission bits
+    /// do not. This is the state left behind by pre-`0.1` waft builds, which
+    /// always published mode `0600`.
+    PermissionsDiffer,
     /// Destination path is tracked in the destination worktree.
     TrackedConflict,
     /// Destination exists but is not a regular file.
@@ -203,6 +263,31 @@ pub enum SkipReason {
     UnsafePath,
     /// Source is not a regular file.
     UnsupportedSourceType,
+}
+
+impl SkipReason {
+    /// A short human-readable phrase naming this reason, including the remedy
+    /// where one exists.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            SkipReason::UntrackedConflict => {
+                "untracked conflict; --overwrite replaces the destination"
+            }
+            SkipReason::PermissionsDiffer => {
+                "content equal, permissions differ; --overwrite repairs the permissions"
+            }
+            SkipReason::TrackedConflict => "tracked conflict",
+            SkipReason::TypeConflict => "type conflict",
+            SkipReason::UnsafePath => "unsafe path",
+            SkipReason::UnsupportedSourceType => "unsupported source type",
+        }
+    }
+}
+
+impl std::fmt::Display for SkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.describe())
+    }
 }
 
 // --- Destination state ---
@@ -214,7 +299,11 @@ pub enum DestinationState {
     Missing,
     /// Destination content and relevant permissions match the source.
     UpToDate,
-    /// Destination has an untracked file that differs.
+    /// Destination content matches the source but its permission bits differ.
+    /// Distinct from [`DestinationState::UntrackedConflict`] because
+    /// `--overwrite` repairs it without rewriting any content.
+    PermissionsDiffer,
+    /// Destination has an untracked file whose content differs.
     UntrackedConflict,
     /// Destination path is tracked.
     TrackedConflict,
@@ -334,8 +423,13 @@ pub enum CopyResultKind {
 /// Outcome of a single copy attempt.
 #[derive(Debug)]
 pub enum CopyOutcome {
-    /// File was successfully copied.
+    /// File was successfully published to a destination that did not exist.
     Copied,
+    /// An existing untracked destination was atomically replaced.
+    Replaced,
+    /// An existing untracked destination's permission bits were repaired; its
+    /// content already matched the source.
+    PermissionsRepaired,
     /// Copy failed with an error.
     Failed {
         /// Description of the failure.
@@ -343,17 +437,39 @@ pub enum CopyOutcome {
     },
 }
 
+impl From<PublishOutcome> for CopyOutcome {
+    fn from(outcome: PublishOutcome) -> Self {
+        match outcome {
+            PublishOutcome::Created => CopyOutcome::Copied,
+            PublishOutcome::Replaced => CopyOutcome::Replaced,
+            PublishOutcome::PermissionsRepaired => CopyOutcome::PermissionsRepaired,
+        }
+    }
+}
+
 /// Summary of a copy execution run.
 #[derive(Debug)]
 pub struct CopyReport {
     /// Results for each file.
     pub results: Vec<CopyResult>,
-    /// Number of files successfully copied.
+    /// Number of files successfully created at a missing destination.
     pub copied: usize,
+    /// Number of existing destinations replaced under `--overwrite`.
+    pub replaced: usize,
+    /// Number of existing destinations whose permissions were repaired.
+    pub permissions_repaired: usize,
     /// Number of files that failed.
     pub failed: usize,
     /// Number of files skipped.
     pub skipped: usize,
     /// Number of files that were already up to date.
     pub up_to_date: usize,
+}
+
+impl CopyReport {
+    /// Total number of destinations this run successfully published or
+    /// repaired.
+    pub fn succeeded(&self) -> usize {
+        self.copied + self.replaced + self.permissions_repaired
+    }
 }

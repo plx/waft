@@ -398,8 +398,9 @@ impl FileSystem for BenchFs {
         &self,
         _request: CopyFileRequest<'_>,
         before_publish: &mut dyn FnMut() -> io::Result<()>,
-    ) -> io::Result<()> {
-        before_publish()
+    ) -> io::Result<waft::model::PublishOutcome> {
+        before_publish()?;
+        Ok(waft::model::PublishOutcome::Created)
     }
 }
 

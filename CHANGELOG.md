@@ -20,8 +20,32 @@ Until the first supported release, changes remain under `Unreleased`.
 - Anchor Unix source and destination traversal to directory descriptors,
   refuse symlink components, verify the planned source state, and publish with
   descriptor-relative `NOREPLACE`.
-- Retain `--overwrite` parsing for compatibility while failing before mutation
-  when it would replace an existing untracked pathname.
+- Replace destinations under `--overwrite` only after re-opening them through
+  the anchored parent with `O_NOFOLLOW` and matching device, inode, length,
+  content fingerprint, and mode against the planning snapshot. Replacement is
+  an atomic exchange whose swapped-out file is re-checked against that same
+  snapshot before it is unlinked, so an in-place rewrite of the same inode is
+  detected rather than clobbered.
+- Repair destination permissions only when the pinned source and destination
+  snapshots agree on content, so a destination rewritten between the byte
+  comparison that classified it and the snapshot that pinned it is never
+  `chmod`-ed and reported as a successful repair while holding content that is
+  not the source's.
+- Never unlink a file waft has not just proven is the one it planned against.
+  If a recovery step fails and strands another writer's file under a
+  `.waft-copy-*` name, or strands the prepared replacement after the previous
+  destination is already gone, the file is kept and named in the per-file
+  error instead of being cleaned up.
+- Remove `.waft-copy-*` staging files from a drop guard so an unwinding panic
+  during publication cannot leave them behind.
+- Unlink the live Git `index.lock` from `SIGINT`/`SIGTERM` handlers on Unix
+  before re-raising under the previous disposition, so an interrupt during the
+  publish window cannot leave a stale lock. A signal the process inherited as
+  ignored (`nohup`, background jobs without job control) is left ignored:
+  handling it would delete the live lock and then return into the publish
+  window without it. Windows and other non-Unix targets have no such handler;
+  an interrupt there can still leave `.git/**/index.lock` behind for the user
+  to delete.
 - Install the optional Git hook and a reviewed waft binary outside checked-out
   worktrees, while chaining only regular-file trusted hooks, rejecting
   per-worktree overrides, and ignoring ambient executable overrides at run
@@ -30,6 +54,37 @@ Until the first supported release, changes remain under `Unreleased`.
 
 ### Changed
 
+- **`--overwrite` now replaces files instead of aborting the run.** The
+  previous behavior — rejecting the entire plan with an "cannot safely
+  replace" error the moment any untracked conflict was found — is gone,
+  together with the `UnsafeOverwrite` error variant. `--overwrite` now
+  performs a race-safe per-file replacement, and a conflict it cannot prove
+  safe is a per-file failure rather than a whole-run abort. Tracked
+  destinations remain untouchable under every flag combination. waft has never
+  had a release, so no published behavior is being broken.
+- Classify "destination content equal, permissions differ" separately from a
+  generic untracked conflict in plans, `--dry-run`, `info`, `list`, and skip
+  reporting, and name `--overwrite` as its remedy. This is the migration path
+  for files published by earlier waft builds, which always wrote mode `0600`
+  and would otherwise be permanent conflicts.
+- Report replacements and permission repairs distinctly from creations
+  (`replaced:` and `repaired permissions:` lines, with matching summary
+  clauses that appear only when non-zero).
+- Treat an unreadable or vanished source as a per-file failure during planning
+  instead of aborting the whole run with nothing copied. The failure is
+  reported, counted, and reflected in the exit status; every other file still
+  proceeds. `--dry-run` reports the same failures on stderr — including under
+  `--quiet` — and exits nonzero like the run it describes.
+- Update `scripts/self-test.sh` to pin the new `--overwrite` contract:
+  untracked conflicts are replaced and the run succeeds, while a tracked
+  destination is still never written.
+- Retry destination Git index-lock acquisition three times over roughly 150ms
+  so a transient index writer (IDE, fsmonitor, background `git status`) is not
+  a sporadic per-file failure. A lock still held after that fails the file with
+  an explicit message and is never removed.
+- Fall back to the `linkat` publication path on `ENOTSUP`/`EOPNOTSUPP` as well
+  as `ENOSYS`/`EINVAL`, fixing hard per-file failures on macOS SMB, NFS, and
+  exFAT destinations.
 - Use one eligibility calculation for copy, list, info, and dry-run behavior.
 - Make the gix and Git CLI backends share selection semantics and exercise all
   compatibility profiles through both.

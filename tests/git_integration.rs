@@ -364,6 +364,39 @@ fn list_verbose_dest_untracked_conflict_shows_skip() {
         ));
 }
 
+#[cfg(unix)]
+#[test]
+fn list_verbose_dest_permissions_differ_shows_repair_remedy() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (main_dir, wt_dir) = setup_list_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=same");
+    write_file(&wt_path, ".env", "SECRET=same");
+    std::fs::set_permissions(
+        main_dir.path().join(".env"),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    std::fs::set_permissions(wt_path.join(".env"), std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    waft()
+        .args([
+            "list",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+            "-v",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "action: skip (content equal, permissions differ; --overwrite repairs)",
+        ));
+}
+
 #[test]
 fn list_verbose_dest_tracked_conflict_shows_skip() {
     let (main_dir, wt_dir) = setup_list_worktrees();
