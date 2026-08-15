@@ -30,7 +30,14 @@ Until the first supported release, changes remain under `Unreleased`.
   snapshots agree on content, so a destination rewritten between the byte
   comparison that classified it and the snapshot that pinned it is never
   `chmod`-ed and reported as a successful repair while holding content that is
-  not the source's.
+  not the source's. The pinned content is required once more after the `chmod`
+  lands: a destination rewritten in that last window has the mode it was found
+  with restored and is reported as a per-file failure instead of a repair.
+- Report a replacement whose swapped-out file could not be removed as a
+  per-file failure naming the full `.waft-copy-*` path it was left under,
+  instead of returning success. The destination holds the planned content, but
+  the file it replaced is still on disk and may still hold the secrets that
+  were there before.
 - Never unlink a file waft has not just proven is the one it planned against.
   If a recovery step fails and strands another writer's file under a
   `.waft-copy-*` name, or strands the prepared replacement after the previous
@@ -67,6 +74,13 @@ Until the first supported release, changes remain under `Unreleased`.
   reporting, and name `--overwrite` as its remedy. This is the migration path
   for files published by earlier waft builds, which always wrote mode `0600`
   and would otherwise be permanent conflicts.
+- Decide whether `--overwrite` can act on an existing destination while
+  planning. On platforms without the anchored replacement path — currently
+  every non-Unix target — such a file is one per-file failure reported
+  identically by `--dry-run` and the executed run, with the same nonzero exit,
+  rather than a plan that promised a replacement and only failed at
+  publication. Skip, `info`, and `list` output there describes the same
+  conflict without naming `--overwrite` as its remedy.
 - Report replacements and permission repairs distinctly from creations
   (`replaced:` and `repaired permissions:` lines, with matching summary
   clauses that appear only when non-zero).

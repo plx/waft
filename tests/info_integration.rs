@@ -362,6 +362,13 @@ fn info_dest_untracked_conflict() {
     // .env exists in dest but is NOT tracked (just written, not git-added)
     write_file(&wt_path, ".env", "DIFFERENT_SECRET=bar");
 
+    // The conflict reads the same everywhere; `--overwrite` is named as the
+    // remedy only where it can act on an existing destination.
+    #[cfg(unix)]
+    let planned_action = "planned_action: skip (untracked conflict; --overwrite replaces)";
+    #[cfg(not(unix))]
+    let planned_action = "planned_action: skip (untracked conflict)";
+
     waft_in(main_dir.path())
         .args([
             "info",
@@ -374,9 +381,7 @@ fn info_dest_untracked_conflict() {
         .assert()
         .success()
         .stdout(predicate::str::contains("destination: untracked-conflict"))
-        .stdout(predicate::str::contains(
-            "planned_action: skip (untracked conflict; --overwrite replaces)",
-        ));
+        .stdout(predicate::str::contains(planned_action));
 }
 
 /// A destination whose content matches but whose permissions do not is its own

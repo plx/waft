@@ -268,13 +268,25 @@ pub enum SkipReason {
 impl SkipReason {
     /// A short human-readable phrase naming this reason, including the remedy
     /// where one exists.
+    ///
+    /// The conflict itself reads identically everywhere; only the `--overwrite`
+    /// remedy is withheld on platforms where it cannot act on an existing
+    /// destination, so no output advertises a fix that would fail.
     pub fn describe(&self) -> &'static str {
         match self {
             SkipReason::UntrackedConflict => {
-                "untracked conflict; --overwrite replaces the destination"
+                if crate::fs::overwrite_supported() {
+                    "untracked conflict; --overwrite replaces the destination"
+                } else {
+                    "untracked conflict"
+                }
             }
             SkipReason::PermissionsDiffer => {
-                "content equal, permissions differ; --overwrite repairs the permissions"
+                if crate::fs::overwrite_supported() {
+                    "content equal, permissions differ; --overwrite repairs the permissions"
+                } else {
+                    "content equal, permissions differ"
+                }
             }
             SkipReason::TrackedConflict => "tracked conflict",
             SkipReason::TypeConflict => "type conflict",

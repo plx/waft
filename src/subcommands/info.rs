@@ -222,8 +222,15 @@ pub(crate) fn run_info_with_context(
                         crate::model::DestinationState::PermissionsDiffer => {
                             println!("destination: permissions-differ");
                             if eligible {
+                                // The remedy is named only where it works; the
+                                // classification itself is the same everywhere.
                                 println!(
-                                    "planned_action: skip (content equal, permissions differ; --overwrite repairs)"
+                                    "planned_action: skip ({})",
+                                    if crate::fs::overwrite_supported() {
+                                        "content equal, permissions differ; --overwrite repairs"
+                                    } else {
+                                        "content equal, permissions differ"
+                                    }
                                 );
                             }
                         }
@@ -231,7 +238,12 @@ pub(crate) fn run_info_with_context(
                             println!("destination: untracked-conflict");
                             if eligible {
                                 println!(
-                                    "planned_action: skip (untracked conflict; --overwrite replaces)"
+                                    "planned_action: skip ({})",
+                                    if crate::fs::overwrite_supported() {
+                                        "untracked conflict; --overwrite replaces"
+                                    } else {
+                                        "untracked conflict"
+                                    }
                                 );
                             }
                         }

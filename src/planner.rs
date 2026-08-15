@@ -16,6 +16,11 @@ use crate::model::{
 };
 use crate::path::RepoRelPath;
 
+/// What planning records for an `--overwrite` intent the platform cannot carry
+/// out.
+const OVERWRITE_UNSUPPORTED: &str =
+    "replacing an existing destination with --overwrite is not supported on this platform";
+
 /// Build a copy plan for the given eligible paths.
 ///
 /// `groups` should be computed from the intersection of worktreeinclude-selected
@@ -28,6 +33,33 @@ pub fn plan(
     fs: &dyn FileSystem,
     overwrite: bool,
     dry_run: bool,
+) -> Result<CopyPlan> {
+    plan_with_overwrite_support(
+        ctx,
+        validation,
+        groups,
+        git,
+        fs,
+        overwrite,
+        dry_run,
+        crate::fs::overwrite_supported(),
+    )
+}
+
+/// [`plan`] with the platform's replacement capability supplied explicitly.
+///
+/// Taking the capability as a parameter keeps the non-Unix planning path
+/// testable from the Unix hosts waft's tests actually run on.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn plan_with_overwrite_support(
+    ctx: &RepoContext,
+    validation: ValidationReport,
+    groups: EligibilityGroups,
+    git: &dyn GitBackend,
+    fs: &dyn FileSystem,
+    overwrite: bool,
+    dry_run: bool,
+    overwrite_supported: bool,
 ) -> Result<CopyPlan> {
     let dest_root = match &ctx.dest_root {
         Some(d) => d,
@@ -139,6 +171,19 @@ pub fn plan(
                         } else {
                             SkipReason::UntrackedConflict
                         },
+                    }));
+                    continue;
+                }
+
+                if !overwrite_supported {
+                    // The plan, its `--dry-run` rendering, the executed run,
+                    // and the exit status have to describe the same thing. A
+                    // platform with no way to replace or repair an existing
+                    // destination says so once, here, instead of promising a
+                    // replacement that only fails when it is attempted.
+                    entries.push(PlannedEntry::Failure(FailureEntry {
+                        rel_path,
+                        message: OVERWRITE_UNSUPPORTED.to_string(),
                     }));
                     continue;
                 }
@@ -674,6 +719,76 @@ mod tests {
         // The plan pins the destination it observed, so execution can refuse
         // to act on anything else.
         assert_eq!(snapshot, &fs.file_snapshot(&op.dst_abs).unwrap());
+    }
+
+    /// A platform that cannot replace an existing destination has to say so
+    /// while planning. Otherwise `--dry-run` prints a replacement that the run
+    /// will never perform, and the two exit differently.
+    #[test]
+    fn plan_reports_overwrite_as_unsupported_where_the_platform_cannot_replace() {
+        let fs = MockFs::new();
+        fs.add_file("/source/.env", b"source");
+        fs.add_file("/dest/.env", b"different");
+
+        let git = MockPlannerGit::new(vec![]);
+        let ctx = test_ctx();
+
+        let plan = plan_with_overwrite_support(
+            &ctx,
+            ValidationReport::default(),
+            EligibilityGroups::from_files(vec![rel(".env")]),
+            &git,
+            &fs,
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(plan.entries.len(), 1);
+        match &plan.entries[0] {
+            PlannedEntry::Failure(failure) => {
+                assert_eq!(failure.rel_path.as_str(), ".env");
+                assert_eq!(
+                    failure.message,
+                    "replacing an existing destination with --overwrite is not supported on this platform"
+                );
+            }
+            other => panic!("expected a per-file planning failure, got {other:?}"),
+        }
+        // A dry run of this plan reports and exits exactly like the real run.
+        assert_eq!(planning_failures(&plan), Some((1, 1)));
+    }
+
+    /// Only the `--overwrite` intent is unavailable there. The conflict itself
+    /// is still an ordinary skip, and nothing about the run fails.
+    #[test]
+    fn plan_still_skips_a_conflict_without_overwrite_where_replacement_is_unsupported() {
+        let fs = MockFs::new();
+        fs.add_file("/source/.env", b"source");
+        fs.add_file("/dest/.env", b"different");
+
+        let git = MockPlannerGit::new(vec![]);
+        let ctx = test_ctx();
+
+        let plan = plan_with_overwrite_support(
+            &ctx,
+            ValidationReport::default(),
+            EligibilityGroups::from_files(vec![rel(".env")]),
+            &git,
+            &fs,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(plan.entries.len(), 1);
+        match &plan.entries[0] {
+            PlannedEntry::Skip(skip) => assert_eq!(skip.reason, SkipReason::UntrackedConflict),
+            other => panic!("expected Skip, got {other:?}"),
+        }
+        assert_eq!(planning_failures(&plan), None);
     }
 
     #[test]

@@ -28,6 +28,18 @@ pub enum FileComparison {
     ContentDiffers,
 }
 
+/// Whether this platform can act on a destination that already exists.
+///
+/// Replacing or repairing an existing destination needs the anchored
+/// publication path: an `O_NOFOLLOW` re-open of the planned inode, an atomic
+/// name exchange (or an unlink of a proven inode), and `fchmod` on the verified
+/// descriptor. Only Unix offers those. Planning consults this so a plan, its
+/// `--dry-run` rendering, the executed run, and the exit status all describe
+/// the same thing instead of advertising an action the platform cannot perform.
+pub(crate) fn overwrite_supported() -> bool {
+    cfg!(unix)
+}
+
 /// Immutable inputs for one conditional file publication.
 #[derive(Debug, Clone, Copy)]
 pub struct CopyFileRequest<'a> {
@@ -437,10 +449,22 @@ impl<'a> AnchoredTempGuard<'a> {
         self.armed = false;
     }
 
-    /// Remove the temporary name now and stop tracking it.
+    /// Remove the temporary name now, reporting whether it worked.
+    ///
+    /// Tracking stops either way, so `Drop` can never unlink this name twice —
+    /// and after a successful exchange it must not: the name then holds the
+    /// *previous* destination, and a retry that happened to succeed would
+    /// delete the very file the caller is about to name in an error. A failure
+    /// is handed back rather than retried, because only the caller knows what a
+    /// leftover means at that point.
     fn remove_now(&mut self) -> io::Result<()> {
+        let removed = if temporary_removal_forced_failure() {
+            Err(rustix::io::Errno::IO.into())
+        } else {
+            unlink_anchored(self.parent, &self.name)
+        };
         self.armed = false;
-        unlink_anchored(self.parent, &self.name)
+        removed
     }
 }
 
@@ -497,6 +521,14 @@ fn copy_file_anchored_unix(
     let (destination_parent, destination_name) =
         open_relative_parent(&destination_root, rel_path, true)?;
 
+    // Every operation below goes through the anchored descriptors; this
+    // pathname exists only so an error can name a file the caller can find.
+    let destination_path = rel_path.to_path(request.destination_root);
+    let destination_directory = destination_path
+        .parent()
+        .unwrap_or(request.destination_root)
+        .to_path_buf();
+
     // An expected-existing destination is pinned to a descriptor and matched
     // against its planning snapshot before anything is prepared. Every later
     // step compares against this descriptor's identity, never a pathname.
@@ -537,7 +569,23 @@ fn copy_file_anchored_unix(
         ensure_same_relative_parent(&destination_root, rel_path, &destination_parent)?;
         ensure_name_refers_to_file(&destination_parent, &destination_name, destination)?;
         ensure_open_snapshot_matches(destination, expected)?;
+        before_permission_repair();
         destination.set_permissions(source_metadata.permissions())?;
+        // A writer can rewrite this inode in place between the proof above and
+        // the `fchmod`, which would leave waft carrying the source's mode onto
+        // content that is no longer the source's — and calling it a repair.
+        // Re-read the descriptor and require the pinned bytes once more. The
+        // mode has legitimately just changed to the source's, so only content
+        // is compared.
+        //
+        // This does not close the window: a writer can always land after
+        // whatever check is last, and a repair that reports success may be
+        // overwritten a microsecond later. What it bounds is what waft itself
+        // does and claims — waft never alters the destination's content, and
+        // never reports a repair it did not re-verify.
+        if !open_content_matches(destination, expected) {
+            return Err(revert_permission_repair(destination, expected));
+        }
         // The directory entry is untouched, so only the inode needs syncing.
         rustix::fs::fsync(&*destination)?;
         return Ok(PublishOutcome::PermissionsRepaired);
@@ -595,6 +643,7 @@ fn copy_file_anchored_unix(
                 .expect("an existing-destination expectation always carries a snapshot");
             replace_verified_destination(
                 &destination_parent,
+                &destination_directory,
                 &mut temporary_guard,
                 &destination_name,
                 destination,
@@ -653,6 +702,54 @@ fn ensure_open_snapshot_matches(file: &mut fs::File, expected: &FileSnapshot) ->
     Ok(())
 }
 
+/// Whether an open regular file still holds exactly the bytes recorded in
+/// `expected`, ignoring its mode.
+///
+/// Used only after waft has already changed something, to decide whether that
+/// change can be reported as correct. Anything that prevents proving it — an
+/// unreadable descriptor, a file that is no longer regular, a change observed
+/// mid-read — is therefore a mismatch rather than an error to propagate.
+#[cfg(unix)]
+fn open_content_matches(file: &mut fs::File, expected: &FileSnapshot) -> bool {
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if !metadata.file_type().is_file() {
+        return false;
+    }
+    match snapshot_open_regular_file(file, &metadata) {
+        Ok(actual) => actual.content_matches(expected),
+        Err(_) => false,
+    }
+}
+
+/// Put the destination's mode back after a repair whose premise turned out to
+/// be false, and describe what happened.
+///
+/// The restore is best effort: it is the only way back to the state the caller
+/// was promised, but a descriptor that cannot be `fchmod`-ed leaves the file
+/// carrying the source's mode over content this run never verified. That is the
+/// more specific problem, so it is the one reported.
+#[cfg(unix)]
+fn revert_permission_repair(file: &fs::File, expected: &FileSnapshot) -> io::Error {
+    use std::os::unix::fs::PermissionsExt;
+
+    // `expected.permissions` is a full `st_mode`; only the permission bits are
+    // meaningful to `fchmod`.
+    match file.set_permissions(fs::Permissions::from_mode(expected.permissions & 0o7777)) {
+        Ok(()) => io::Error::new(
+            io::ErrorKind::Interrupted,
+            "destination changed during publication; its content was not touched and its \
+             permissions were left as they were found",
+        ),
+        Err(restore_error) => io::Error::other(format!(
+            "destination changed during publication and its original permissions could not be \
+             restored ({restore_error}): its content was not touched, but it now carries the \
+             source's mode over content this run could not verify"
+        )),
+    }
+}
+
 /// Replace `destination_name` with the prepared temporary, proving that the
 /// pathname still resolves to `verified` — with exactly the planned bytes and
 /// mode — at the moment of the swap.
@@ -662,9 +759,13 @@ fn ensure_open_snapshot_matches(file: &mut fs::File, expected: &FileSnapshot) ->
 /// file that was swapped out is not the one that was planned against, the
 /// exchange is undone and this file is reported as a per-file failure rather
 /// than a silent clobber.
+///
+/// `parent_directory` is the pathname of `parent` at planning time, used only
+/// to name files a caller may have to deal with by hand.
 #[cfg(unix)]
 fn replace_verified_destination(
     parent: &OwnedFd,
+    parent_directory: &Path,
     temporary_guard: &mut AnchoredTempGuard<'_>,
     destination_name: &OsStr,
     verified: &mut fs::File,
@@ -683,9 +784,25 @@ fn replace_verified_destination(
                     .unwrap_or(false)
                     && ensure_open_snapshot_matches(verified, expected).is_ok();
             if swapped_out_as_planned {
-                // The temporary name now holds the outgoing inode.
-                let _ = temporary_guard.remove_now();
-                return Ok(());
+                // The temporary name now holds the outgoing inode. Removing it
+                // is the last step, and its failure is not cosmetic: the
+                // replacement itself stands, but the file it replaced is still
+                // on disk under a name nobody expects, possibly holding the
+                // secrets this run was moving around. Report the file as failed
+                // and say exactly what has to be deleted.
+                let leftover = parent_directory.join(temporary_guard.name());
+                return temporary_guard.remove_now().map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{} was replaced with the planned content, but the file it replaced \
+                             could not be removed ({error}): it is still on disk as {}, still \
+                             holding the previous content; delete it by hand",
+                            Path::new(destination_name).display(),
+                            leftover.display(),
+                        ),
+                    )
+                });
             }
             // Another writer changed the destination between the identity
             // proof and the exchange. Put both names back and fail this file.
@@ -797,9 +914,13 @@ fn rename_flag_unsupported(error: rustix::io::Errno) -> bool {
 /// undo of a failed exchange, and the unlink-then-publish fallback used where
 /// exchange is unsupported — cannot be provoked from an ordinary test volume:
 /// the guards that run before the swap reject any change made from
-/// `before_publish`, and every filesystem CI runs on supports exchange. These
-/// hooks let unit tests reach both branches so they are covered rather than
-/// merely argued about.
+/// `before_publish`, and every filesystem CI runs on supports exchange. Two
+/// more branches are just as unreachable by ordinary means: the instant between
+/// verifying a repair's destination and `fchmod`-ing it, which a real writer
+/// would have to hit exactly, and an unlink of the swapped-out file that fails
+/// after the exchange has already succeeded. These hooks let unit tests reach
+/// every one of those branches so they are covered rather than merely argued
+/// about.
 #[cfg(all(test, unix))]
 mod publish_hooks {
     use std::cell::RefCell;
@@ -814,8 +935,15 @@ mod publish_hooks {
         /// Runs in the exchange-less fallback, after the verified destination
         /// has been unlinked and before the replacement is published.
         pub(super) after_destination_removed: Option<Box<dyn FnMut()>>,
+        /// Runs after a repair's destination is verified and before its mode is
+        /// changed.
+        pub(super) before_permission_repair: Option<Box<dyn FnMut()>>,
         /// Makes every exchange report the filesystem as unable to swap names.
         pub(super) exchange_unsupported: bool,
+        /// Makes removing a temporary name report an I/O error without
+        /// unlinking anything, standing in for a transient failure on the
+        /// last step of a replacement.
+        pub(super) temporary_removal_fails: bool,
     }
 
     thread_local! {
@@ -848,8 +976,16 @@ mod publish_hooks {
         run(|hooks| hooks.after_destination_removed.take());
     }
 
+    pub(super) fn before_permission_repair() {
+        run(|hooks| hooks.before_permission_repair.take());
+    }
+
     pub(super) fn exchange_forced_unsupported() -> bool {
         HOOKS.with(|cell| cell.borrow().exchange_unsupported)
+    }
+
+    pub(super) fn temporary_removal_forced_failure() -> bool {
+        HOOKS.with(|cell| cell.borrow().temporary_removal_fails)
     }
 
     /// Takes a callback out of the hook set before running it, so a hook can
@@ -866,7 +1002,7 @@ mod publish_hooks {
 #[cfg(all(test, unix))]
 use publish_hooks::{
     after_destination_removed, after_destination_verified, before_exchange_back,
-    exchange_forced_unsupported,
+    before_permission_repair, exchange_forced_unsupported, temporary_removal_forced_failure,
 };
 
 #[cfg(all(not(test), unix))]
@@ -879,7 +1015,15 @@ fn before_exchange_back() {}
 fn after_destination_removed() {}
 
 #[cfg(all(not(test), unix))]
+fn before_permission_repair() {}
+
+#[cfg(all(not(test), unix))]
 fn exchange_forced_unsupported() -> bool {
+    false
+}
+
+#[cfg(all(not(test), unix))]
+fn temporary_removal_forced_failure() -> bool {
     false
 }
 
@@ -1575,6 +1719,63 @@ mod tests {
         );
     }
 
+    /// The last window a repair has: the destination is rewritten in place
+    /// after it has been verified and before the `fchmod` lands. Waft cannot
+    /// prevent that — a writer can always land after whatever check is last —
+    /// but it must not carry the source's mode onto content it never proved,
+    /// and it must not call that a repair.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_permission_repair_reverts_when_the_destination_changes_before_the_chmod() {
+        use std::io::Write as _;
+
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "same\n");
+        let src = source_root.join("file.env");
+        let dst = destination_root.join("file.env");
+        write(&dst, "same\n");
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&dst, fs::Permissions::from_mode(0o600)).unwrap();
+        let planned = existing_snapshot(&dst);
+
+        let rewritten = dst.clone();
+        let _hooks = publish_hooks::install(publish_hooks::Hooks {
+            before_permission_repair: Some(Box::new(move || {
+                // Another writer overwrites the same inode in place with the
+                // same number of bytes, leaving the mode alone: identity,
+                // length, and mode all still match the snapshot, so only the
+                // content fingerprint can tell that this is not the file the
+                // repair was planned for.
+                let mut file = fs::OpenOptions::new().write(true).open(&rewritten).unwrap();
+                file.write_all(b"diff\n").unwrap();
+            })),
+            ..publish_hooks::Hooks::default()
+        });
+
+        let error = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::RepairPermissions(planned),
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            fs::read_to_string(&dst).unwrap(),
+            "diff\n",
+            "a repair must never write the destination's content"
+        );
+        assert_eq!(
+            fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the mode must be put back to the one that was verified"
+        );
+        assert!(no_temporaries_left(&destination_root));
+    }
+
     /// Swap the destination name onto a different inode, imitating another
     /// writer publishing its own file there.
     #[cfg(unix)]
@@ -1690,6 +1891,53 @@ mod tests {
         assert!(
             message.contains(&*name),
             "the error must name the stranded file, got: {message}"
+        );
+    }
+
+    /// The exchange succeeded, so the destination genuinely holds the new
+    /// content — but the file it replaced could not be unlinked afterwards.
+    /// Reporting that as a plain success would leave the previous content,
+    /// secrets and all, under a `.waft-copy-*` name nothing will ever clean up.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_reports_a_swapped_out_file_it_could_not_remove() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+        let dst = destination_root.join("file.env");
+        write(&dst, "old\n");
+
+        let _hooks = publish_hooks::install(publish_hooks::Hooks {
+            // Stands in for a transient unlink failure on the last step.
+            temporary_removal_fails: true,
+            ..publish_hooks::Hooks::default()
+        });
+
+        let error = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::ReplaceExisting(existing_snapshot(&dst)),
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read_to_string(&dst).unwrap(),
+            "new\n",
+            "the replacement itself succeeded and must stand"
+        );
+        let leftover = temporaries(&destination_root);
+        assert_eq!(
+            leftover.len(),
+            1,
+            "the file that was replaced is still on disk"
+        );
+        assert_eq!(fs::read_to_string(&leftover[0]).unwrap(), "old\n");
+        let message = error.to_string();
+        assert!(
+            message.contains(&*leftover[0].to_string_lossy()),
+            "the error must name the full path of the file to delete, got: {message}"
         );
     }
 

@@ -320,6 +320,11 @@ fn copy_skips_untracked_conflict_without_overwrite() {
     );
 }
 
+/// Replacing an existing destination needs the anchored publication path, so
+/// it is a Unix capability. See
+/// `copy_overwrite_is_planned_as_unsupported_off_unix` for the contract
+/// everywhere else.
+#[cfg(unix)]
 #[test]
 fn copy_overwrite_replaces_differing_untracked_destination() {
     let (main_dir, wt_dir) = setup_worktrees();
@@ -348,6 +353,7 @@ fn copy_overwrite_replaces_differing_untracked_destination() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn copy_overwrite_continues_past_a_conflict_and_copies_the_rest() {
     let (main_dir, wt_dir) = setup_worktrees();
@@ -723,6 +729,7 @@ fn copy_strategy_via_env_var() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn copy_overwrite_with_cow_also_replaces() {
     let (main_dir, wt_dir) = setup_worktrees();
@@ -747,6 +754,44 @@ fn copy_overwrite_with_cow_also_replaces() {
         .stderr(predicate::str::contains("replaced: .env"));
 
     assert_eq!(fs::read_to_string(wt_path.join(".env")).unwrap(), "NEW\n");
+}
+
+/// Where waft cannot replace an existing destination, planning says so, so the
+/// dry run and the real run report the same thing and exit the same way. The
+/// destination is left exactly as it was in both cases.
+#[cfg(not(unix))]
+#[test]
+fn copy_overwrite_is_planned_as_unsupported_off_unix() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
+    write_file(&wt_path, ".env", "DEST_SECRET\n");
+
+    for extra_args in [vec!["--overwrite"], vec!["--overwrite", "--dry-run"]] {
+        let mut args = vec![
+            "copy",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ];
+        args.extend(extra_args);
+
+        waft()
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("FAILED: .env"))
+            .stderr(predicate::str::contains(
+                "replacing an existing destination with --overwrite is not supported on this platform",
+            ));
+
+        assert_eq!(
+            fs::read_to_string(wt_path.join(".env")).unwrap(),
+            "DEST_SECRET\n"
+        );
+    }
 }
 
 /// Even under `--overwrite`, a tracked destination is never written. The
