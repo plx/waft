@@ -150,12 +150,12 @@ fn diagnose_empty_selection(
             // Re-ask the root predicate while following symlinks, mirroring
             // the repo-wide re-ask below. A yes means the root file exists and
             // the policy is what hid it — and, because the predicate is the
-            // engine's own existence gate, that the named remedy restores it.
+            // engine's own existence gate strengthened to require a readable
+            // target, that the named remedy restores it. A symlink the follow
+            // run could not read is not a remedy, so it falls through to the
+            // absent-root-file case below.
             if policy.symlink_policy == SymlinkPolicy::Ignore
-                && crate::worktreeinclude::root_rule_file_is_consulted(
-                    source_root,
-                    SymlinkPolicy::Follow,
-                )
+                && crate::worktreeinclude::root_rule_file_becomes_readable_under_follow(source_root)
             {
                 return Ok(Some(EmptySelectionCause::RuleFileSymlinkIgnored));
             }
@@ -173,12 +173,23 @@ fn diagnose_empty_selection(
     }
 
     // Nothing was found under the active symlink policy. Re-ask while
-    // following symlinks: if that finds one, the policy is what hid it, and
-    // the honest note names the policy rather than denying the file exists.
-    // Only reached on an already-empty selection, so the second walk is off
-    // the common path.
+    // following symlinks: if that finds one the policy is what hid it, and the
+    // honest note names the policy rather than denying the file exists. Only
+    // reached on an already-empty selection, so the second walk is off the
+    // common path.
+    //
+    // The backend's existence gate counts a symlink without resolving it,
+    // which is correct for selection and too weak to recommend `follow` on:
+    // a link to nothing, to a directory, or to an unreadable file leaves the
+    // recommended run just as empty and fails validation. Requiring a readable
+    // target sends those to the absent-rule note instead of to a remedy that
+    // cannot work.
     if policy.symlink_policy == SymlinkPolicy::Ignore
         && git.worktreeinclude_exists_anywhere(source_root, SymlinkPolicy::Follow)?
+        && crate::git::readable_worktreeinclude_exists_under_follow(
+            source_root,
+            &git.gitlinks(source_root)?,
+        )
     {
         return Ok(Some(EmptySelectionCause::RuleFileSymlinkIgnored));
     }

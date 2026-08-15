@@ -345,6 +345,40 @@ pub fn root_rule_file_is_consulted(repo_root: &Path, symlink_policy: SymlinkPoli
     !(symlink_policy == SymlinkPolicy::Ignore && is_symlink(&wti_path))
 }
 
+/// Whether following `path` reaches something a rule-file reader can consume:
+/// a regular file that opens for reading.
+///
+/// The existence checks above — and the repo-wide walk in [`crate::git`] —
+/// answer "is a rule file named here", which is the right gate for selection:
+/// a rule file the engine cannot read still engages explicit-selection mode,
+/// and `when_missing` must not fire behind it. It is the wrong question for
+/// recommending `--worktreeinclude-symlink-policy follow`, because a symlink
+/// can name a rule file that following cannot read — a dangling link, a link
+/// to a directory, or a link to a file this process cannot open. Each leaves
+/// the recommended run just as empty, and `waft validate` rejects it under
+/// `follow` with `cannot read file`.
+///
+/// [`fs::metadata`] resolves symlinks, so the regular-file test also excludes
+/// FIFOs and devices — which is what keeps the open from blocking.
+pub fn rule_file_is_readable(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) && fs::File::open(path).is_ok()
+}
+
+/// Whether `SymlinkPolicy::Follow` would leave the repo-root `.worktreeinclude`
+/// readable — the precondition for naming `follow` as the remedy for a root
+/// rule file the active policy skipped.
+///
+/// The first conjunct is [`root_rule_file_is_consulted`], the engine's own
+/// existence gate, asked under the policy the remedy would install; keeping the
+/// real call means the remedy check cannot drift from the engine. It resolves
+/// the link, so a dangling or directory target already fails it. The second
+/// conjunct adds the readability the gate does not check, so a link to a file
+/// this process cannot open is not advertised either.
+pub fn root_rule_file_becomes_readable_under_follow(repo_root: &Path) -> bool {
+    root_rule_file_is_consulted(repo_root, SymlinkPolicy::Follow)
+        && rule_file_is_readable(&repo_root.join(".worktreeinclude"))
+}
+
 /// True if `path` itself is a symlink (without following).
 fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path)
