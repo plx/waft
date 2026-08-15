@@ -48,7 +48,15 @@ Until the first supported release, changes remain under `Unreleased`.
   per-file failure naming the full `.waft-copy-*` path it was left under,
   instead of returning success. The destination holds the planned content, but
   the file it replaced is still on disk and may still hold the secrets that
-  were there before.
+  were there before. The same holds where a filesystem has no
+  `RENAME_NOREPLACE` and publication is a hard link followed by an unlink of
+  the staging name: that unlink is conditional on proving the name still holds
+  the file this run linked from, and a name another writer re-pointed in
+  between is left alone — and now reported. Reporting success there disarmed
+  the staging guard and called the copy created or replaced while an
+  unexplained `.waft-copy-*` entry, holding whatever that writer put under the
+  name, stayed on disk. The per-file failure says the destination itself is
+  fine and names the full path of what was left.
 - Never unlink a file waft has not just proven is the one it planned against.
   If a recovery step fails and strands another writer's file under a
   `.waft-copy-*` name, or strands the prepared replacement because the

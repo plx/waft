@@ -829,13 +829,17 @@ fn copy_file_anchored_unix(
 
     let outcome = match verified_destination.as_mut() {
         None => {
-            publish_noreplace(
+            let published = publish_noreplace(
                 &destination_parent,
                 temporary_guard.name(),
                 &destination_name,
                 temporary_guard.identity(),
             )?;
+            let staging_path = destination_directory.join(temporary_guard.name());
+            // The staging name is either gone or holds a file this run has no
+            // right to delete; the guard must not act on it either way.
             temporary_guard.disarm();
+            published.into_result(&destination_path, &staging_path)?;
             PublishOutcome::Created
         }
         Some(destination) => {
@@ -1158,9 +1162,21 @@ fn replace_by_displacement(
                 destination_name,
                 Some(&displaced_identity),
             ) {
-                Ok(()) => io::Error::new(
+                Ok(PublishedName::Consumed) => io::Error::new(
                     io::ErrorKind::Interrupted,
                     "destination changed during publication; it was left untouched",
+                ),
+                // The restore itself stands — the other writer's file is back
+                // under the destination name — but the link form of it could
+                // not consume the name the file was displaced to.
+                Ok(PublishedName::LeftBehind(reason)) => io::Error::new(
+                    reason.kind(),
+                    format!(
+                        "destination changed during publication and the file that was there was \
+                         put back, but {} was left on disk rather than deleted ({reason}); check \
+                         it and delete it by hand",
+                        displaced_path.display(),
+                    ),
                 ),
                 Err(restore_error) => io::Error::other(format!(
                     "destination changed during publication and the file that was there could not \
@@ -1179,11 +1195,14 @@ fn replace_by_displacement(
         destination_name,
         temporary_guard.identity(),
     ) {
-        Ok(()) => {
+        Ok(published) => {
+            let staging_path = parent_directory.join(temporary_guard.name());
             temporary_guard.disarm();
             // The replacement is published and the displaced file is the one
             // that was planned against: this is the only unlink on this path,
             // and the guard re-proves the inode immediately before it runs.
+            // Its failure outranks a stranded staging name, because what it
+            // leaves behind is the content the destination used to hold.
             displaced_guard.remove_now().map_err(|error| {
                 io::Error::new(
                     error.kind(),
@@ -1195,7 +1214,8 @@ fn replace_by_displacement(
                         displaced_path.display(),
                     ),
                 )
-            })
+            })?;
+            published.into_result(&destination_path, &staging_path)
         }
         Err(publish_error) => {
             // Someone took the vacated name before the no-clobber publish
@@ -1207,18 +1227,30 @@ fn replace_by_displacement(
                 destination_name,
                 Some(verified_identity),
             ) {
-                Ok(()) => {
+                Ok(restored) => {
                     displaced_guard.disarm();
                     // The prepared replacement was never published, so the
                     // guard removes this run's own file on the way out.
-                    Err(io::Error::new(
-                        publish_error.kind(),
-                        format!(
-                            "could not publish over {} ({publish_error}): the file that was there \
-                             was put back and nothing was deleted",
-                            destination_path.display(),
+                    Err(match restored {
+                        PublishedName::Consumed => io::Error::new(
+                            publish_error.kind(),
+                            format!(
+                                "could not publish over {} ({publish_error}): the file that was \
+                                 there was put back and nothing was deleted",
+                                destination_path.display(),
+                            ),
                         ),
-                    ))
+                        PublishedName::LeftBehind(reason) => io::Error::new(
+                            publish_error.kind(),
+                            format!(
+                                "could not publish over {} ({publish_error}): the file that was \
+                                 there was put back and nothing was deleted, but {} was left on \
+                                 disk as well ({reason}); check it and delete it by hand",
+                                destination_path.display(),
+                                displaced_path.display(),
+                            ),
+                        ),
+                    })
                 }
                 Err(restore_error) => {
                     let stranded = parent_directory.join(temporary_guard.name());
@@ -1408,9 +1440,12 @@ fn rename_flag_unsupported(error: rustix::io::Errno) -> bool {
 /// on supports exchange. Three more branches are just as unreachable by
 /// ordinary means: the instants on either side of a repair's `fchmod`, which a
 /// real writer would have to hit exactly, and an unlink of the swapped-out file
-/// that fails after the exchange has already succeeded. These hooks let unit
-/// tests reach every one of those branches so they are covered rather than
-/// merely argued about.
+/// that fails after the exchange has already succeeded. The link-based
+/// publication [`publish_noreplace`] uses where a filesystem has no
+/// `RENAME_NOREPLACE` is out of reach for the same reason, and with it the
+/// instant between the link that publishes and the proof that authorizes
+/// removing the extra name. These hooks let unit tests reach every one of those
+/// branches so they are covered rather than merely argued about.
 #[cfg(all(test, unix))]
 mod publish_hooks {
     use std::cell::RefCell;
@@ -1441,8 +1476,17 @@ mod publish_hooks {
         /// Runs after a repair's `fchmod` and before the repair is verified —
         /// the window in which another writer's `chmod` can land on top of it.
         pub(super) after_permission_repair: Option<Box<dyn FnMut()>>,
+        /// Runs in the link-based publication fallback, after the hard link has
+        /// published the prepared file under the destination name and before
+        /// the extra name is proved — the window in which another writer can
+        /// re-point that name and keep the removal from happening.
+        pub(super) after_link_published: Option<Box<dyn FnMut()>>,
         /// Makes every exchange report the filesystem as unable to swap names.
         pub(super) exchange_unsupported: bool,
+        /// Makes every no-clobber publication report the filesystem as unable
+        /// to refuse an existing name, so publication falls back to a hard link
+        /// followed by an unlink of the extra name.
+        pub(super) noreplace_unsupported: bool,
         /// Makes only the undo swap fail, standing in for a filesystem error
         /// that leaves the replacement published over an unverified file.
         pub(super) exchange_back_fails: bool,
@@ -1504,8 +1548,16 @@ mod publish_hooks {
         run(|hooks| hooks.after_permission_repair.take());
     }
 
+    pub(super) fn after_link_published() {
+        run(|hooks| hooks.after_link_published.take());
+    }
+
     pub(super) fn exchange_forced_unsupported() -> bool {
         HOOKS.with(|cell| cell.borrow().exchange_unsupported)
+    }
+
+    pub(super) fn noreplace_forced_unsupported() -> bool {
+        HOOKS.with(|cell| cell.borrow().noreplace_unsupported)
     }
 
     pub(super) fn exchange_back_forced_failure() -> bool {
@@ -1539,9 +1591,10 @@ mod publish_hooks {
 #[cfg(all(test, unix))]
 use publish_hooks::{
     after_destination_displaced, after_destination_verified, after_exchange_back,
-    after_permission_repair, before_destination_displaced, before_exchange_back,
-    before_permission_repair, exchange_back_forced_failure, exchange_forced_unsupported,
-    publish_forced_failure, temporary_removal_forced_failure,
+    after_link_published, after_permission_repair, before_destination_displaced,
+    before_exchange_back, before_permission_repair, exchange_back_forced_failure,
+    exchange_forced_unsupported, noreplace_forced_unsupported, publish_forced_failure,
+    temporary_removal_forced_failure,
 };
 
 #[cfg(all(not(test), unix))]
@@ -1566,7 +1619,15 @@ fn before_permission_repair() {}
 fn after_permission_repair() {}
 
 #[cfg(all(not(test), unix))]
+fn after_link_published() {}
+
+#[cfg(all(not(test), unix))]
 fn exchange_forced_unsupported() -> bool {
+    false
+}
+
+#[cfg(all(not(test), unix))]
+fn noreplace_forced_unsupported() -> bool {
     false
 }
 
@@ -1868,31 +1929,80 @@ fn ensure_name_refers_to_file(
     }
 }
 
+/// What a successful no-clobber publication left under the name it published
+/// from.
+///
+/// The rename form consumes that name: the move is the publication. The link
+/// form cannot — it publishes a second name for the same inode and removes the
+/// first afterwards, and that removal is conditional on proving the name still
+/// holds the file this run linked from. A publication that stands while its
+/// staging name does not is a real outcome, not a detail: the caller disarms
+/// its guard once the publication is done, so a leftover nobody is told about
+/// is a `.waft-copy-*` file left on disk under a run reported as successful.
+#[cfg(unix)]
+#[must_use]
+enum PublishedName {
+    /// The name the publication started from is gone.
+    Consumed,
+    /// The publication stands, but the name it started from is still on disk
+    /// and was deliberately not deleted. Carries why, for the per-file failure
+    /// the caller builds around it.
+    LeftBehind(io::Error),
+}
+
+#[cfg(unix)]
+impl PublishedName {
+    /// The per-file verdict for a publication of `leftover` onto
+    /// `destination`: success, or a failure that names the full path of what
+    /// is still on disk and says the destination itself is fine.
+    fn into_result(self, destination: &Path, leftover: &Path) -> io::Result<()> {
+        match self {
+            PublishedName::Consumed => Ok(()),
+            PublishedName::LeftBehind(reason) => Err(io::Error::new(
+                reason.kind(),
+                format!(
+                    "{} now holds the planned content, but {} was left on disk rather than \
+                     deleted ({reason}); check it and delete it by hand",
+                    destination.display(),
+                    leftover.display(),
+                ),
+            )),
+        }
+    }
+}
+
 /// Move `temporary` onto `destination` under `parent`, never clobbering a name
 /// that has been taken in the meantime.
 ///
 /// `identity` is what `temporary` is expected to hold; it is only needed where
 /// the filesystem has no `RENAME_NOREPLACE` and the publication has to be done
 /// as a link followed by an unlink of the extra name. `None` means the caller
-/// could not pin it, which on that path means the extra name is left alone.
+/// could not pin it, which on that path means the extra name is left alone —
+/// and reported as [`PublishedName::LeftBehind`] rather than passed off as a
+/// clean publication.
 #[cfg(unix)]
 fn publish_noreplace(
     parent: &OwnedFd,
     temporary: &OsStr,
     destination: &OsStr,
     identity: Option<&rustix::fs::Stat>,
-) -> io::Result<()> {
+) -> io::Result<PublishedName> {
     if publish_forced_failure() {
         return Err(rustix::io::Errno::IO.into());
     }
-    match rustix::fs::renameat_with(
-        parent,
-        temporary,
-        parent,
-        destination,
-        rustix::fs::RenameFlags::NOREPLACE,
-    ) {
-        Ok(()) => Ok(()),
+    let renamed = if noreplace_forced_unsupported() {
+        Err(rustix::io::Errno::NOTSUP)
+    } else {
+        rustix::fs::renameat_with(
+            parent,
+            temporary,
+            parent,
+            destination,
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
+    };
+    match renamed {
+        Ok(()) => Ok(PublishedName::Consumed),
         // NOSYS/INVAL mean the kernel or filesystem does not implement the
         // flag; NOTSUP/OPNOTSUPP are what macOS returns for SMB, NFS, and
         // exFAT destinations. All four are "no RENAME_NOREPLACE here", not
@@ -1902,7 +2012,10 @@ fn publish_noreplace(
             // regular file. The publication is done at that point; the extra
             // name is then removed — but like every other unlink here, only
             // while it still holds the inode that was just linked. A name
-            // another process has re-pointed in between is left as it is.
+            // another process has re-pointed in between is left as it is, and
+            // handed back rather than swallowed: from here on every return is
+            // a published destination, so the only question left is whether
+            // the caller has a leftover to report.
             rustix::fs::linkat(
                 parent,
                 temporary,
@@ -1910,12 +2023,28 @@ fn publish_noreplace(
                 destination,
                 rustix::fs::AtFlags::empty(),
             )?;
-            if identity.is_some_and(|identity| {
-                name_holds_inode(parent, temporary, identity).unwrap_or(false)
-            }) {
-                rustix::fs::unlinkat(parent, temporary, rustix::fs::AtFlags::empty())?;
+            after_link_published();
+            let Some(identity) = identity else {
+                return Ok(PublishedName::LeftBehind(io::Error::other(
+                    "it could not be checked against the file this run put there",
+                )));
+            };
+            if !name_holds_inode(parent, temporary, identity).unwrap_or(false) {
+                return Ok(PublishedName::LeftBehind(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "it no longer holds the file this run put there",
+                )));
             }
-            Ok(())
+            match rustix::fs::unlinkat(parent, temporary, rustix::fs::AtFlags::empty()) {
+                Ok(()) => Ok(PublishedName::Consumed),
+                Err(error) => {
+                    let error = io::Error::from(error);
+                    Ok(PublishedName::LeftBehind(io::Error::new(
+                        error.kind(),
+                        format!("removing it failed: {error}"),
+                    )))
+                }
+            }
         }
         Err(error) => Err(error.into()),
     }
@@ -2784,6 +2913,193 @@ mod tests {
         assert!(
             message.contains(&*leftover[0].to_string_lossy()),
             "the error must name the full path of the file to delete, got: {message}"
+        );
+    }
+
+    /// Filesystems without `RENAME_NOREPLACE` publish by hard link instead.
+    /// The visible outcome must be the same one the rename produces.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_publishes_by_hard_link_without_rename_noreplace() {
+        for strategy in [CopyStrategy::SimpleCopy, CopyStrategy::CowCopy] {
+            let tmp = TempDir::new().unwrap();
+            let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+            let dst = destination_root.join("file.env");
+
+            let _hooks = publish_hooks::install(publish_hooks::Hooks {
+                noreplace_unsupported: true,
+                ..publish_hooks::Hooks::default()
+            });
+
+            let outcome = copy(
+                &source_root,
+                &destination_root,
+                "file.env",
+                strategy,
+                &DestinationExpectation::Missing,
+                &mut || Ok(()),
+            )
+            .unwrap();
+
+            assert_eq!(outcome, PublishOutcome::Created);
+            assert_eq!(fs::read_to_string(&dst).unwrap(), "new\n");
+            assert!(
+                no_temporaries_left(&destination_root),
+                "the extra name the link left is removed once its inode is proved"
+            );
+        }
+    }
+
+    /// The window the link-based publication cannot close: the hard link has
+    /// already published the prepared file, and another writer re-points the
+    /// staging name before the proof that would authorize removing it. That
+    /// file is not waft's to delete, so it stays — and saying nothing would
+    /// report the copy as created while leaving a `.waft-copy-*` entry nothing
+    /// will ever clean up.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_reports_a_staging_name_the_link_fallback_could_not_remove() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+        let dst = destination_root.join("file.env");
+
+        let staging_root = destination_root.clone();
+        let _hooks = publish_hooks::install(publish_hooks::Hooks {
+            noreplace_unsupported: true,
+            after_link_published: Some(Box::new(move || {
+                let staged = temporaries(&staging_root);
+                assert_eq!(staged.len(), 1);
+                let interloper = staging_root.join("interloper");
+                write(&interloper, "not waft's file\n");
+                fs::rename(&interloper, &staged[0]).unwrap();
+            })),
+            ..publish_hooks::Hooks::default()
+        });
+
+        let error = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::Missing,
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read_to_string(&dst).unwrap(),
+            "new\n",
+            "the link published the planned content and that stands"
+        );
+        let kept = temporaries(&destination_root);
+        assert_eq!(
+            kept.len(),
+            1,
+            "the file that took the staging name survives"
+        );
+        assert_eq!(
+            fs::read_to_string(&kept[0]).unwrap(),
+            "not waft's file\n",
+            "a file waft did not write must not be unlinked"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&*kept[0].to_string_lossy()),
+            "the error must name the full path of the file left behind, got: {message}"
+        );
+        assert!(
+            message.contains(&*dst.to_string_lossy()),
+            "the error must say the destination itself is fine, got: {message}"
+        );
+    }
+
+    /// The combination a real SMB or exFAT destination presents: no atomic
+    /// exchange *and* no `RENAME_NOREPLACE`, so the replacement displaces the
+    /// destination and then publishes by hard link.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_replaces_without_exchange_or_rename_noreplace() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+        let dst = destination_root.join("file.env");
+        write(&dst, "old\n");
+
+        let _hooks = publish_hooks::install(publish_hooks::Hooks {
+            exchange_unsupported: true,
+            noreplace_unsupported: true,
+            ..publish_hooks::Hooks::default()
+        });
+
+        let outcome = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::ReplaceExisting(existing_snapshot(&dst)),
+            &mut || Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, PublishOutcome::Replaced);
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "new\n");
+        assert!(no_temporaries_left(&destination_root));
+    }
+
+    /// The same lost window on the displace-then-publish path: the link has
+    /// published the replacement, the staging name is taken before the proof,
+    /// and the displaced original is still removed because it *is* proved.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_reports_a_staging_name_the_link_fallback_could_not_remove() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+        let dst = destination_root.join("file.env");
+        write(&dst, "old\n");
+
+        let staging_root = destination_root.clone();
+        let _hooks = publish_hooks::install(publish_hooks::Hooks {
+            exchange_unsupported: true,
+            noreplace_unsupported: true,
+            after_link_published: Some(Box::new(move || {
+                let staged = temporaries(&staging_root);
+                assert_eq!(staged.len(), 1);
+                let interloper = staging_root.join("interloper");
+                write(&interloper, "not waft's file\n");
+                fs::rename(&interloper, &staged[0]).unwrap();
+            })),
+            ..publish_hooks::Hooks::default()
+        });
+
+        let error = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::ReplaceExisting(existing_snapshot(&dst)),
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            fs::read_to_string(&dst).unwrap(),
+            "new\n",
+            "the link published the planned content and that stands"
+        );
+        assert!(
+            displaced_files(&destination_root).is_empty(),
+            "the displaced original was proved and removed"
+        );
+        let kept = temporaries(&destination_root);
+        assert_eq!(
+            kept.len(),
+            1,
+            "the file that took the staging name survives"
+        );
+        assert_eq!(fs::read_to_string(&kept[0]).unwrap(), "not waft's file\n");
+        let message = error.to_string();
+        assert!(
+            message.contains(&*kept[0].to_string_lossy()),
+            "the error must name the full path of the file left behind, got: {message}"
         );
     }
 
