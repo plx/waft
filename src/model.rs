@@ -15,7 +15,14 @@ pub struct RepoContext {
     pub main_worktree: PathBuf,
     /// All known worktree roots for this repository.
     pub known_worktrees: Vec<PathBuf>,
-    /// Value of `core.ignoreCase` in the source repo.
+    /// Whether the source checkout treats differently-cased spellings as the
+    /// same path — `core.ignoreCase`, resolved by
+    /// [`crate::git::case_folding_applies`].
+    ///
+    /// Governs repository-path comparisons: tracked-path protection, gitlink
+    /// boundaries, and candidate matching. Exclusion pattern matching takes
+    /// this only as a lower bound; see
+    /// [`crate::policy_filter::effective_case_insensitive`].
     pub core_ignore_case: bool,
 }
 

@@ -24,7 +24,7 @@ pub struct CopyArgs {
 
 /// Run the `copy` subcommand.
 pub fn run_copy(cli: &Cli, policy: &ResolvedPolicy, args: &CopyArgs) -> Result<()> {
-    let git = default_git_backend();
+    let git = default_git_backend()?;
 
     // Resolve context (copy requires a destination)
     let ctx = context::resolve_context(
@@ -83,7 +83,12 @@ pub(crate) fn run_copy_with_context(
     }
 
     let gitlinks = git.gitlinks(&ctx.source_root)?;
-    let groups = crate::eligibility_groups::compute(&ctx.source_root, eligible, &gitlinks)?;
+    let groups = crate::eligibility_groups::compute(
+        &ctx.source_root,
+        eligible,
+        &gitlinks,
+        ctx.core_ignore_case,
+    )?;
 
     // Build plan
     let plan = crate::planner::plan(ctx, report, groups, git, &fs, args.overwrite, args.dry_run)?;

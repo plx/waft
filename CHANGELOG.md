@@ -11,6 +11,10 @@ Until the first supported release, changes remain under `Unreleased`.
 
 - Protect tracked destination paths using filesystem identity and normalized
   case matching, including case-insensitive macOS aliases.
+- Reject an unrecognized `WAFT_GIT_BACKEND` value instead of silently using the
+  default backend, so a typo cannot change which implementation enforces the
+  tracked-path and repository-boundary checks. Valid values are `gix` and
+  `cli`, trimmed and matched without regard to ASCII case.
 - Hold Git's cooperative index lock across the final tracked-state check and
   no-clobber publication.
 - Anchor Unix source and destination traversal to directory descriptors,
@@ -35,9 +39,54 @@ Until the first supported release, changes remain under `Unreleased`.
   `--isolated` for managed operation.
 - Make profile selection reset its coordinated knobs at that layer while
   preserving same-layer and higher-precedence explicit overrides.
-- Prefer immediate per-file index rechecks over a long-held batch lock; large
-  manifests in very large indexes should be benchmarked before automation.
+- Prefer immediate per-file index rechecks over a long-held batch lock. Each
+  recheck now reuses one index snapshot per repository, revalidated by a single
+  `stat` of the index file, so its cost no longer scales with index size: the
+  Git CLI backend answers all tracked-state questions for a run from one
+  `ls-files` rather than spawning subprocesses per published file under the
+  destination index lock.
+- Bound tracked-path lookup to the colliding folded-name entries. Deciding
+  whether a candidate is tracked is a hash lookup plus, only on a case-folding
+  collision, a filesystem-identity check against the 0-1 index entries that
+  collide — replacing a scan that could stat every index entry per query.
+- Decide case sensitivity from the repository's own `core.ignoreCase` rather
+  than assuming macOS and Windows always fold case. On a case-sensitive volume
+  configured `core.ignoreCase = false`, a distinct untracked file whose name
+  folds onto a tracked one stays eligible, and on platforms that never alias
+  case a directory such as `Vendor/` is no longer treated as the registered
+  `vendor/` submodule boundary. Folded protection is kept when the key is
+  true, and when the key is absent the platform default still decides.
+  Repository-boundary and config-discovery comparisons, like exclusion
+  pattern matching, keep a deliberately more conservative rule: on macOS and
+  Windows they stay folded regardless of the key, because those filesystems
+  may alias case anyway and walking into a registered submodule (or trusting
+  its config) is the failure that must not happen, while a spurious boundary
+  only leaves one directory unscanned.
+- Resolve `core.ignoreCase` once per repository per run, so a run cannot apply
+  folded protection to some paths and exact matching to others, and so the
+  per-file tracked-state recheck does not repeat a config lookup under the
+  destination index lock. Editing the key mid-run is not observed by that run.
+- Answer `info`'s "is this path a filesystem alias of an eligible one?"
+  question with one directory resolution per queried path instead of one per
+  eligible entry. On a repository with 3200 eligible files, `waft info` on a
+  tracked, non-eligible path drops from 5.6s to 0.9s.
+- Normalize worktree paths reported by the Git CLI backend, matching the gix
+  backend. A linked worktree whose recorded path holds a symlinked spelling is
+  now classified and anchored the same way under either backend.
 - Declare Rust 1.90 as the minimum supported Rust version.
 - Restrict source packages to an explicit allowlist.
 - Document installation from a reviewed Git revision; waft is not yet
   published to crates.io.
+
+### Removed
+
+- Removed the wide filesystem-identity scan from tracked-path lookup, an
+  accepted narrowing of protection. Previously a candidate whose name matched
+  no tracked name could still be reported as tracked if it resolved to the same
+  filesystem object as *any* index entry, at a cost of up to one `stat` per
+  index entry per query. Two pathnames a filesystem aliases without a Unicode
+  case-folding or exact-byte match — most concretely, a deliberately
+  hard-linked second name for a tracked file — are now treated as distinct
+  paths. Case aliases, including the ones whose folding the platform performs
+  natively, remain protected: they collide under folding and are confirmed by
+  identity against just the colliding entries.

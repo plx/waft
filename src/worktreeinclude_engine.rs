@@ -220,7 +220,9 @@ pub fn wt_collect_candidates(
 ) -> crate::error::Result<Vec<crate::path::RepoRelPath>> {
     let mut paths = git.list_ignored_untracked(source_root)?;
     let gitlinks = git.gitlinks(source_root)?;
-    let removals = collect_wt_literal_negations(source_root, symlink_policy, &gitlinks);
+    let ignore_case = git.checkout_folds_case(source_root)?;
+    let removals =
+        collect_wt_literal_negations(source_root, symlink_policy, &gitlinks, ignore_case);
     paths.retain(|p| !removals.contains(p.as_str()));
     Ok(paths)
 }
@@ -229,12 +231,19 @@ fn collect_wt_literal_negations(
     source_root: &std::path::Path,
     symlink_policy: SymlinkPolicy,
     gitlinks: &std::collections::HashSet<String>,
+    ignore_case: bool,
 ) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     for entry in walkdir::WalkDir::new(source_root)
         .into_iter()
         .filter_entry(|entry| {
-            !crate::walk::is_git_boundary_dir(entry.path(), entry.depth(), source_root, gitlinks)
+            !crate::walk::is_git_boundary_dir(
+                entry.path(),
+                entry.depth(),
+                source_root,
+                gitlinks,
+                ignore_case,
+            )
         })
     {
         let entry = match entry {

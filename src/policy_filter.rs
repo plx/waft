@@ -52,6 +52,16 @@ pub const TOOLING_V1_PATTERNS: &[&str] = &[
 /// macOS or Windows worktree still aliases differently-cased names. Built-in
 /// safety exclusions must follow the filesystem threat model, not trust that
 /// configuration bit alone.
+///
+/// This is intentionally *not* [`crate::git::case_folding_applies`], which
+/// decides whether two repository paths are the same path. The two answers
+/// can differ — on a case-sensitive volume configured `core.ignoreCase=false`,
+/// `Vendor/` is genuinely not the `vendor/` submodule, yet a `vendor/**`
+/// exclusion still withholds it — because the failure modes are not
+/// symmetric. Treating two distinct paths as one *drops a legitimate
+/// candidate*, so path comparison must be exact; failing to exclude a file
+/// *copies a secret*, so exclusion takes `core_ignore_case` as a lower bound
+/// and stays conservative where the platform may alias names.
 pub fn effective_case_insensitive(core_ignore_case: bool) -> bool {
     core_ignore_case || cfg!(any(target_os = "macos", windows))
 }

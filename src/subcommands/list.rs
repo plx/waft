@@ -16,7 +16,7 @@ pub struct ListArgs {}
 
 /// Run the `list` subcommand.
 pub fn run_list(cli: &Cli, policy: &ResolvedPolicy, _args: &ListArgs) -> Result<()> {
-    let git = default_git_backend();
+    let git = default_git_backend()?;
 
     // Resolve context
     let ctx = context::resolve_context(

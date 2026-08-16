@@ -706,7 +706,7 @@ pub fn discover_project_configs_in_repo(
                             crate::git::repo_paths_equivalent(
                                 relative.as_str(),
                                 gitlink,
-                                case_insensitive,
+                                crate::walk::boundary_case_folds(case_insensitive),
                             )
                         })
                     });

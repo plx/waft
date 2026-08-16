@@ -94,7 +94,7 @@ fn discover_and_validate(
     gitlinks: &HashSet<String>,
     report: &mut ValidationReport,
 ) {
-    let walker = walkdir(root, gitlinks);
+    let walker = walkdir(root, gitlinks, case_insensitive);
     for entry in walker {
         let entry = match entry {
             Ok(e) => e,
@@ -335,11 +335,18 @@ fn xdg_config_home() -> Option<PathBuf> {
 fn walkdir<'a>(
     root: &'a Path,
     gitlinks: &'a HashSet<String>,
+    ignore_case: bool,
 ) -> impl Iterator<Item = std::result::Result<walkdir::DirEntry, walkdir::Error>> + 'a {
     walkdir::WalkDir::new(root)
         .into_iter()
         .filter_entry(move |entry| {
-            !crate::walk::is_git_boundary_dir(entry.path(), entry.depth(), root, gitlinks)
+            !crate::walk::is_git_boundary_dir(
+                entry.path(),
+                entry.depth(),
+                root,
+                gitlinks,
+                ignore_case,
+            )
         })
 }
 
@@ -561,8 +568,30 @@ mod tests {
         fs::write(submodule.join(".worktreeinclude"), "\\\n").unwrap();
 
         let ctx = make_ctx(&dir);
-        // Deliberately use a different spelling: repository boundaries are
-        // matched conservatively on filesystems with case aliases.
+        let git = MockGit::new(None).with_gitlink("vendor/submodule");
+        let report = validate(&ctx, &git, SymlinkPolicy::Error);
+
+        assert!(
+            report
+                .issues
+                .iter()
+                .all(|issue| !issue.file.starts_with(&submodule)),
+            "registered submodule findings leaked into outer validation: {:?}",
+            report.issues
+        );
+    }
+
+    /// A case-insensitive checkout resolves a differently-cased gitlink
+    /// spelling to the same submodule directory, so it is still a boundary.
+    #[test]
+    fn case_folded_gitlink_spelling_bounds_validation_on_folding_checkouts() {
+        let dir = make_repo();
+        let submodule = dir.path().join("vendor/submodule");
+        fs::create_dir_all(&submodule).unwrap();
+        fs::write(submodule.join(".worktreeinclude"), "\\\n").unwrap();
+
+        let mut ctx = make_ctx(&dir);
+        ctx.core_ignore_case = true;
         let git = MockGit::new(None).with_gitlink("VENDOR/SUBMODULE");
         let report = validate(&ctx, &git, SymlinkPolicy::Error);
 

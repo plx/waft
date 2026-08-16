@@ -22,7 +22,7 @@ pub struct InfoArgs {
 
 /// Run the `info` subcommand.
 pub fn run_info(cli: &Cli, policy: &ResolvedPolicy, args: &InfoArgs) -> Result<()> {
-    let git = default_git_backend();
+    let git = default_git_backend()?;
 
     let ctx = context::resolve_context(
         git.as_ref(),
@@ -121,15 +121,21 @@ pub(crate) fn run_info_with_context(
         let source_is_regular = source_kind == "file";
 
         let is_tracked = tracked_set.contains(rp);
+        // The alias question is about `rp`, not about the eligible entry, so
+        // resolve it once here rather than once per entry: the probe's
+        // directory reads would otherwise repeat across the whole eligible
+        // set, which is every selectable file in the repository.
         let eligible = eligible_set.contains(rp)
-            || (source_exists
-                && eligible_set.iter().any(|path| {
+            || (source_exists && {
+                let alias_probe = crate::git::RepoPathAliasProbe::new(&ctx.source_root, rp);
+                eligible_set.iter().any(|path| {
                     crate::git::repo_paths_equivalent(
                         path.as_str(),
                         rp.as_str(),
                         ctx.core_ignore_case,
-                    ) || crate::git::repo_paths_alias_on_filesystem(&ctx.source_root, path, rp)
-                }));
+                    ) || alias_probe.resolves_to(path)
+                })
+            });
 
         // Git ignore status
         let gitignore_str = if is_tracked {

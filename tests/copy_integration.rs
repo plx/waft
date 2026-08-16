@@ -670,39 +670,53 @@ fn copy_uses_filesystem_identity_when_ignore_case_is_false() {
     );
 }
 
-#[cfg(any(target_os = "macos", windows))]
+/// The destination checkout's own `core.ignoreCase` decides whether
+/// `SECRET.env` names the tracked `secret.env`. With the tracked entry absent
+/// from the worktree there is no filesystem identity to compare, so the
+/// configured answer is the only signal — and it must be obeyed in both
+/// directions: protect the alias on a case-folding checkout, and copy a
+/// genuinely distinct file on a case-sensitive one.
 #[test]
-fn copy_protects_missing_case_alias_when_ignore_case_is_false() {
-    let (main_dir, wt_dir) = setup_worktrees();
-    let wt_path = wt_dir.path().join("linked");
+fn copy_follows_configured_case_sensitivity_for_a_missing_dest_alias() {
+    for ignore_case in ["true", "false"] {
+        let (main_dir, wt_dir) = setup_worktrees();
+        let wt_path = wt_dir.path().join("linked");
 
-    write_file(main_dir.path(), ".gitignore", "*.env\n");
-    write_file(main_dir.path(), ".worktreeinclude", "*.env\n");
-    git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
-    git(main_dir.path(), &["commit", "-m", "select env files"]);
-    git(main_dir.path(), &["config", "core.ignoreCase", "false"]);
+        write_file(main_dir.path(), ".gitignore", "*.env\n");
+        write_file(main_dir.path(), ".worktreeinclude", "*.env\n");
+        git(main_dir.path(), &["add", ".gitignore", ".worktreeinclude"]);
+        git(main_dir.path(), &["commit", "-m", "select env files"]);
+        git(main_dir.path(), &["config", "core.ignoreCase", ignore_case]);
 
-    write_file(main_dir.path(), "SECRET.env", "SOURCE_SECRET\n");
-    write_file(&wt_path, "secret.env", "DEST_TRACKED\n");
-    git(&wt_path, &["add", "-f", "secret.env"]);
-    git(&wt_path, &["commit", "-m", "track lower-case destination"]);
-    fs::remove_file(wt_path.join("secret.env")).unwrap();
+        write_file(main_dir.path(), "SECRET.env", "SOURCE_SECRET\n");
+        write_file(&wt_path, "secret.env", "DEST_TRACKED\n");
+        git(&wt_path, &["add", "-f", "secret.env"]);
+        git(&wt_path, &["commit", "-m", "track lower-case destination"]);
+        fs::remove_file(wt_path.join("secret.env")).unwrap();
 
-    waft()
-        .args([
-            "copy",
-            "--overwrite",
-            "--source",
-            main_dir.path().to_str().unwrap(),
-            "--dest",
-            wt_path.to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("skip"));
+        let assertion = waft()
+            .args([
+                "copy",
+                "--source",
+                main_dir.path().to_str().unwrap(),
+                "--dest",
+                wt_path.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
 
-    assert!(!wt_path.join("secret.env").exists());
-    assert!(!wt_path.join("SECRET.env").exists());
+        if ignore_case == "true" {
+            assertion.stderr(predicate::str::contains("skip"));
+            assert!(!wt_path.join("secret.env").exists());
+            assert!(!wt_path.join("SECRET.env").exists());
+        } else {
+            assertion.stderr(predicate::str::contains("copied: SECRET.env"));
+            assert_eq!(
+                fs::read_to_string(wt_path.join("SECRET.env")).unwrap(),
+                "SOURCE_SECRET\n"
+            );
+        }
+    }
 }
 
 #[test]

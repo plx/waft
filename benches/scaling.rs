@@ -695,6 +695,7 @@ fn bench_checked_manifest_execution(c: &mut Criterion) {
                         black_box(&fixture.ctx.source_root),
                         black_box(eligible),
                         black_box(&HashSet::new()),
+                        black_box(false),
                     )
                     .unwrap();
                     let plan = waft::planner::plan(
