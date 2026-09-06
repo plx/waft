@@ -33,7 +33,7 @@ include = [
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-gix = { version = "0.86", default-features = false, features = ["excludes", "index", "sha1"] }
+gix = { version = "0.87", default-features = false, features = ["excludes", "index", "sha1"] }
 ignore = "0.4"
 reflink-copy = "0.1"
 serde = { version = "1", features = ["derive"] }
