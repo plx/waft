@@ -36,6 +36,7 @@ jobs:
           shellcheck
           scripts/install-hooks.sh
           scripts/self-test.sh
+          scripts/artifact-smoke.sh
           hooks/dispatcher
           hooks/post-checkout
 
@@ -180,3 +181,15 @@ jobs:
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       - name: just check-self-test
         run: just check-self-test
+
+  core-checks:
+    name: core checks
+    if: always()
+    needs: [automation-lint, fmt, clippy, doc-build, licenses, security, coverage, tests, self-test]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every core job to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | jq -e 'all(.[]; .result == "success")'

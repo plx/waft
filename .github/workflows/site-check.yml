@@ -9,15 +9,6 @@ on:
       - "site/README.md"
       - ".github/workflows/site-check.yml"
       - ".github/workflows/site-publish.yml"
-  push:
-    branches: ["main"]
-    paths:
-      - "site/**"
-      - "AGENTS.md"
-      - "README.md"
-      - "site/README.md"
-      - ".github/workflows/site-check.yml"
-      - ".github/workflows/site-publish.yml"
 
 permissions:
   contents: read

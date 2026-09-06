@@ -8,7 +8,8 @@ default branch; adopters should pin and review a specific commit.
 ## Reporting a vulnerability
 
 Do not disclose sensitive vulnerability details in a public issue. Use
-GitHub's private vulnerability reporting for this repository when available.
+[GitHub's private vulnerability reporting](https://github.com/plx/waft/security/advisories/new)
+for this repository.
 If that option is unavailable, open a minimal issue requesting a private
 contact channel without including exploit details or secrets.
 
