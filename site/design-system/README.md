@@ -342,7 +342,7 @@ The UI-kit JSX under `ui_kits/site/` is separate — those are in-browser Babel 
 │       └── *.jsx              ← React components (Header, Hero, TerminalCard, …)
 │
 └── site/                      ← historical source snapshot; reference only
-    ├── package.json
+    ├── package.reference.json ← archived metadata, not an npm project
     ├── src/styles/{theme,landing,starlight}.css
     ├── src/content/docs/*.mdx
     └── …
