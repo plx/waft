@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 use crate::config::CopyStrategy;
 use crate::fs::{CopyFileRequest, FileSystem};
 use crate::git::GitBackend;
-use crate::model::{CopyOutcome, CopyPlan, CopyReport, CopyResult, CopyResultKind, PlannedEntry};
+use crate::model::{
+    CopyOutcome, CopyPlan, CopyReport, CopyResult, CopyResultKind, DestinationExpectation,
+    PlannedEntry, PublishOutcome,
+};
 
 /// Execute a copy plan, returning a report of outcomes.
 ///
@@ -27,6 +30,8 @@ pub fn execute(
 ) -> CopyReport {
     let mut results = Vec::new();
     let mut copied = 0usize;
+    let mut replaced = 0usize;
+    let mut permissions_repaired = 0usize;
     let mut failed = 0usize;
     let mut skipped = 0usize;
     let mut up_to_date = 0usize;
@@ -35,11 +40,24 @@ pub fn execute(
         match entry {
             PlannedEntry::Copy(op) => {
                 if plan.dry_run {
-                    copied += 1;
+                    let outcome = match &op.expected_destination {
+                        DestinationExpectation::Missing => {
+                            copied += 1;
+                            CopyOutcome::Copied
+                        }
+                        DestinationExpectation::ReplaceExisting(_) => {
+                            replaced += 1;
+                            CopyOutcome::Replaced
+                        }
+                        DestinationExpectation::RepairPermissions(_) => {
+                            permissions_repaired += 1;
+                            CopyOutcome::PermissionsRepaired
+                        }
+                    };
                     results.push(CopyResult {
                         rel_path: op.rel_path.clone(),
                         kind: CopyResultKind::File,
-                        outcome: CopyOutcome::Copied,
+                        outcome,
                     });
                     continue;
                 }
@@ -79,12 +97,16 @@ pub fn execute(
                 // Release only after the filesystem primitive has returned.
                 drop(index_lock);
                 match result {
-                    Ok(()) => {
-                        copied += 1;
+                    Ok(outcome) => {
+                        match outcome {
+                            PublishOutcome::Created => copied += 1,
+                            PublishOutcome::Replaced => replaced += 1,
+                            PublishOutcome::PermissionsRepaired => permissions_repaired += 1,
+                        }
                         results.push(CopyResult {
                             rel_path: op.rel_path.clone(),
                             kind: CopyResultKind::File,
-                            outcome: CopyOutcome::Copied,
+                            outcome: outcome.into(),
                         });
                     }
                     Err(msg) => {
@@ -103,17 +125,42 @@ pub fn execute(
             PlannedEntry::Skip(_) => {
                 skipped += 1;
             }
+            PlannedEntry::Failure(entry) => {
+                // Planning could not describe this file. Report it like any
+                // other per-file failure so the run's exit status reflects it
+                // while every other entry still executes.
+                failed += 1;
+                results.push(CopyResult {
+                    rel_path: entry.rel_path.clone(),
+                    kind: CopyResultKind::File,
+                    outcome: CopyOutcome::Failed {
+                        message: format!("{}: {}", entry.rel_path, entry.message),
+                    },
+                });
+            }
         }
     }
 
     CopyReport {
         results,
         copied,
+        replaced,
+        permissions_repaired,
         failed,
         skipped,
         up_to_date,
     }
 }
+
+/// Delays between attempts to take the destination index lock.
+///
+/// An IDE, fsmonitor, or background `git status` holds `index.lock` for a few
+/// milliseconds at a time. Retrying briefly keeps those from turning into
+/// sporadic per-file failures without hiding a genuinely stuck lock.
+const INDEX_LOCK_RETRY_DELAYS: &[std::time::Duration] = &[
+    std::time::Duration::from_millis(50),
+    std::time::Duration::from_millis(100),
+];
 
 /// A cooperative Git index writer lock.
 ///
@@ -122,6 +169,7 @@ pub fn execute(
 /// closes that race against normal Git operations. Direct, non-cooperative
 /// mutation of the index remains outside this protocol.
 struct GitIndexLock {
+    #[cfg(not(unix))]
     path: PathBuf,
     file: Option<fs::File>,
 }
@@ -131,43 +179,546 @@ impl GitIndexLock {
         let mut lock_name = index_path.as_os_str().to_os_string();
         lock_name.push(".lock");
         let path = PathBuf::from(lock_name);
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        format!(
-                            "destination Git index is locked at {}; refusing to publish",
-                            path.display()
-                        ),
-                    )
-                } else {
-                    io::Error::new(
+
+        // Install the handlers and stage the path *before* the file exists, so
+        // arming afterwards is a single atomic store. A signal arriving between
+        // creating the lock and arming would once have terminated the process
+        // with the lock still on disk; from `stage` onwards such a signal is
+        // deferred to `resume_deferred_signal` below instead.
+        interrupt_cleanup::stage(&path);
+
+        let mut attempt = 0usize;
+        let file = loop {
+            let created = OpenOptions::new().write(true).create_new(true).open(&path);
+            if let Ok(file) = &created {
+                interrupt_cleanup::record_file(file);
+            }
+            // A signal arriving while the path is merely staged cannot be acted
+            // on by the handler: it cannot tell whether the call above has
+            // already produced a file, so it records the signal and returns
+            // rather than terminating the process with a lock on disk that
+            // nothing will remove. Here the answer is known.
+            resume_deferred_signal(&path, created.is_ok())?;
+            match created {
+                Ok(file) => break Ok(file),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let Some(delay) = INDEX_LOCK_RETRY_DELAYS.get(attempt) else {
+                        break Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            format!(
+                                "destination Git index is locked at {} after {} attempt(s); refusing to publish",
+                                path.display(),
+                                INDEX_LOCK_RETRY_DELAYS.len() + 1
+                            ),
+                        ));
+                    };
+                    attempt += 1;
+                    std::thread::sleep(*delay);
+                }
+                Err(error) => {
+                    break Err(io::Error::new(
                         error.kind(),
                         format!(
                             "failed to lock destination Git index at {}: {error}",
                             path.display()
                         ),
-                    )
+                    ));
                 }
-            })?;
+            }
+        };
+
+        let file = match file {
+            Ok(file) => file,
+            Err(error) => {
+                // No lock was created and none will be, so the staged window
+                // closes here rather than staying open for the rest of the run.
+                // Leaving it *before* the check that follows is what makes a
+                // signal deferred at the last instant visible to that check
+                // instead of stranded for the next acquisition.
+                interrupt_cleanup::disarm();
+                resume_deferred_signal(&path, false)?;
+                return Err(error);
+            }
+        };
+
+        after_lock_created();
+
+        // The lock now exists and is ours, so the staged path becomes live: an
+        // interrupt during the publish window will not leave a stale lock
+        // behind for the next Git command.
+        interrupt_cleanup::arm();
+        // A signal delivered between the check above and `arm` is deferred too,
+        // and the handler only defers while the state is still staged — so a
+        // deferral that raced this `arm` is guaranteed to be visible here. Every
+        // path that records a signal ends at one of these two checks.
+        resume_deferred_signal(&path, true)?;
         Ok(Self {
+            #[cfg(not(unix))]
             path,
             file: Some(file),
         })
     }
 }
 
+/// Finish a signal the handler deferred while the lock was being created.
+///
+/// `holds_lock` answers the one question the handler could not: whether the
+/// staged path is a file this process just created, and therefore whether
+/// removing it is waft's business or another writer's loss. The re-raise that
+/// follows normally ends the process; if the previous disposition was a handler
+/// that returns, acquisition fails instead, because an interrupt the user asked
+/// for must not turn into a publication that proceeds anyway.
+fn resume_deferred_signal(path: &Path, holds_lock: bool) -> io::Result<()> {
+    let Some(signal) = interrupt_cleanup::resume_pending_signal(holds_lock) else {
+        return Ok(());
+    };
+    Err(io::Error::new(
+        io::ErrorKind::Interrupted,
+        format!(
+            "interrupted by signal {signal} while locking the destination Git index at {}; no \
+             lock was left behind and nothing was published",
+            path.display()
+        ),
+    ))
+}
+
 impl Drop for GitIndexLock {
     fn drop(&mut self) {
-        // Windows cannot unlink an open file; close first on every platform.
-        drop(self.file.take());
-        let _ = fs::remove_file(&self.path);
+        #[cfg(unix)]
+        {
+            // Defer signals across removal just as during creation. After
+            // unlink another Git writer can immediately create its own lock;
+            // no handler may interpret that new file as ours.
+            if interrupt_cleanup::begin_release() {
+                interrupt_cleanup::remove_recorded_lock();
+                after_lock_removed();
+                interrupt_cleanup::disarm();
+                interrupt_cleanup::resume_pending_signal(false);
+            }
+            drop(self.file.take());
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows cannot unlink an open file.
+            drop(self.file.take());
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
+
+/// Signal-safe removal of the one lock file this process may hold.
+///
+/// Unix installs `SIGINT`/`SIGTERM` handlers that unlink the recorded path and
+/// then re-raise the signal under its previous disposition. While the lock is
+/// only staged — the file may exist by now, or may belong to another writer —
+/// the handler cannot decide either question, so it records the signal and
+/// returns; [`GitIndexLock::acquire`] acts on the record as soon as it knows.
+/// On other platforms this degrades to a no-op: an interrupt can still leave a
+/// stale `.git/**/index.lock` that the user must delete.
+#[cfg(unix)]
+mod interrupt_cleanup {
+    use std::cell::UnsafeCell;
+    use std::mem::MaybeUninit;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+    use std::ptr;
+    use std::sync::Once;
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+
+    /// Longer than `PATH_MAX` on every platform waft supports.
+    const PATH_CAPACITY: usize = 4096;
+
+    const EMPTY: u8 = 0;
+    const WRITING: u8 = 1;
+    const STAGED: u8 = 2;
+    const ARMED: u8 = 3;
+
+    /// No signal is deferred. Zero is not a valid signal number.
+    const NO_SIGNAL: i32 = 0;
+
+    struct SignalCell<T>(UnsafeCell<T>);
+    // Access is confined to the single-threaded acquire/release path and to a
+    // signal handler that only reads once `STATE` says the value is complete.
+    unsafe impl<T> Sync for SignalCell<T> {}
+
+    static STATE: AtomicU8 = AtomicU8::new(EMPTY);
+    // Kept open until release has finished; used by signal-safe fstat/lstat
+    // to avoid removing a lock whose pathname was replaced by another writer.
+    static LOCK_FD: AtomicI32 = AtomicI32::new(-1);
+    static PATH: SignalCell<[u8; PATH_CAPACITY]> = SignalCell(UnsafeCell::new([0; PATH_CAPACITY]));
+    /// A signal the handler could not act on because the lock file's existence
+    /// was still undecided. Read back by the acquire path within microseconds.
+    static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(NO_SIGNAL);
+
+    static HANDLERS_INSTALLED: Once = Once::new();
+    static INTERRUPT_PREVIOUS_READY: AtomicBool = AtomicBool::new(false);
+    static TERMINATE_PREVIOUS_READY: AtomicBool = AtomicBool::new(false);
+    static PREVIOUS_INTERRUPT: SignalCell<MaybeUninit<libc::sigaction>> =
+        SignalCell(UnsafeCell::new(MaybeUninit::uninit()));
+    static PREVIOUS_TERMINATE: SignalCell<MaybeUninit<libc::sigaction>> =
+        SignalCell(UnsafeCell::new(MaybeUninit::uninit()));
+
+    /// Record `path` as the lock this process is about to create.
+    ///
+    /// Staging is separate from arming so that the caller can write the path
+    /// and install the handlers *before* the lock file exists, leaving only a
+    /// single atomic store between "the lock is ours" and "an interrupt will
+    /// clean it up". A signal landing in that store's shadow is deferred rather
+    /// than acted on, because only the caller can say which side of it the
+    /// signal arrived on.
+    pub(super) fn stage(path: &Path) {
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.len() >= PATH_CAPACITY {
+            // Nothing safe to record; normal `Drop` cleanup still applies, and
+            // leaving the state `EMPTY` keeps `arm` from publishing a stale
+            // path from an earlier lock.
+            STATE.store(EMPTY, Ordering::SeqCst);
+            return;
+        }
+        install_handlers();
+        STATE.store(WRITING, Ordering::SeqCst);
+        LOCK_FD.store(-1, Ordering::SeqCst);
+        // SAFETY: `STATE` is not `ARMED`, so no handler will read the buffer
+        // while it is being written, and only one lock is live at a time.
+        unsafe {
+            let buffer = &mut *PATH.0.get();
+            buffer[..bytes.len()].copy_from_slice(bytes);
+            buffer[bytes.len()] = 0;
+        }
+        STATE.store(STAGED, Ordering::SeqCst);
+    }
+
+    pub(super) fn record_file(file: &std::fs::File) {
+        LOCK_FD.store(file.as_raw_fd(), Ordering::SeqCst);
+    }
+
+    pub(super) fn begin_release() -> bool {
+        STATE
+            .compare_exchange(ARMED, STAGED, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// Promote the staged path to the live lock.
+    ///
+    /// Does nothing unless a path was successfully staged, so a lock whose path
+    /// could not be recorded never adopts a previous lock's path.
+    pub(super) fn arm() {
+        let _ = STATE.compare_exchange(STAGED, ARMED, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// Stop treating any path as the live lock.
+    pub(super) fn disarm() {
+        STATE.store(EMPTY, Ordering::SeqCst);
+    }
+
+    /// Unlink the recorded lock path, if one is armed.
+    ///
+    /// Consume ownership once, then verify and remove the recorded lock.
+    pub(super) fn remove_armed_lock() {
+        if STATE
+            .compare_exchange(ARMED, EMPTY, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            remove_recorded_lock();
+        }
+    }
+
+    /// Remove only the entry matching the open lock descriptor. fstat/lstat
+    /// and unlink are async-signal-safe; failure to prove ownership leaves the
+    /// name alone. As with staging cleanup, POSIX cannot combine the identity
+    /// check and unlink into one conditional syscall.
+    pub(super) fn remove_recorded_lock() {
+        unsafe {
+            let mut held: MaybeUninit<libc::stat> = MaybeUninit::uninit();
+            let mut named: MaybeUninit<libc::stat> = MaybeUninit::uninit();
+            let path = PATH.0.get().cast::<libc::c_char>();
+            if libc::fstat(LOCK_FD.load(Ordering::SeqCst), held.as_mut_ptr()) != 0
+                || libc::lstat(path, named.as_mut_ptr()) != 0
+            {
+                return;
+            }
+            let held = held.assume_init();
+            let named = named.assume_init();
+            if held.st_dev == named.st_dev && held.st_ino == named.st_ino {
+                libc::unlink(path);
+            }
+        }
+    }
+
+    /// Async-signal-safe throughout: atomic accesses, `fstat`, `lstat`,
+    /// `unlink`, `sigaction`, and `raise`.
+    pub(super) extern "C" fn handle_interrupt(signal: libc::c_int) {
+        // One window cannot be resolved from inside a handler: between
+        // `create_new` returning and the cleanup being armed, the lock file may
+        // or may not exist, and it may or may not be waft's. Re-raising there
+        // would terminate the process with a stale `index.lock` that blocks
+        // every later Git and waft operation, and unlinking there could delete
+        // a lock another process holds. So the signal is recorded and the
+        // handler returns; the acquire path has a check immediately after both
+        // ends of that window and acts on it as soon as it knows the answer.
+        if STATE.load(Ordering::SeqCst) == STAGED {
+            let _ = PENDING_SIGNAL.compare_exchange(
+                NO_SIGNAL,
+                signal,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+            // Deferring is only safe while the acquire path still has a check
+            // ahead of it. Under a single total order this load decides that:
+            // if it still sees `STAGED`, the store above precedes the store
+            // that arms, which precedes the check that follows arming, so the
+            // record cannot be missed. Otherwise the window is over — take the
+            // record back and handle the signal here, the ordinary way.
+            if STATE.load(Ordering::SeqCst) == STAGED {
+                return;
+            }
+            let _ = PENDING_SIGNAL.compare_exchange(
+                signal,
+                NO_SIGNAL,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
+        // This handler is only installed for signals whose previous
+        // disposition was not `SIG_IGN`, so reaching here means the process is
+        // going to act on the signal rather than sail past it. Removing the
+        // lock first is therefore safe: nothing resumes publishing afterwards.
+        remove_armed_lock();
+        restore_previous_and_raise(signal);
+    }
+
+    /// Act on a signal the handler deferred, if there is one.
+    ///
+    /// `holds_lock` says whether the staged path names a file this process just
+    /// created. Returns the signal number if the process survived the re-raise,
+    /// which happens only when the previous disposition was a handler that
+    /// returns; the caller must then abandon the acquisition.
+    pub(super) fn resume_pending_signal(holds_lock: bool) -> Option<i32> {
+        let signal = PENDING_SIGNAL.swap(NO_SIGNAL, Ordering::SeqCst);
+        if signal == NO_SIGNAL {
+            return None;
+        }
+        // Keep later signals deferred until cleanup is finished. In
+        // particular, never unlink the same name twice after another writer
+        // has had a chance to acquire it.
+        if holds_lock && STATE.load(Ordering::SeqCst) != EMPTY {
+            STATE.store(STAGED, Ordering::SeqCst);
+            remove_recorded_lock();
+        }
+        // Whether or not a lock was created, nothing is live now. Leaving the
+        // state `STAGED` would make a later signal defer with no check ahead of
+        // it to redeem the deferral.
+        disarm();
+        restore_previous_and_raise(signal);
+        Some(signal)
+    }
+
+    /// Put back the disposition waft replaced, then re-raise, so the process
+    /// ends the way it would have without waft's handler.
+    ///
+    /// Only `SIGINT` and `SIGTERM` are ever installed. Any other number can
+    /// only come from a test driving the handler directly: nothing was replaced
+    /// for it, so nothing is restored and the signal is simply re-raised.
+    fn restore_previous_and_raise(signal: libc::c_int) {
+        unsafe {
+            let replaced = match signal {
+                libc::SIGINT => Some((PREVIOUS_INTERRUPT.0.get(), &INTERRUPT_PREVIOUS_READY)),
+                libc::SIGTERM => Some((PREVIOUS_TERMINATE.0.get(), &TERMINATE_PREVIOUS_READY)),
+                _ => None,
+            };
+            if let Some((previous, ready)) = replaced {
+                if ready.load(Ordering::SeqCst) {
+                    libc::sigaction(signal, (*previous).as_ptr(), ptr::null_mut());
+                } else {
+                    let mut default: libc::sigaction = std::mem::zeroed();
+                    default.sa_sigaction = libc::SIG_DFL;
+                    libc::sigaction(signal, &default, ptr::null_mut());
+                }
+            }
+            libc::raise(signal);
+        }
+    }
+
+    /// The signal a deferral recorded, for tests that drive the handler through
+    /// the creation window directly.
+    #[cfg(test)]
+    pub(super) fn deferred_signal() -> Option<i32> {
+        match PENDING_SIGNAL.load(Ordering::SeqCst) {
+            NO_SIGNAL => None,
+            signal => Some(signal),
+        }
+    }
+
+    /// Installed once, from `stage`, before any lock file exists. Nothing is
+    /// armed yet, so a signal arriving during installation finds nothing to
+    /// clean up and simply follows its previous disposition.
+    fn install_handlers() {
+        HANDLERS_INSTALLED.call_once(|| unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = handle_interrupt as usize;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            // Neither termination handler may interrupt the other's cleanup.
+            libc::sigaddset(&mut action.sa_mask, libc::SIGINT);
+            libc::sigaddset(&mut action.sa_mask, libc::SIGTERM);
+
+            // Each call publishes its own readiness flag, in the only order
+            // that is safe against a delivery arriving mid-installation, so
+            // there is nothing left for this caller to do with the answer.
+            install_unless_ignored(
+                libc::SIGINT,
+                &action,
+                PREVIOUS_INTERRUPT.0.get(),
+                &INTERRUPT_PREVIOUS_READY,
+            );
+            install_unless_ignored(
+                libc::SIGTERM,
+                &action,
+                PREVIOUS_TERMINATE.0.get(),
+                &TERMINATE_PREVIOUS_READY,
+            );
+        });
+    }
+
+    /// Install `action` for `signal`, recording the previous disposition.
+    ///
+    /// A signal that the process inherited as ignored is left ignored. Handling
+    /// it would both make an inherited `SIG_IGN` observable and — because
+    /// `raise` on an ignored signal returns — let the handler delete the live
+    /// index lock and then resume publishing without it, which is exactly the
+    /// race the lock exists to prevent. `nohup` and non-job-control background
+    /// jobs make this the normal case for `SIGINT`.
+    ///
+    /// The disposition is therefore *queried* first, with a null new action, and
+    /// waft's handler is installed only if the answer is something other than
+    /// `SIG_IGN`. Installing first and putting an inherited `SIG_IGN` back
+    /// afterwards would leave a window in which the signal was already waft's:
+    /// a delivery inside it would run a handler whose recorded previous
+    /// disposition was not yet published, which restores `SIG_DFL` and kills a
+    /// process that was started to ignore that signal outright.
+    ///
+    /// Query-then-install is race-free here because nothing else in this process
+    /// changes dispositions: they are installed exactly once, from a `Once`,
+    /// before any worker exists, and never touched again. The only other writer
+    /// would be a signal handler, and the only handler waft installs is the one
+    /// being installed here. So the disposition read below is still the live one
+    /// at the moment it is replaced.
+    ///
+    /// `ready` is set before the installation, never after, so any delivery that
+    /// lands the instant waft's handler becomes live already finds the
+    /// disposition it must put back. Setting it afterwards is the same window in
+    /// a different place.
+    ///
+    /// Returns whether waft's handler is now installed for `signal`.
+    pub(super) unsafe fn install_unless_ignored(
+        signal: libc::c_int,
+        action: &libc::sigaction,
+        previous: *mut MaybeUninit<libc::sigaction>,
+        ready: &AtomicBool,
+    ) -> bool {
+        unsafe {
+            let mut current: MaybeUninit<libc::sigaction> = MaybeUninit::uninit();
+            // A null new action means "report the disposition, change nothing":
+            // an inherited `SIG_IGN` is never even momentarily displaced.
+            if libc::sigaction(signal, ptr::null(), current.as_mut_ptr()) != 0 {
+                return false;
+            }
+            let current = current.assume_init();
+            if current.sa_sigaction == libc::SIG_IGN {
+                return false;
+            }
+            (*previous).write(current);
+            ready.store(true, Ordering::SeqCst);
+            if libc::sigaction(signal, action, ptr::null_mut()) != 0 {
+                // Nothing was replaced, so there is nothing to put back; a
+                // handler that is not installed can never read the flag anyway.
+                ready.store(false, Ordering::SeqCst);
+                return false;
+            }
+            true
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod interrupt_cleanup {
+    use std::path::Path;
+
+    pub(super) fn stage(_path: &Path) {}
+
+    pub(super) fn arm() {}
+
+    pub(super) fn record_file(_file: &std::fs::File) {}
+
+    pub(super) fn disarm() {}
+
+    /// No handler is installed, so no signal is ever deferred.
+    pub(super) fn resume_pending_signal(_holds_lock: bool) -> Option<i32> {
+        None
+    }
+}
+
+/// Test-only seam inside [`GitIndexLock::acquire`], between the lock file
+/// existing and the cleanup being armed.
+///
+/// A real signal cannot be aimed at that window from a test, and the window is
+/// exactly where an interrupt used to be able to leave a stale `index.lock`
+/// behind. The hook lets a test stand in for the kernel and deliver one there.
+#[cfg(all(test, unix))]
+mod lock_hooks {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static IN_CREATION_WINDOW: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+        static IN_RELEASE_WINDOW: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+    }
+
+    /// Installs `hook` for the current thread until the returned guard drops.
+    pub(super) fn install(hook: Box<dyn FnMut()>) -> HookGuard {
+        IN_CREATION_WINDOW.with(|cell| *cell.borrow_mut() = Some(hook));
+        HookGuard
+    }
+
+    pub(super) fn install_release(hook: Box<dyn FnMut()>) -> HookGuard {
+        IN_RELEASE_WINDOW.with(|cell| *cell.borrow_mut() = Some(hook));
+        HookGuard
+    }
+
+    pub(super) fn after_lock_removed() {
+        let hook = IN_RELEASE_WINDOW.with(|cell| cell.borrow_mut().take());
+        if let Some(mut hook) = hook {
+            hook();
+        }
+    }
+
+    pub(super) struct HookGuard;
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            IN_CREATION_WINDOW.with(|cell| *cell.borrow_mut() = None);
+            IN_RELEASE_WINDOW.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+
+    /// Takes the hook out before running it, so it may itself re-enter the
+    /// acquire path without recursing or borrowing twice.
+    pub(super) fn after_lock_created() {
+        let hook = IN_CREATION_WINDOW.with(|cell| cell.borrow_mut().take());
+        if let Some(mut hook) = hook {
+            hook();
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+use lock_hooks::{after_lock_created, after_lock_removed};
+
+#[cfg(not(all(test, unix)))]
+fn after_lock_created() {}
+
+#[cfg(all(not(test), unix))]
+fn after_lock_removed() {}
 
 fn ensure_destination_untracked(
     plan: &CopyPlan,
@@ -196,7 +747,7 @@ fn execute_copy(
     fs: &dyn FileSystem,
     strategy: CopyStrategy,
     before_publish: &mut dyn FnMut() -> io::Result<()>,
-) -> Result<(), String> {
+) -> Result<PublishOutcome, String> {
     fs.copy_file(
         CopyFileRequest {
             source_root,
@@ -208,9 +759,7 @@ fn execute_copy(
         },
         before_publish,
     )
-    .map_err(|e| format!("{}: failed to copy: {e}", op.rel_path))?;
-
-    Ok(())
+    .map_err(|e| format!("{}: failed to copy: {e}", op.rel_path))
 }
 
 /// Render a copy report to stderr.
@@ -221,27 +770,46 @@ pub fn render_report(report: &CopyReport, quiet: bool) {
                 // Quiet suppresses routine progress, never actionable errors.
                 eprintln!("FAILED: {message}");
             }
-            CopyOutcome::Copied if !quiet => match &result.kind {
+            _ if quiet => {}
+            CopyOutcome::Copied => match &result.kind {
+                CopyResultKind::File => eprintln!("copied: {}", result.rel_path),
+            },
+            CopyOutcome::Replaced => match &result.kind {
+                CopyResultKind::File => eprintln!("replaced: {}", result.rel_path),
+            },
+            CopyOutcome::PermissionsRepaired => match &result.kind {
                 CopyResultKind::File => {
-                    eprintln!("copied: {}", result.rel_path);
+                    eprintln!("repaired permissions: {}", result.rel_path)
                 }
             },
-            CopyOutcome::Copied => {}
         }
     }
 
     if !quiet {
-        eprintln!(
-            "{} copied, {} failed, {} skipped, {} up-to-date",
-            report.copied, report.failed, report.skipped, report.up_to_date
-        );
+        // The replace/repair clauses only appear when they happened, so the
+        // common run keeps its familiar one-line summary.
+        let mut summary = format!("{} copied", report.copied);
+        if report.replaced > 0 {
+            summary.push_str(&format!(", {} replaced", report.replaced));
+        }
+        if report.permissions_repaired > 0 {
+            summary.push_str(&format!(
+                ", {} permissions repaired",
+                report.permissions_repaired
+            ));
+        }
+        summary.push_str(&format!(
+            ", {} failed, {} skipped, {} up-to-date",
+            report.failed, report.skipped, report.up_to_date
+        ));
+        eprintln!("{summary}");
     }
 }
 
 /// Check if the copy report has any failures, returning an appropriate exit status.
 pub fn report_has_failures(report: &CopyReport) -> Option<(usize, usize)> {
     if report.failed > 0 {
-        Some((report.failed, report.copied + report.failed))
+        Some((report.failed, report.succeeded() + report.failed))
     } else {
         None
     }
@@ -401,7 +969,7 @@ mod tests {
             &self,
             request: CopyFileRequest<'_>,
             before_publish: &mut dyn FnMut() -> io::Result<()>,
-        ) -> io::Result<()> {
+        ) -> io::Result<PublishOutcome> {
             if self.fail_copy_file {
                 return Err(io::Error::other("copy failed"));
             }
@@ -432,7 +1000,11 @@ mod tests {
                 dst,
                 request.expected_destination.clone(),
             ));
-            Ok(())
+            Ok(match request.expected_destination {
+                DestinationExpectation::Missing => PublishOutcome::Created,
+                DestinationExpectation::ReplaceExisting(_) => PublishOutcome::Replaced,
+                DestinationExpectation::RepairPermissions(_) => PublishOutcome::PermissionsRepaired,
+            })
         }
     }
 
@@ -581,8 +1153,580 @@ mod tests {
         assert!(message.contains("became tracked"));
     }
 
+    /// Serializes the tests that take an index lock or inspect the
+    /// interrupt-cleanup state.
+    ///
+    /// That state is process-global by necessity — a signal handler cannot
+    /// consult thread-local storage — and a real run only ever has one lock
+    /// live at a time. Test threads have to reproduce that discipline
+    /// explicitly instead of racing each other through it.
+    fn one_lock_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SERIALIZE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn index_lock_retries_past_a_transient_writer() {
+        let _serialized = one_lock_at_a_time();
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        let lock = temp.path().join("index.lock");
+        // Stand in for an IDE or fsmonitor holding the index briefly.
+        fs::write(&lock, b"transient writer\n").unwrap();
+        let releaser = {
+            let lock = lock.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                fs::remove_file(&lock).unwrap();
+            })
+        };
+
+        let Ok(acquired) = GitIndexLock::acquire(&index) else {
+            panic!("retry should win the lock");
+        };
+        releaser.join().unwrap();
+        assert!(lock.exists());
+        drop(acquired);
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn index_lock_gives_a_clear_failure_after_exhausting_retries() {
+        let _serialized = one_lock_at_a_time();
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        let lock = temp.path().join("index.lock");
+        fs::write(&lock, b"held by concurrent Git\n").unwrap();
+
+        let started = std::time::Instant::now();
+        let Err(error) = GitIndexLock::acquire(&index) else {
+            panic!("a permanently held lock must not be acquired");
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            error
+                .to_string()
+                .contains("destination Git index is locked")
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(140),
+            "acquisition should retry for roughly 150ms"
+        );
+        assert!(
+            lock.exists(),
+            "waft must never remove another process's lock"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_cleanup_removes_only_the_armed_lock() {
+        let _serialized = one_lock_at_a_time();
+        let temp = tempfile::TempDir::new().unwrap();
+        let armed = temp.path().join("index.lock");
+        fs::write(&armed, b"waft\n").unwrap();
+
+        // The signal handler is a thin wrapper around this; calling it
+        // directly is the only way to exercise it without killing the test
+        // process.
+        interrupt_cleanup::stage(&armed);
+        let held_file = fs::File::open(&armed).unwrap();
+        interrupt_cleanup::record_file(&held_file);
+        interrupt_cleanup::arm();
+        interrupt_cleanup::remove_armed_lock();
+        assert!(!armed.exists(), "an interrupt must not leave a stale lock");
+
+        fs::write(&armed, b"someone else\n").unwrap();
+        interrupt_cleanup::disarm();
+        interrupt_cleanup::remove_armed_lock();
+        assert!(
+            armed.exists(),
+            "cleanup must do nothing once the lock is released"
+        );
+
+        // Staging happens before the lock file is created, when the path may
+        // still belong to whoever currently holds it.
+        interrupt_cleanup::stage(&armed);
+        interrupt_cleanup::remove_armed_lock();
+        assert!(
+            armed.exists(),
+            "a staged but unacquired lock is not waft's to remove"
+        );
+        fs::remove_file(&armed).unwrap();
+    }
+
+    /// A signal inherited as ignored must stay ignored, and must never be
+    /// waft's even for an instant. If waft handled it, `raise` would return and
+    /// the handler would fall back into the publish window having already
+    /// deleted the index lock it is still relying on; and a delivery inside a
+    /// momentary takeover would run that handler before the disposition it has
+    /// to put back was recorded, restoring `SIG_DFL` and killing a process that
+    /// was started to ignore the signal outright.
+    ///
+    /// So the disposition is queried and only then replaced, which is what this
+    /// test pins: on an inherited ignore nothing is installed, nothing is
+    /// recorded, and the storage the handler reads is never even written.
+    ///
+    /// `SIGUSR2` stands in for `SIGINT`/`SIGTERM` so the test never changes the
+    /// dispositions the test process actually runs under. That disposition is
+    /// process-global, so this test shares the lock with the others.
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_handlers_leave_an_inherited_ignore_alone() {
+        use std::sync::atomic::AtomicBool;
+
+        let _serialized = one_lock_at_a_time();
+        extern "C" fn never_called(_signal: libc::c_int) {}
+        extern "C" fn inherited_handler(_signal: libc::c_int) {}
+        /// Never installed as a disposition; only ever a marker in storage.
+        extern "C" fn never_installed(_signal: libc::c_int) {}
+
+        unsafe fn disposition(signal: libc::c_int) -> libc::sighandler_t {
+            unsafe {
+                let mut current: std::mem::MaybeUninit<libc::sigaction> =
+                    std::mem::MaybeUninit::uninit();
+                assert_eq!(
+                    libc::sigaction(signal, std::ptr::null(), current.as_mut_ptr()),
+                    0
+                );
+                current.assume_init().sa_sigaction
+            }
+        }
+
+        unsafe fn set(signal: libc::c_int, handler: libc::sighandler_t) {
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = handler;
+                libc::sigemptyset(&mut action.sa_mask);
+                assert_eq!(libc::sigaction(signal, &action, std::ptr::null_mut()), 0);
+            }
+        }
+
+        unsafe {
+            let mut waft_handler: libc::sigaction = std::mem::zeroed();
+            waft_handler.sa_sigaction = never_called as usize;
+            libc::sigemptyset(&mut waft_handler.sa_mask);
+
+            // A recognizable value in the previous-disposition storage. It is
+            // never installed as a disposition; it is only there so the test
+            // can tell "waft recorded what it replaced" from "waft wrote
+            // nothing because it replaced nothing".
+            let sentinel = never_installed as libc::sighandler_t;
+            let mut previous: std::mem::MaybeUninit<libc::sigaction> =
+                std::mem::MaybeUninit::uninit();
+            let mut sentinel_action: libc::sigaction = std::mem::zeroed();
+            sentinel_action.sa_sigaction = sentinel;
+            previous.write(sentinel_action);
+            let ready = AtomicBool::new(false);
+
+            set(libc::SIGUSR2, libc::SIG_IGN);
+            let installed = interrupt_cleanup::install_unless_ignored(
+                libc::SIGUSR2,
+                &waft_handler,
+                &raw mut previous,
+                &ready,
+            );
+            assert!(!installed, "an inherited SIG_IGN must not be taken over");
+            assert_eq!(
+                disposition(libc::SIGUSR2),
+                libc::SIG_IGN,
+                "the ignore must be left exactly as it was, never replaced and restored"
+            );
+            assert!(
+                !ready.load(std::sync::atomic::Ordering::SeqCst),
+                "nothing was replaced, so no previous disposition may be claimed"
+            );
+            assert_eq!(
+                previous.assume_init().sa_sigaction,
+                sentinel,
+                "an inherited ignore must leave the handler's storage untouched"
+            );
+
+            // The ordinary path: whatever was there is recorded first and
+            // waft's handler installed second, so a delivery the instant the
+            // handler goes live already finds what to put back.
+            set(libc::SIGUSR2, inherited_handler as libc::sighandler_t);
+            let installed = interrupt_cleanup::install_unless_ignored(
+                libc::SIGUSR2,
+                &waft_handler,
+                &raw mut previous,
+                &ready,
+            );
+            assert!(installed, "a handled disposition is waft's to replace");
+            assert_eq!(disposition(libc::SIGUSR2), never_called as usize);
+            assert!(
+                ready.load(std::sync::atomic::Ordering::SeqCst),
+                "the recorded disposition must be readable as soon as the handler is live"
+            );
+            assert_eq!(
+                previous.assume_init().sa_sigaction,
+                inherited_handler as libc::sighandler_t,
+                "the disposition waft replaced is the one it must restore"
+            );
+
+            set(libc::SIGUSR2, libc::SIG_DFL);
+            let installed = interrupt_cleanup::install_unless_ignored(
+                libc::SIGUSR2,
+                &waft_handler,
+                &raw mut previous,
+                &ready,
+            );
+            assert!(installed, "a default disposition is waft's to handle");
+            assert_eq!(disposition(libc::SIGUSR2), never_called as usize);
+            assert_eq!(previous.assume_init().sa_sigaction, libc::SIG_DFL);
+
+            set(libc::SIGUSR2, libc::SIG_DFL);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_lock_arms_and_disarms_interrupt_cleanup() {
+        let _serialized = one_lock_at_a_time();
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        let lock = temp.path().join("index.lock");
+
+        let Ok(held) = GitIndexLock::acquire(&index) else {
+            panic!("an unlocked index should be lockable");
+        };
+        assert!(lock.exists());
+        // While held, an interrupt would remove exactly this path.
+        interrupt_cleanup::remove_armed_lock();
+        assert!(!lock.exists());
+        drop(held);
+
+        // After release nothing is armed, so a later interrupt is inert.
+        fs::write(&lock, b"a later Git writer\n").unwrap();
+        interrupt_cleanup::remove_armed_lock();
+        assert!(lock.exists());
+        fs::remove_file(&lock).unwrap();
+    }
+
+    /// Real process termination, with deterministic delivery inside each lock
+    /// window. Subprocesses isolate the process-global signal dispositions.
+    #[cfg(unix)]
+    #[test]
+    fn real_interrupts_clean_owned_locks_and_preserve_foreign_locks() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD: &str = "WAFT_TEST_LOCK_SIGNAL_CHILD";
+        if let Ok(phase) = std::env::var(CHILD) {
+            let root = PathBuf::from(std::env::var_os("WAFT_TEST_LOCK_SIGNAL_ROOT").unwrap());
+            let signal: i32 = std::env::var("WAFT_TEST_LOCK_SIGNAL")
+                .unwrap()
+                .parse()
+                .unwrap();
+            unsafe {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            }
+            let index = root.join("index");
+            let lock = root.join("index.lock");
+            let _creation = (phase == "creation").then(|| {
+                lock_hooks::install(Box::new(move || unsafe {
+                    libc::raise(signal);
+                }))
+            });
+            let release_lock = lock.clone();
+            let _release = (phase == "release").then(|| {
+                lock_hooks::install_release(Box::new(move || {
+                    fs::write(&release_lock, b"foreign lock\n").unwrap();
+                    unsafe {
+                        libc::raise(signal);
+                    }
+                }))
+            });
+            if phase == "foreign" {
+                fs::write(&lock, b"foreign lock\n").unwrap();
+                interrupt_cleanup::stage(&lock);
+                unsafe {
+                    libc::raise(signal);
+                }
+                let _ = resume_deferred_signal(&lock, false);
+            } else {
+                let held = GitIndexLock::acquire(&index).unwrap();
+                if phase == "release" {
+                    drop(held);
+                } else {
+                    if phase == "replaced" {
+                        fs::rename(&lock, root.join("held-lock")).unwrap();
+                        fs::write(&lock, b"foreign lock\n").unwrap();
+                    }
+                    unsafe {
+                        libc::raise(signal);
+                    }
+                    // A signal must terminate before a publication can resume.
+                    fs::write(root.join("destination"), b"unexpected publication\n").unwrap();
+                    drop(held);
+                }
+            }
+            panic!("the real signal should terminate this child");
+        }
+        let _serialized = one_lock_at_a_time();
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            for phase in ["creation", "publication", "foreign", "release", "replaced"] {
+                let temp = tempfile::TempDir::new().unwrap();
+                let destination = temp.path().join("destination");
+                fs::write(&destination, b"unchanged\n").unwrap();
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "executor::tests::real_interrupts_clean_owned_locks_and_preserve_foreign_locks", "--nocapture"])
+                    .env(CHILD, phase)
+                    .env("WAFT_TEST_LOCK_SIGNAL_ROOT", temp.path())
+                    .env("WAFT_TEST_LOCK_SIGNAL", signal.to_string())
+                    .output().unwrap();
+                assert_eq!(output.status.signal(), Some(signal), "{phase}: {output:?}");
+                assert_eq!(fs::read(&destination).unwrap(), b"unchanged\n", "{phase}");
+                let lock = temp.path().join("index.lock");
+                if matches!(phase, "foreign" | "release" | "replaced") {
+                    assert_eq!(
+                        fs::read(&lock).unwrap(),
+                        b"foreign lock\n",
+                        "{phase}: a foreign lock must survive signal cleanup"
+                    );
+                } else {
+                    assert!(!lock.exists(), "{phase}: the owned lock must be removed");
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normal_lock_release_preserves_a_replaced_foreign_lock() {
+        let _serialized = one_lock_at_a_time();
+        let temp = tempfile::TempDir::new().unwrap();
+        let lock = temp.path().join("index.lock");
+        let held = GitIndexLock::acquire(&temp.path().join("index")).unwrap();
+        // Keep the old inode alive, as another process moving a lock aside
+        // would, and then install a different writer's lock at the same name.
+        fs::rename(&lock, temp.path().join("held-lock")).unwrap();
+        fs::write(&lock, b"foreign lock\n").unwrap();
+        drop(held);
+        assert_eq!(fs::read(&lock).unwrap(), b"foreign lock\n");
+    }
+
+    /// Counts `SIGUSR2` deliveries and restores the previous disposition on
+    /// drop.
+    ///
+    /// `SIGUSR2` stands in for `SIGINT`/`SIGTERM`, whose dispositions the test
+    /// process actually runs under. The code under test re-raises whatever it
+    /// is handed, so the test needs a disposition it can survive and count.
+    #[cfg(unix)]
+    struct CountedSignal {
+        previous: libc::sigaction,
+    }
+
+    #[cfg(unix)]
+    static SIGUSR2_DELIVERIES: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    #[cfg(unix)]
+    impl CountedSignal {
+        fn install() -> Self {
+            extern "C" fn count(_signal: libc::c_int) {
+                SIGUSR2_DELIVERIES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+
+            SIGUSR2_DELIVERIES.store(0, std::sync::atomic::Ordering::SeqCst);
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = count as usize;
+                libc::sigemptyset(&mut action.sa_mask);
+                let mut previous: std::mem::MaybeUninit<libc::sigaction> =
+                    std::mem::MaybeUninit::uninit();
+                assert_eq!(
+                    libc::sigaction(libc::SIGUSR2, &action, previous.as_mut_ptr()),
+                    0
+                );
+                Self {
+                    previous: previous.assume_init(),
+                }
+            }
+        }
+
+        fn delivered(&self) -> usize {
+            SIGUSR2_DELIVERIES.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for CountedSignal {
+        fn drop(&mut self) {
+            unsafe {
+                libc::sigaction(libc::SIGUSR2, &self.previous, std::ptr::null_mut());
+            }
+        }
+    }
+
+    /// A signal delivered after `create_new` produced the lock file and before
+    /// the cleanup is armed. Terminating there would leave `index.lock` on disk
+    /// and block every later Git and waft operation on that repository.
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_between_lock_creation_and_arming_takes_the_lock_with_it() {
+        let _serialized = one_lock_at_a_time();
+        let counted = CountedSignal::install();
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        let lock = temp.path().join("index.lock");
+
+        let observed = std::rc::Rc::new(std::cell::Cell::new(None));
+        let in_window = std::rc::Rc::clone(&observed);
+        let window_lock = lock.clone();
+        let _hooks = lock_hooks::install(Box::new(move || {
+            // Stand in for the kernel delivering a signal inside the window.
+            interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+            in_window.set(Some((
+                window_lock.exists(),
+                interrupt_cleanup::deferred_signal(),
+                SIGUSR2_DELIVERIES.load(std::sync::atomic::Ordering::SeqCst),
+            )));
+        }));
+
+        let acquired = GitIndexLock::acquire(&index);
+
+        assert_eq!(
+            observed.get(),
+            Some((true, Some(libc::SIGUSR2), 0)),
+            "inside the window the handler must record the signal, unlink nothing, and neither \
+             re-raise nor terminate the process"
+        );
+        assert!(
+            !lock.exists(),
+            "the deferred signal must take the just-created lock with it"
+        );
+        assert_eq!(
+            counted.delivered(),
+            1,
+            "a deferred signal must be re-raised, never dropped"
+        );
+        assert_eq!(interrupt_cleanup::deferred_signal(), None);
+        let Err(error) = acquired else {
+            panic!("an interrupt in the creation window must abandon the acquisition");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(
+            error.to_string().contains("interrupted by signal"),
+            "got: {error}"
+        );
+    }
+
+    /// Either side of that window the behavior is unchanged: an armed lock is
+    /// removed by the handler itself, and a signal arriving with no publication
+    /// in progress is re-raised immediately rather than deferred to a check
+    /// that will never come.
+    #[cfg(unix)]
+    #[test]
+    fn interrupt_outside_the_creation_window_is_never_deferred() {
+        let _serialized = one_lock_at_a_time();
+        let counted = CountedSignal::install();
+        let temp = tempfile::TempDir::new().unwrap();
+        let armed = temp.path().join("index.lock");
+        fs::write(&armed, b"waft\n").unwrap();
+
+        interrupt_cleanup::stage(&armed);
+        let held_file = fs::File::open(&armed).unwrap();
+        interrupt_cleanup::record_file(&held_file);
+        interrupt_cleanup::arm();
+        interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+        assert!(
+            !armed.exists(),
+            "an armed lock is removed by the handler itself"
+        );
+        assert_eq!(
+            interrupt_cleanup::deferred_signal(),
+            None,
+            "an armed lock leaves nothing to defer"
+        );
+        assert_eq!(counted.delivered(), 1);
+
+        fs::write(&armed, b"someone else\n").unwrap();
+        interrupt_cleanup::disarm();
+        interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+        assert!(armed.exists(), "a lock waft does not hold is never removed");
+        assert_eq!(interrupt_cleanup::deferred_signal(), None);
+        assert_eq!(counted.delivered(), 2);
+        fs::remove_file(&armed).unwrap();
+    }
+
+    /// A failed acquisition has to close the staged window behind it. Leaving
+    /// it open would make every later interrupt defer into a check that never
+    /// comes — a signal silently swallowed for the rest of the run.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_acquisition_leaves_no_window_for_a_signal_to_fall_into() {
+        let _serialized = one_lock_at_a_time();
+        let counted = CountedSignal::install();
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        let lock = temp.path().join("index.lock");
+        fs::write(&lock, b"held by concurrent Git\n").unwrap();
+
+        let Err(error) = GitIndexLock::acquire(&index) else {
+            panic!("a permanently held lock must not be acquired");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+
+        interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+        assert_eq!(
+            interrupt_cleanup::deferred_signal(),
+            None,
+            "with nothing staged a signal must be acted on, not recorded"
+        );
+        assert_eq!(counted.delivered(), 1);
+        assert!(
+            lock.exists(),
+            "waft must never remove another process's lock"
+        );
+    }
+
+    /// The other half of what the handler cannot know: the staged path may
+    /// still be another writer's lock. A deferred signal must not take that
+    /// file with it.
+    #[cfg(unix)]
+    #[test]
+    fn a_deferred_interrupt_never_removes_another_writers_lock() {
+        let _serialized = one_lock_at_a_time();
+        let counted = CountedSignal::install();
+        let temp = tempfile::TempDir::new().unwrap();
+        let contested = temp.path().join("index.lock");
+        fs::write(&contested, b"held by concurrent Git\n").unwrap();
+
+        interrupt_cleanup::stage(&contested);
+        interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+        assert_eq!(
+            interrupt_cleanup::deferred_signal(),
+            Some(libc::SIGUSR2),
+            "a staged path is the window: the signal is recorded, not acted on"
+        );
+        assert_eq!(counted.delivered(), 0);
+        assert!(contested.exists());
+
+        assert_eq!(
+            interrupt_cleanup::resume_pending_signal(false),
+            Some(libc::SIGUSR2)
+        );
+        assert!(
+            contested.exists(),
+            "a lock this process did not create is not waft's to remove"
+        );
+        assert_eq!(counted.delivered(), 1);
+        assert_eq!(interrupt_cleanup::deferred_signal(), None);
+
+        // Nothing is staged any more, so a later signal is not deferred into a
+        // record nobody will read.
+        interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
+        assert_eq!(interrupt_cleanup::deferred_signal(), None);
+        assert_eq!(counted.delivered(), 2);
+        fs::remove_file(&contested).unwrap();
+    }
+
     #[test]
     fn execute_holds_destination_index_lock_through_publication() {
+        let _serialized = one_lock_at_a_time();
         let temp = tempfile::TempDir::new().unwrap();
         let index = temp.path().join("index");
         let lock = temp.path().join("index.lock");

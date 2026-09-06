@@ -133,6 +133,15 @@ pub(crate) fn run_list_with_context(
                     let action_str = match state {
                         crate::model::DestinationState::Missing => "copy",
                         crate::model::DestinationState::UpToDate => "no-op",
+                        // The remedy clause appears only where `--overwrite`
+                        // can act on an existing destination.
+                        crate::model::DestinationState::PermissionsDiffer => {
+                            if crate::fs::overwrite_supported() {
+                                "skip (content equal, permissions differ; --overwrite repairs)"
+                            } else {
+                                "skip (content equal, permissions differ)"
+                            }
+                        }
                         crate::model::DestinationState::UntrackedConflict => {
                             "skip (untracked conflict)"
                         }

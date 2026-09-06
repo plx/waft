@@ -219,10 +219,32 @@ pub(crate) fn run_info_with_context(
                                 println!("planned_action: no-op");
                             }
                         }
+                        crate::model::DestinationState::PermissionsDiffer => {
+                            println!("destination: permissions-differ");
+                            if eligible {
+                                // The remedy is named only where it works; the
+                                // classification itself is the same everywhere.
+                                println!(
+                                    "planned_action: skip ({})",
+                                    if crate::fs::overwrite_supported() {
+                                        "content equal, permissions differ; --overwrite repairs"
+                                    } else {
+                                        "content equal, permissions differ"
+                                    }
+                                );
+                            }
+                        }
                         crate::model::DestinationState::UntrackedConflict => {
                             println!("destination: untracked-conflict");
                             if eligible {
-                                println!("planned_action: skip (untracked conflict)");
+                                println!(
+                                    "planned_action: skip ({})",
+                                    if crate::fs::overwrite_supported() {
+                                        "untracked conflict; --overwrite replaces"
+                                    } else {
+                                        "untracked conflict"
+                                    }
+                                );
                             }
                         }
                         crate::model::DestinationState::TrackedConflict => {

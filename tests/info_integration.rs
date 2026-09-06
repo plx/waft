@@ -362,6 +362,13 @@ fn info_dest_untracked_conflict() {
     // .env exists in dest but is NOT tracked (just written, not git-added)
     write_file(&wt_path, ".env", "DIFFERENT_SECRET=bar");
 
+    // The conflict reads the same everywhere; `--overwrite` is named as the
+    // remedy only where it can act on an existing destination.
+    #[cfg(unix)]
+    let planned_action = "planned_action: skip (untracked conflict; --overwrite replaces)";
+    #[cfg(not(unix))]
+    let planned_action = "planned_action: skip (untracked conflict)";
+
     waft_in(main_dir.path())
         .args([
             "info",
@@ -374,8 +381,42 @@ fn info_dest_untracked_conflict() {
         .assert()
         .success()
         .stdout(predicate::str::contains("destination: untracked-conflict"))
+        .stdout(predicate::str::contains(planned_action));
+}
+
+/// A destination whose content matches but whose permissions do not is its own
+/// classification, with `--overwrite` named as the remedy.
+#[cfg(unix)]
+#[test]
+fn info_dest_permissions_differ() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=same");
+    write_file(&wt_path, ".env", "SECRET=same");
+    fs::set_permissions(
+        main_dir.path().join(".env"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    fs::set_permissions(wt_path.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
+
+    waft_in(main_dir.path())
+        .args([
+            "info",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+            ".env",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("destination: permissions-differ"))
         .stdout(predicate::str::contains(
-            "planned_action: skip (untracked conflict)",
+            "planned_action: skip (content equal, permissions differ; --overwrite repairs)",
         ));
 }
 

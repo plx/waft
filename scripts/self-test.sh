@@ -237,7 +237,8 @@ fi
 assert_file_content "$MAIN/.env" "ENV_VALUE_FROM_MAIN"
 
 # -----------------------------------------------------------------------
-# Test 4 — overwrite safety: waft never clobbers an existing pathname.
+# Test 4 — overwrite safety: nothing is replaced without --overwrite, and
+# nothing tracked is replaced even with it.
 # -----------------------------------------------------------------------
 section "Test 4: overwrite safety"
 
@@ -251,12 +252,21 @@ echo "PRE_EXISTING_LOCAL" >"$LINKED3/.env"
 (cd "$LINKED3" && "$WAFT" --quiet) || true
 assert_file_content "$LINKED3/.env" "PRE_EXISTING_LOCAL"
 
-# --overwrite remains accepted for CLI compatibility, but fails closed when it
-# would replace an existing file.
-if (cd "$LINKED3" && "$WAFT" copy --overwrite --quiet >/dev/null 2>&1); then
-  fail "--overwrite unexpectedly replaced an existing destination"
+# With --overwrite, an untracked destination that differs is replaced with the
+# source content and the run succeeds.
+if (cd "$LINKED3" && "$WAFT" copy --overwrite --quiet); then
+  ok "--overwrite replaced an untracked conflicting destination"
+else
+  fail "--overwrite should replace an untracked destination, not fail the run"
 fi
-assert_file_content "$LINKED3/.env" "PRE_EXISTING_LOCAL"
+assert_file_content "$LINKED3/.env" "ENV_VALUE_FROM_MAIN"
+
+# A destination tracked by Git is never written, with or without --overwrite.
+echo "TRACKED_IN_DEST" >"$LINKED3/.env"
+git -C "$LINKED3" add -f .env
+(cd "$LINKED3" && "$WAFT" copy --overwrite --quiet) || true
+assert_file_content "$LINKED3/.env" "TRACKED_IN_DEST"
+git -C "$LINKED3" rm --cached --quiet -f .env >/dev/null
 
 # -----------------------------------------------------------------------
 # Test 5 — uninstall restores the original Git hook lookup behavior.

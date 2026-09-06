@@ -107,7 +107,42 @@ A file is eligible for copying when **all** of these are true:
 | Option | Description |
 |--------|-------------|
 | `-n, --dry-run` | Show what would be done without copying |
-| `--overwrite` | Compatibility flag; fails closed on existing destination conflicts |
+| `--overwrite` | Replace untracked destinations that differ, and repair untracked destinations whose content matches but whose permissions do not |
+
+Without `--overwrite`, a destination that exists and differs is skipped and
+left exactly as it is. Tracked destinations are never written, with or without
+the flag.
+
+`--overwrite` distinguishes two cases, and both name the file they act on:
+
+- **untracked conflict** — content differs. The new content is prepared in a
+  temporary file and swapped into place atomically, reported as `replaced:`.
+- **content equal, permissions differ** — only the mode is wrong. The mode is
+  fixed on the verified file descriptor and nothing is rewritten, reported as
+  `repaired permissions:`. This is the expected state for files published by
+  pre-release waft builds, which always wrote mode `0600`.
+
+Every `--overwrite` action is checked against the identity, length, content
+fingerprint, and mode observed while planning. A destination that changed in between is reported as
+a per-file failure and left untouched; the rest of the run continues. A
+permissions repair additionally requires the pinned source and destination
+snapshots to agree on content, so a destination rewritten between the byte
+comparison and the snapshot is never quietly `chmod`-ed and called repaired.
+
+Replacement uses an atomic exchange primitive (`renameat2` `RENAME_EXCHANGE` on
+Linux, `renameatx_np` `RENAME_SWAP` on macOS) where the filesystem has one.
+Where it has none — notably SMB, NFS, and exFAT destinations — waft moves the
+destination aside with a plain rename and publishes into the name it left, with
+no-clobber semantics. Nothing is unlinked by name: the displaced file is
+identified after the move, and it is removed only once the replacement is
+published and its name is proven to still hold it. If it turns out not to be
+the file that was planned against — another writer got there first — it is
+moved back and the file is reported as failed. If a name is taken in one of
+those windows so that neither the publication nor the move back can happen
+without clobbering, nothing is deleted: the error names the `.waft-copy-*` file
+holding the prepared replacement and the `.waft-copy-*.displaced` file holding
+the previous destination, so both can be recovered by hand. `--overwrite` is
+not supported on Windows and reports a per-file failure there.
 
 ## Compatibility profiles
 
@@ -186,16 +221,56 @@ extra = ["*.bak"]
 - **Tracked-file protection** — destination trackedness is checked while
   planning and again under Git's cooperative index lock immediately before
   publication
-- **No replacement** — every destination is published with no-clobber
-  semantics; existing pathnames are preserved, and `--overwrite` fails closed
-  when it encounters an untracked conflict
+- **No accidental replacement** — a destination that did not exist while
+  planning is published with no-clobber semantics and never overwrites a path
+  that appeared in the meantime
+- **Proven replacement only** — `--overwrite` re-opens the destination through
+  the anchored parent with `O_NOFOLLOW` and requires its device, inode,
+  length, content fingerprint, and mode to still match the planning snapshot.
+  Replacement is a single atomic exchange whose swapped-out file is re-checked
+  against that same snapshot before it is unlinked; a lost race is exchanged
+  back and reported as a per-file failure — unless the destination name has
+  been taken again in the meantime, in which case nothing is moved back and
+  both files are named in the error. Without an exchange primitive the
+  destination is moved aside rather than unlinked, and put back if what moved
+  turns out not to be the planned file. A permissions repair also requires
+  the pinned source and destination snapshots to agree on content, so the
+  "content is already equal" premise is re-established at publication time
+  rather than inherited from an earlier comparison, and the mode is read back
+  afterwards so a repair another writer `chmod`-ed away is reported as a
+  failure instead of a success
+- **Verified recovery cleanup** — publication and rollback cleanup checks that
+  a name still holds the expected inode before unlinking it, including when
+  publication unwinds. If a recovery step fails and leaves
+  another writer's file under a `.waft-copy-*` name, that file is kept and
+  named in the error rather than cleaned up. POSIX has no conditional unlink,
+  so a two-syscall window between that proof and the removal remains — on a
+  fresh 128-bit random name nothing but waft creates
+- **Per-file failures stay per-file** — a source that vanishes, a destination
+  that changes mid-flight, or a locked index affects only that file's result
+  and exit accounting; the rest of the run proceeds
 - **Descriptor-anchored traversal on Unix** — source and destination
   components are opened relative to canonical worktree directory handles with
   `O_NOFOLLOW`; source state is matched to its planning snapshot, and a
   destination parent is revalidated before publication
-- **Durable atomic visibility** — file contents are synced to a temp file
-  before publication, then the parent directory is synced on Unix
-- **Dry-run is mutation-free** — `--dry-run` reads only, writes nothing
+- **Per-file publication** — file contents are synced before publication, then
+  the parent directory is synced on Unix. Exchange-based replacement has
+  atomic visibility; the displacement fallback has a brief vacant-name window.
+- **Cleanup after ordinary errors** — a drop guard attempts to remove owned
+  `.waft-copy-*` staging files on errors and unwinding panics. A changed name
+  is left alone. Process termination, including SIGINT/SIGTERM, does not run
+  Rust drop guards and can leave staging or recovery files behind
+- **Interrupt-aware index locking** — on Unix, `SIGINT` and `SIGTERM` attempt
+  to remove the owned `index.lock` before re-raising under the previous
+  disposition. Creation and release windows defer signals until ownership is
+  known. Cleanup compares the open lock's identity with the named entry and
+  never retries removal after release, preserving another Git writer's lock.
+  Inherited ignored signals stay ignored. Filesystem errors, SIGKILL, crashes,
+  and non-Unix interruption can still leave stale locks; check ownership and
+  ensure no Git writer is active before manually removing one
+- **Dry-run is mutation-free** — `--dry-run` reads only, writes nothing, and
+  reports planning failures on stderr with the same nonzero exit the real run
+  would produce
 
 Normal Git writers honor the index lock and cannot change trackedness across
 the final check and publication. A process that edits the index directly while
@@ -244,6 +319,27 @@ for a tracked file) are treated as distinct paths.
 Exclusion patterns are matched separately and more conservatively: on macOS and
 Windows they stay case-insensitive even when `core.ignoreCase` is false, since
 withholding a file is safer than leaking one.
+
+Lock acquisition retries briefly (three attempts over roughly 150ms) so a
+short-lived Git writer does not become a per-file failure; a lock still held
+after that fails the file with an explicit message and is never removed.
+
+Replacement under `--overwrite` proves the outgoing file's identity *and*
+content, so an in-place rewrite of the same inode is caught rather than
+clobbered. The remaining window is inherent to POSIX: on filesystems without an
+exchange primitive, waft must move the proven file aside and then publish, so a
+file recreated at that pathname in between causes a reported failure rather than
+a replacement. Nothing is deleted in that case — the file that was there is
+under the `.waft-copy-*.displaced` name given in the error, and waft's prepared
+content under the `.waft-copy-*` name — but the destination pathname is briefly
+vacant while the move is made, and it ends up holding whichever file won the
+race. Cleanup itself is subject to the same limit: waft proves that a name still
+holds the file it created immediately before unlinking it, and POSIX has no way
+to make those two steps one.
+
+
+See [ASSURANCE.md](ASSURANCE.md) for the tested scope, platform coverage, and
+remaining concurrency and recovery limits.
 
 ## Website development
 

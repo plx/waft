@@ -2200,6 +2200,7 @@ dependencies = [
  "getrandom 0.4.3",
  "gix",
  "ignore",
+ "libc",
  "predicates",
  "proptest",
  "reflink-copy",
