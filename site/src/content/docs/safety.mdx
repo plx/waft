@@ -18,8 +18,10 @@ without `--dry-run` publishes files.
 - **Symlink traversal is blocked on Unix.** Source and destination components
   are opened relative to canonical worktree directory handles with
   `O_NOFOLLOW`.
-- **Publication is atomic.** Contents are synced to a temporary file before
-  publication. Parent directories are synced on Unix.
+- **Files are prepared before publication.** Contents are synced to a temporary
+  file, and parent directories are synced on Unix. Atomic exchange is used
+  where supported. Its fallback can leave a temporary gap at the destination
+  and named recovery files. A batch is not an atomic transaction.
 - **Dry runs are mutation-free.** `waft copy --dry-run` reads and reports only.
 
 ## Concurrent changes
@@ -33,9 +35,10 @@ write. Another process can still relocate an already-open destination
 directory after final revalidation. Avoid concurrent destination directory
 moves when pathname stability matters.
 
-`waft` reacquires the index lock for each published file. The cost scales with
-the number of selected files and index size. Keep automatic manifests narrow,
-especially in monorepos.
+`waft` reacquires the index lock for each published file and reuses a cached
+tracked-path snapshot while the index fingerprint stays unchanged. A changed
+index triggers a reload. This avoids re-reading the entire index for every
+file; keep automatic manifests narrow and benchmark your own workload.
 
 ## Hook trust boundary
 
@@ -78,7 +81,8 @@ skip: .env (untracked conflict; --overwrite replaces the destination)
 cases:
 
 - **untracked conflict** — the content differs. The replacement is prepared in
-  a temporary file and swapped into place atomically, reported as `replaced:`.
+  a temporary file and exchanged atomically where supported, with a checked
+  displacement/no-clobber fallback otherwise, reported as `replaced:`.
 - **content equal, permissions differ** — only the mode is wrong. The mode is
   repaired on the verified file descriptor and no content is rewritten,
   reported as `repaired permissions:`.
@@ -92,6 +96,6 @@ content fingerprint, and mode observed while planning. A destination that
 changed in between is reported as a per-file failure; where the filesystem
 supports an atomic exchange it is left untouched, and on filesystems without
 one a lost race can instead leave the other writer's file at the destination
-with waft's prepared content preserved under a named temporary. The rest of
+with waft's prepared content preserved under a named temporary. Cleanup failures name surviving recovery paths. The rest of
 the run continues either way. Tracked destinations are never written, with or
 without the flag.

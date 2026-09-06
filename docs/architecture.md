@@ -147,11 +147,12 @@ All commands follow this pipeline:
    check, and publish a synced temp file with no-clobber semantics. Without
    `--overwrite` an existing destination is skipped and named, with its reason,
    in the run's output. With `--overwrite`, an untracked destination is
-   replaced by a single atomic exchange — or has only its permission bits
+   replaced by an atomic exchange where supported, with a checked
+   displacement/no-clobber fallback otherwise — or has only its permission bits
    repaired when its content already matches — after re-opening it through the
    anchored parent and confirming it still matches the device, inode, length,
-   content fingerprint, and mode recorded while planning. A lost race is a
-   per-file failure, not a clobbered file. Tracked destinations are never
+   content fingerprint, and mode recorded while planning. A detected race is a
+   per-file failure and can leave named recovery files. Tracked destinations are never
    written under any flag combination.
 
 Commands stop at different stages: `validate` at step 4, `list` at step 7,

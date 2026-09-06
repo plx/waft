@@ -641,7 +641,6 @@ impl GitBackend for GitCli {
             &state.gitlinks,
             state.ignore_case,
             symlink_policy,
-            RuleFileExistence::AsNamed,
         ))
     }
 
@@ -983,7 +982,6 @@ impl GitBackend for GitGix {
             &state.gitlinks,
             state.ignore_case,
             symlink_policy,
-            RuleFileExistence::AsNamed,
         ))
     }
 
@@ -1198,20 +1196,6 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Which `.worktreeinclude` entries a walk counts as existing.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RuleFileExistence {
-    /// Anything named `.worktreeinclude` that the symlink policy does not skip
-    /// counts, without resolving or opening it. This is the gate selection
-    /// uses: an unreadable rule file still engages explicit-selection mode, and
-    /// `when_missing` must not fire behind it.
-    AsNamed,
-    /// Only an entry that resolves to a readable regular file counts. Used to
-    /// decide whether `follow` is a remedy worth recommending, which it is not
-    /// when the recommended run cannot read the file either.
-    OnlyWhenReadable,
-}
-
 /// Walk the source tree looking for the first `.worktreeinclude` file,
 /// skipping nested git checkouts/submodules.
 ///
@@ -1224,7 +1208,6 @@ fn walk_for_first_worktreeinclude(
     gitlinks: &HashSet<String>,
     ignore_case: bool,
     symlink_policy: SymlinkPolicy,
-    existence: RuleFileExistence,
 ) -> bool {
     for entry in walkdir::WalkDir::new(source_root)
         .into_iter()
@@ -1247,36 +1230,9 @@ fn walk_for_first_worktreeinclude(
         } else if !entry.file_type().is_file() {
             continue;
         }
-        if existence == RuleFileExistence::OnlyWhenReadable
-            && !crate::worktreeinclude::rule_file_is_readable(entry.path())
-        {
-            continue;
-        }
         return true;
     }
     false
-}
-
-/// Whether the repo holds a `.worktreeinclude` a `SymlinkPolicy::Follow` run
-/// could actually read.
-///
-/// [`GitBackend::worktreeinclude_exists_anywhere`] under `Follow` answers the
-/// weaker question — something named `.worktreeinclude` is here — which is the
-/// gate selection needs but not enough to recommend `follow` to a user whose
-/// rule file the active policy skipped: a link to nothing, to a directory, or
-/// to an unreadable file leaves the recommended run just as empty and fails
-/// validation. Callers pass the backend's own gitlink set so this answer and
-/// the existence gate agree on which subtrees are in the repo.
-pub(crate) fn readable_worktreeinclude_exists_under_follow(
-    source_root: &Path,
-    gitlinks: &HashSet<String>,
-) -> bool {
-    walk_for_first_worktreeinclude(
-        source_root,
-        gitlinks,
-        SymlinkPolicy::Follow,
-        RuleFileExistence::OnlyWhenReadable,
-    )
 }
 
 /// CLI-backend candidate enumeration that mirrors the gix walker and invokes

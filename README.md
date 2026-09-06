@@ -94,7 +94,9 @@ note: no .worktreeinclude found; the claude profile selects nothing without one 
 The note names whatever is actually responsible, so it also covers a rule file
 that exists but the active configuration never reads — one outside the
 repository root under root-only `claude-2026-04` semantics, or a symlinked one
-under `--worktreeinclude-symlink-policy ignore`. It is not printed for a
+under `--worktreeinclude-symlink-policy ignore`. Symlink hints ask you to
+inspect targets and validate with the intended settings; they do not promise
+that changing policy will validate or select files. It is not printed for a
 consulted rule file that legitimately matches nothing, nor for a configuration
 that still selects without one (`wt`, or `--when-missing-worktreeinclude
 all-ignored`).

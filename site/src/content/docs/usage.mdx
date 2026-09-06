@@ -102,7 +102,9 @@ exists but is never read — one outside the repository root under root-only
 `claude-2026-04` semantics, or a symlinked one under
 `--worktreeinclude-symlink-policy ignore`. A consulted rule file that
 legitimately matches nothing is not flagged. Standard output stays
-machine-readable, and `--quiet` suppresses the note.
+machine-readable, and `--quiet` suppresses the note. Symlink hints ask you to
+inspect targets and validate with the intended settings. They do not promise
+that changing policy will validate or select files.
 
 ## Inspect selection
 

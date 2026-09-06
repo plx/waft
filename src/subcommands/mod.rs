@@ -91,59 +91,17 @@ pub(crate) struct Eligibility {
     pub empty_selection_cause: Option<EmptySelectionCause>,
 }
 
-/// An empty selection that the configuration, not the repository, explains.
-///
-/// Each variant is a claim printed to the user, so each must be true on its
-/// own terms — "no rule file" is not interchangeable with "a rule file the
-/// active configuration never reads".
+/// Observed reasons an empty selection may need configuration attention.
+/// These are hints, not predictions that a different policy will validate or
+/// select files. Diagnosis never opens a rule file skipped by the policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EmptySelectionCause {
-    /// No `.worktreeinclude` exists anywhere in the repo, and the effective
-    /// `when_missing` selects nothing without one.
     NoRuleFile,
-    /// A `.worktreeinclude` exists, but not at the repository root, and the
-    /// active semantics read the root file only.
     NoRootRuleFile,
-    /// Every `.worktreeinclude` the active configuration would have read is a
-    /// symlink, which the active symlink policy skips — repo-wide, or just at
-    /// the root when the semantics read the root file only.
     RuleFileSymlinkIgnored,
-    /// The active semantics read the root file only, no root rule file exists,
-    /// and the one readable rule file in the repo is a nested symlink the
-    /// active policy skips. Both settings are load-bearing, so this is the one
-    /// cause whose remedy is a pair of flags rather than one.
     NestedRuleFileSymlinkIgnored,
 }
 
-/// Explain an empty selection, or decline to.
-///
-/// `rule_file_found` is the coarse repo-wide answer [`select_candidates`]
-/// gates `when_missing` on. Turning it into something worth printing takes
-/// two refinements it cannot make on its own:
-///
-/// - It is symlink-policy-relative. Under `SymlinkPolicy::Ignore` a symlinked
-///   rule file reads as absent, and telling a user that a file they can see
-///   does not exist is worse than saying nothing.
-/// - It is semantics-agnostic. `claude-2026-04` reads the root file only, so
-///   a rule file that exists exclusively in a subdirectory is found here and
-///   still never consulted — the one case where a rule file exists and the
-///   empty result is nonetheless a configuration mistake.
-///
-/// `when_missing` gates only the two "no rule file was consulted" variants.
-/// [`EmptySelectionCause::NoRootRuleFile`] ignores it because a rule file was
-/// found, so `when_missing` never applied to this run at all.
-///
-/// The two refinements compose: a symlinked root file plus any regular nested
-/// one satisfies the repo-wide gate and fails the root-only check, and only
-/// the symlink policy explains that. Reporting the absence of a root file
-/// there would be false, and its remedy — Git semantics — would leave the
-/// root symlink just as skipped, so the run would stay empty.
-///
-/// They also compose the other way, where neither remedy is enough by itself:
-/// a symlinked rule file that exists only in a subdirectory is hidden twice
-/// over, once by the policy and once by the semantics, so the note has to name
-/// both knobs. Each single-flag remedy would be a true statement about one
-/// obstacle and a false promise about the run.
 fn diagnose_empty_selection(
     git: &dyn GitBackend,
     source_root: &Path,
@@ -151,81 +109,37 @@ fn diagnose_empty_selection(
     rule_file_found: bool,
 ) -> Result<Option<EmptySelectionCause>> {
     let root_only = policy.semantics == WorktreeincludeSemantics::Claude202604;
+    let root_symlink_ignored = policy.symlink_policy == SymlinkPolicy::Ignore
+        && std::fs::symlink_metadata(source_root.join(".worktreeinclude"))
+            .is_ok_and(|metadata| metadata.file_type().is_symlink());
     if rule_file_found {
-        if root_only
-            && !crate::worktreeinclude::root_rule_file_is_consulted(
+        if root_only {
+            if root_symlink_ignored {
+                return Ok(Some(EmptySelectionCause::RuleFileSymlinkIgnored));
+            }
+            if !crate::worktreeinclude::root_rule_file_is_consulted(
                 source_root,
                 policy.symlink_policy,
-            )
-        {
-            // Re-ask the root predicate while following symlinks, mirroring
-            // the repo-wide re-ask below. A yes means the root file exists and
-            // the policy is what hid it — and, because the predicate is the
-            // engine's own existence gate strengthened to require a readable
-            // target, that the named remedy restores it. A symlink the follow
-            // run could not read is not a remedy, so it falls through to the
-            // absent-root-file case below.
-            if policy.symlink_policy == SymlinkPolicy::Ignore
-                && crate::worktreeinclude::root_rule_file_becomes_readable_under_follow(source_root)
-            {
-                return Ok(Some(EmptySelectionCause::RuleFileSymlinkIgnored));
+            ) {
+                return Ok(Some(EmptySelectionCause::NoRootRuleFile));
             }
-            return Ok(Some(EmptySelectionCause::NoRootRuleFile));
         }
-        // A consulted rule file that selects nothing is a legitimate
-        // configuration, not a missing one.
         return Ok(None);
     }
-
     if policy.when_missing != WhenMissingWorktreeinclude::Blank {
-        // An absent rule file still selects every git-ignored untracked file,
-        // so an empty result means the repository has nothing to copy.
         return Ok(None);
     }
-
-    // Nothing was found under the active symlink policy. Re-ask while
-    // following symlinks: if that finds one the policy is what hid it, and the
-    // honest note names the policy rather than denying the file exists. Only
-    // reached on an already-empty selection, so the second walk is off the
-    // common path.
-    //
-    // The backend's existence gate counts a symlink without resolving it,
-    // which is correct for selection and too weak to recommend `follow` on:
-    // a link to nothing, to a directory, or to an unreadable file leaves the
-    // recommended run just as empty and fails validation. Requiring a readable
-    // target sends those to the absent-rule note instead of to a remedy that
-    // cannot work.
+    // This existing metadata-only walk counts symlink entries without opening
+    // their targets. It observes what Ignore omitted; Follow is not validated.
     if policy.symlink_policy == SymlinkPolicy::Ignore
         && git.worktreeinclude_exists_anywhere(source_root, SymlinkPolicy::Follow)?
-        && crate::git::readable_worktreeinclude_exists_under_follow(
-            source_root,
-            &git.gitlinks(source_root)?,
-        )
     {
-        // The walk above is repo-wide, and root-only semantics are not: the
-        // readable rule file it found is only reachable by the recommended run
-        // if it is the root one. Ask that separately before promising `follow`
-        // alone, or the note sends a `claude-2026-04` user from one silent
-        // empty result to another.
-        if root_only {
-            if crate::worktreeinclude::root_rule_file_becomes_readable_under_follow(source_root) {
-                return Ok(Some(EmptySelectionCause::RuleFileSymlinkIgnored));
-            }
-            // Nothing occupies the root name at all, so the readable file the
-            // walk found is nested: reaching it needs the policy to stop
-            // skipping it *and* the semantics to look outside the root.
-            if !crate::worktreeinclude::root_rule_file_entry_exists(source_root) {
-                return Ok(Some(EmptySelectionCause::NestedRuleFileSymlinkIgnored));
-            }
-            // A root entry exists that following cannot read. Every remedy
-            // naming `follow` makes validation read it and fail, so there is
-            // no remedy to advertise; fall through to the absent-rule note the
-            // active `ignore` policy already implies.
-            return Ok(Some(EmptySelectionCause::NoRuleFile));
-        }
-        return Ok(Some(EmptySelectionCause::RuleFileSymlinkIgnored));
+        return Ok(Some(if root_only && !root_symlink_ignored {
+            EmptySelectionCause::NestedRuleFileSymlinkIgnored
+        } else {
+            EmptySelectionCause::RuleFileSymlinkIgnored
+        }));
     }
-
     Ok(Some(EmptySelectionCause::NoRuleFile))
 }
 
@@ -319,14 +233,14 @@ pub(crate) fn note_empty_selection(policy: &ResolvedPolicy, pass: &Eligibility, 
             blank_selection_subject(policy)
         ),
         EmptySelectionCause::NoRootRuleFile => eprintln!(
-            "note: no .worktreeinclude in the repository root; {} semantics ignore nested rule files (use --worktreeinclude-semantics git to read them)",
+            "note: no .worktreeinclude is consulted in the repository root; {} semantics ignore nested rule files (inspect them before trying --worktreeinclude-semantics git)",
             policy.semantics.as_str()
         ),
         EmptySelectionCause::RuleFileSymlinkIgnored => eprintln!(
-            "note: .worktreeinclude is a symlink and the active symlink policy skips it; pass --worktreeinclude-symlink-policy follow to use it"
+            "note: the active symlink policy skips a .worktreeinclude symlink; inspect its target before trying --worktreeinclude-symlink-policy follow, then run waft validate with that policy"
         ),
         EmptySelectionCause::NestedRuleFileSymlinkIgnored => eprintln!(
-            "note: the only readable .worktreeinclude is a symlink outside the repository root; the active symlink policy skips it and {} semantics ignore nested rule files (use --worktreeinclude-semantics git --worktreeinclude-symlink-policy follow to read it)",
+            "note: the active symlink policy skips a nested .worktreeinclude symlink, and {} semantics ignore nested rule files; inspect the targets before trying --worktreeinclude-semantics git --worktreeinclude-symlink-policy follow, then run waft validate with those settings",
             policy.semantics.as_str()
         ),
     }

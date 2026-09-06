@@ -52,6 +52,7 @@ fn list_paths(source: &Path, extra_args: &[&str]) -> BTreeSet<String> {
         .map(|backend| {
             let mut cmd = waft();
             cmd.env("WAFT_GIT_BACKEND", backend)
+                .timeout(std::time::Duration::from_secs(15))
                 .args(["list", "--source"])
                 .arg(source)
                 .args(extra_args);
@@ -239,7 +240,7 @@ fn list_notes_a_rule_file_the_root_only_semantics_never_read() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains(
-            "note: no .worktreeinclude in the repository root; claude-2026-04 semantics ignore nested rule files"
+            "note: no .worktreeinclude is consulted in the repository root; claude-2026-04 semantics ignore nested rule files"
         ),
         "{stderr}"
     );
@@ -289,8 +290,7 @@ fn list_note_names_the_symlink_policy_that_skipped_a_rule_file() {
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr
-            .contains("note: .worktreeinclude is a symlink and the active symlink policy skips it"),
+        stderr.contains("note: the active symlink policy skips a .worktreeinclude symlink"),
         "{stderr}"
     );
     assert!(!stderr.contains("no .worktreeinclude found"), "{stderr}");
@@ -348,14 +348,13 @@ fn list_note_names_the_symlink_policy_when_root_only_semantics_skip_the_root_sym
     assert!(ignored.status.success());
     let stderr = String::from_utf8_lossy(&ignored.stderr);
     assert!(
-        stderr
-            .contains("note: .worktreeinclude is a symlink and the active symlink policy skips it"),
+        stderr.contains("note: the active symlink policy skips a .worktreeinclude symlink"),
         "{stderr}"
     );
     // The root file is right there; denying it sends the user to a remedy
     // that does not apply.
     assert!(
-        !stderr.contains("no .worktreeinclude in the repository root"),
+        !stderr.contains("no .worktreeinclude is consulted in the repository root"),
         "{stderr}"
     );
     assert_eq!(String::from_utf8_lossy(&ignored.stdout), "");
@@ -407,6 +406,7 @@ fn note_from_every_backend(source: &Path, extra_args: &[&str]) -> String {
         .map(|backend| {
             let output = waft()
                 .env("WAFT_GIT_BACKEND", backend)
+                .timeout(std::time::Duration::from_secs(15))
                 .args(["list", "--source"])
                 .arg(source)
                 .args(extra_args)
@@ -432,12 +432,25 @@ fn note_from_every_backend(source: &Path, extra_args: &[&str]) -> String {
     notes[0].1.clone()
 }
 
-/// Assert that `--worktreeinclude-symlink-policy follow` cannot rescue this
-/// repository, which is what disqualifies it as a remedy to advertise.
-///
-/// Validation runs before selection, and it reads the rule file through the
-/// link, so an unresolvable one fails the run outright rather than selecting
-/// anything.
+/// The hint names an investigation. It does not claim validation will pass.
+fn assert_conditional_symlink_note(stderr: &str) {
+    assert!(
+        stderr.contains("policy skips a .worktreeinclude symlink"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("inspect its target before trying"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("then run waft validate with that policy"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("no .worktreeinclude found"), "{stderr}");
+    assert!(!stderr.contains("to use it"), "{stderr}");
+}
+
+/// Validation continues to reject unreadable rule files under Follow.
 fn following_symlinks_fails_to_read_the_rule_file(source: &Path, profile: &str) {
     let output = run_list(
         source,
@@ -456,14 +469,10 @@ fn following_symlinks_fails_to_read_the_rule_file(source: &Path, profile: &str) 
     );
 }
 
-/// A symlinked rule file only makes `follow` a remedy if following it reaches
-/// something readable. A dangling link does not: the recommended run reads the
-/// rule file through the link and fails. Recommending it would send the user
-/// from a silent empty result to a hard error, so the note falls back to the
-/// absent-rule case the active `ignore` policy already implies.
+/// A dangling link is still an observed policy skip, not a promised cure.
 #[cfg(unix)]
 #[test]
-fn list_does_not_recommend_following_a_dangling_root_symlink() {
+fn list_conditionally_diagnoses_a_dangling_root_symlink() {
     let repo = make_repo();
     write_file(repo.path(), ".gitignore", ".env\n");
     std::os::unix::fs::symlink("no-such-rules.txt", repo.path().join(".worktreeinclude")).unwrap();
@@ -481,11 +490,7 @@ fn list_does_not_recommend_following_a_dangling_root_symlink() {
         ],
     );
 
-    assert!(
-        !stderr.contains("--worktreeinclude-symlink-policy follow"),
-        "a dangling link must not be advertised as fixable by following it: {stderr}"
-    );
-    assert!(stderr.contains(CLAUDE_MISSING_RULE_FILE_NOTE), "{stderr}");
+    assert_conditional_symlink_note(&stderr);
     following_symlinks_fails_to_read_the_rule_file(repo.path(), "claude");
 }
 
@@ -493,7 +498,7 @@ fn list_does_not_recommend_following_a_dangling_root_symlink() {
 /// named `.worktreeinclude`, but nothing behind it is a rule file to read.
 #[cfg(unix)]
 #[test]
-fn list_does_not_recommend_following_a_root_symlink_to_a_directory() {
+fn list_conditionally_diagnoses_a_root_symlink_to_a_directory() {
     let repo = make_repo();
     write_file(repo.path(), ".gitignore", ".env\n");
     write_file(repo.path(), "rules.d/keep", "");
@@ -512,21 +517,14 @@ fn list_does_not_recommend_following_a_root_symlink_to_a_directory() {
         ],
     );
 
-    assert!(
-        !stderr.contains("--worktreeinclude-symlink-policy follow"),
-        "a directory target must not be advertised as fixable by following it: {stderr}"
-    );
-    assert!(stderr.contains(CLAUDE_MISSING_RULE_FILE_NOTE), "{stderr}");
+    assert_conditional_symlink_note(&stderr);
     following_symlinks_fails_to_read_the_rule_file(repo.path(), "claude");
 }
 
-/// The root-only branch of the same rule. A regular nested rule file satisfies
-/// the repo-wide existence gate, so the diagnosis reaches the root check — and
-/// the root file resolves to a real file that this process still cannot open.
-/// "Exists" is not "readable", so `follow` is not the remedy here either.
+/// A regular nested rule file must not hide the ignored root symlink.
 #[cfg(unix)]
 #[test]
-fn list_does_not_recommend_following_an_unreadable_root_symlink_under_root_only_semantics() {
+fn list_conditionally_diagnoses_an_unreadable_root_symlink_under_root_only_semantics() {
     use std::os::unix::fs::PermissionsExt;
 
     let repo = make_repo();
@@ -559,25 +557,14 @@ fn list_does_not_recommend_following_an_unreadable_root_symlink_under_root_only_
         ],
     );
 
-    assert!(
-        !stderr.contains("--worktreeinclude-symlink-policy follow"),
-        "an unreadable target must not be advertised as fixable by following it: {stderr}"
-    );
-    assert!(
-        stderr.contains("note: no .worktreeinclude in the repository root"),
-        "{stderr}"
-    );
+    assert_conditional_symlink_note(&stderr);
     following_symlinks_fails_to_read_the_rule_file(repo.path(), "claude");
 }
 
-/// The last way a resolvable link fails the remedy: the target is a regular
-/// file this process opens without complaint, and the rule-file reader still
-/// cannot consume it. Rule files are read as text, so invalid UTF-8 fails the
-/// recommended run at validation exactly like a dangling link does. The gate
-/// is what the reader does, not what the OS permits.
+/// Invalid UTF-8 must not turn a conditional hint into a promise.
 #[cfg(unix)]
 #[test]
-fn list_does_not_recommend_following_a_root_symlink_to_invalid_utf8() {
+fn list_conditionally_diagnoses_a_root_symlink_to_invalid_utf8() {
     let repo = make_repo();
     write_file(repo.path(), ".gitignore", ".env\n");
     fs::write(repo.path().join("rules.bin"), b"\xff\xfe.env\n").unwrap();
@@ -596,12 +583,7 @@ fn list_does_not_recommend_following_a_root_symlink_to_invalid_utf8() {
         ],
     );
 
-    assert!(
-        !stderr.contains("--worktreeinclude-symlink-policy follow"),
-        "a target the rule-file reader cannot decode must not be advertised as \
-         fixable by following it: {stderr}"
-    );
-    assert!(stderr.contains(CLAUDE_MISSING_RULE_FILE_NOTE), "{stderr}");
+    assert_conditional_symlink_note(&stderr);
     following_symlinks_fails_to_read_the_rule_file(repo.path(), "claude");
 }
 
@@ -642,14 +624,12 @@ fn list_pairs_both_knobs_for_a_nested_rule_file_symlink_under_root_only_semantic
          bare follow remedy must not be advertised: {stderr}"
     );
     assert!(
-        stderr.contains(
-            "the only readable .worktreeinclude is a symlink outside the repository root"
-        ),
+        stderr.contains("the active symlink policy skips a nested .worktreeinclude symlink"),
         "{stderr}"
     );
     assert!(
         stderr.contains(
-            "use --worktreeinclude-semantics git --worktreeinclude-symlink-policy follow"
+            "trying --worktreeinclude-semantics git --worktreeinclude-symlink-policy follow"
         ),
         "the note must name the combination that actually reads the file: {stderr}"
     );
@@ -708,15 +688,10 @@ fn list_pairs_both_knobs_for_a_nested_rule_file_symlink_under_root_only_semantic
     );
 }
 
-/// The same shape with a root entry the recommended run would choke on: a
-/// dangling root symlink beside the readable nested one. Pairing the knobs
-/// would be false here — under `follow` validation reads the dangling root
-/// link and fails before anything is selected — so no remedy naming `follow`
-/// applies, and the diagnosis falls back to the absent-rule note that the
-/// active `ignore` policy already implies.
+/// A broken root symlink still prevents a follow run from validating.
 #[cfg(unix)]
 #[test]
-fn list_does_not_pair_the_knobs_when_the_root_rule_file_symlink_is_broken() {
+fn list_keeps_the_hint_conditional_when_the_root_rule_file_symlink_is_broken() {
     let repo = make_repo();
     write_file(repo.path(), ".gitignore", ".env\n");
     write_file(repo.path(), "sub/rules.txt", ".env\n");
@@ -739,12 +714,7 @@ fn list_does_not_pair_the_knobs_when_the_root_rule_file_symlink_is_broken() {
         ],
     );
 
-    assert!(
-        !stderr.contains("--worktreeinclude-symlink-policy follow"),
-        "a broken root rule file makes every follow-based remedy fail: {stderr}"
-    );
-    assert!(stderr.contains(CLAUDE_MISSING_RULE_FILE_NOTE), "{stderr}");
-
+    assert_conditional_symlink_note(&stderr);
     // Both halves of the remedy the previous test names, applied here, fail
     // outright rather than selecting anything.
     following_symlinks_fails_to_read_the_rule_file(repo.path(), "claude");
@@ -766,12 +736,7 @@ fn list_does_not_pair_the_knobs_when_the_root_rule_file_symlink_is_broken() {
     );
 }
 
-/// Diagnosis must not pay for the file it is only asking about. The active
-/// `ignore` policy skipped this symlink; the follow-remedy probe is the only
-/// thing that ever looks behind it, so a multi-gigabyte target must not be
-/// allocated and decoded just to decide whether to print a hint. The bound
-/// also settles the answer: a `.worktreeinclude` that size is not a rule file,
-/// so the remedy is withheld and the absent-rule note stands.
+/// Diagnosis must not read even a large sparse symlink target.
 #[cfg(unix)]
 #[test]
 fn list_does_not_read_an_implausibly_large_symlink_target_to_diagnose() {
@@ -802,17 +767,7 @@ fn list_does_not_read_an_implausibly_large_symlink_target_to_diagnose() {
     let stderr = note_from_every_backend(repo.path(), &["--compat-profile", "git"]);
     let elapsed = started.elapsed();
 
-    assert!(
-        !stderr.contains("--worktreeinclude-symlink-policy follow"),
-        "a target too large to be a rule file must not be advertised as fixable \
-         by following it: {stderr}"
-    );
-    assert!(
-        stderr.contains(
-            "note: no .worktreeinclude found; the git profile selects nothing without one"
-        ),
-        "{stderr}"
-    );
+    assert_conditional_symlink_note(&stderr);
     assert!(
         elapsed < std::time::Duration::from_secs(30),
         "diagnosing an empty selection should not read the symlink target; took {elapsed:?}"
@@ -1282,4 +1237,79 @@ fn f6_wt_profile_skips_nested_worktree_contents() {
     let repo = setup_f6();
     let paths = list_paths(repo.path(), &["--compat-profile", "wt"]);
     assert!(paths.is_empty());
+}
+
+/// UTF-8 readability never established valid ignore syntax; diagnosis only
+/// describes the active policy and leaves validation to the chosen settings.
+#[cfg(unix)]
+#[test]
+fn ignored_invalid_syntax_symlink_hint_is_conditional() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), "rules.txt", "\\\n");
+    std::os::unix::fs::symlink("rules.txt", repo.path().join(".worktreeinclude")).unwrap();
+    git(repo.path(), &["add", ".gitignore", "rules.txt"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+    let note = note_from_every_backend(repo.path(), &["--compat-profile", "git"]);
+    assert_conditional_symlink_note(&note);
+    let followed = run_list(
+        repo.path(),
+        &[
+            "--compat-profile",
+            "git",
+            "--worktreeinclude-symlink-policy",
+            "follow",
+        ],
+    );
+    assert!(
+        !followed.status.success(),
+        "invalid syntax must still fail validation"
+    );
+}
+
+/// One valid target does not prove that every encountered rule symlink can
+/// be validated. Keep both target files and selection semantics unchanged.
+#[cfg(unix)]
+#[test]
+fn ignored_mixed_rule_symlinks_do_not_promise_success() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    write_file(repo.path(), "rules.txt", ".env\n");
+    write_file(repo.path(), "sub/keep", "");
+    std::os::unix::fs::symlink("rules.txt", repo.path().join(".worktreeinclude")).unwrap();
+    std::os::unix::fs::symlink("missing", repo.path().join("sub/.worktreeinclude")).unwrap();
+    git(repo.path(), &["add", ".gitignore", "rules.txt", "sub/keep"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    write_file(repo.path(), ".env", "secret\n");
+    let note = note_from_every_backend(repo.path(), &["--compat-profile", "git"]);
+    assert_conditional_symlink_note(&note);
+    following_symlinks_fails_to_read_the_rule_file(repo.path(), "git");
+    assert_eq!(
+        fs::read_to_string(repo.path().join(".env")).unwrap(),
+        "secret\n"
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join("rules.txt")).unwrap(),
+        ".env\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ignored_rule_symlink_to_fifo_does_not_block_diagnosis() {
+    let repo = make_repo();
+    write_file(repo.path(), ".gitignore", ".env\n");
+    git(repo.path(), &["add", ".gitignore"]);
+    git(repo.path(), &["commit", "-m", "init"]);
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(repo.path().join("rules.pipe"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::os::unix::fs::symlink("rules.pipe", repo.path().join(".worktreeinclude")).unwrap();
+    let note = note_from_every_backend(repo.path(), &["--compat-profile", "git"]);
+    assert_conditional_symlink_note(&note);
 }

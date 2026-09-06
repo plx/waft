@@ -251,7 +251,9 @@ Until the first supported release, changes remain under `Unreleased`.
   file skipped by `--worktreeinclude-symlink-policy ignore`, or an explicit
   `--when-missing-worktreeinclude blank` rather than the profile it overrode.
   A consulted rule file that legitimately selects nothing does not emit it,
-  nor does a configuration that still selects without one (`wt`,
+  Symlink hints describe skipped entries without opening their targets or
+  promising that a different policy will validate or select files.
+  The note is also absent for a configuration that still selects without one (`wt`,
   `--when-missing-worktreeinclude all-ignored`), nor `--quiet`.
 
 ### Fixed
