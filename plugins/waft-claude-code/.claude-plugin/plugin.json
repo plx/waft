@@ -1,7 +1,7 @@
 {
   "name": "waft-claude-code",
   "version": "0.1.0",
-  "description": "Claude Code integration for waft (stub).",
+  "description": "Reference skills for copying Git-ignored files between worktrees with waft.",
   "author": {
     "name": "waft contributors"
   }

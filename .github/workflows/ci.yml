@@ -27,6 +27,8 @@ jobs:
           tool: just
       - name: Install harness CLIs
         run: npm install --global @anthropic-ai/claude-code @openai/codex
+      - name: Check shared skill content
+        run: just check-plugin-skills
       - name: Validate Claude Code marketplace
         run: just check-claude-marketplace
       - name: Validate Claude Code plugin

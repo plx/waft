@@ -1,14 +1,15 @@
 {
   "name": "waft-codex",
   "version": "0.1.0",
-  "description": "Codex integration for waft (stub).",
+  "description": "Reference skills for copying Git-ignored files between worktrees with waft.",
   "author": {
     "name": "waft contributors"
   },
+  "skills": "./skills/",
   "interface": {
     "displayName": "waft for Codex",
-    "shortDescription": "Use waft from Codex.",
-    "longDescription": "Codex integration for waft (stub).",
+    "shortDescription": "Copy ignored worktree files with waft.",
+    "longDescription": "Concise waft reference covering commands, .worktreeinclude rules, compatibility profiles, configuration, linting, and Git hooks.",
     "developerName": "waft contributors",
     "category": "Productivity",
     "capabilities": [],

@@ -297,6 +297,44 @@ To restore the prior hook configuration:
 just uninstall-hooks
 ```
 
+## Agent plugins
+
+This repository is a plugin marketplace for Codex and Claude Code. Both
+plugins provide `copying-gitignored-files-with-waft`: a short entrypoint with
+on-demand references for commands, rule semantics, compatibility profiles,
+configuration, linting, checkout hooks, and choosing files. The plugins supply
+tool-use knowledge; install the `waft` executable separately.
+
+From a checkout of this repository, install the appropriate plugin:
+
+```sh
+# Codex
+codex plugin marketplace add "$PWD"
+codex plugin add waft-codex@waft
+
+# Claude Code
+claude plugin marketplace add "$PWD"
+claude plugin install waft-claude-code@waft
+```
+
+Start a new agent session after installation. Ask about waft or
+`.worktreeinclude` and the agent can load the reference when relevant. In Codex,
+you can also invoke `$copying-gitignored-files-with-waft` explicitly. The Claude
+Code skill is background reference knowledge (`user-invocable: false`), so it
+is available to Claude without appearing as a user slash command.
+
+The two packages are self-contained. Edit the shared Markdown body and
+references in
+[`plugins/waft-codex/skills/copying-gitignored-files-with-waft`](plugins/waft-codex/skills/copying-gitignored-files-with-waft/SKILL.md),
+then run `just sync-plugin-skills` to update the Claude Code copy. Maintain
+each `SKILL.md` frontmatter separately: Codex carries `metadata.short-description`;
+Claude Code separates `description` from `when_to_use` and sets
+`user-invocable: false`. Both allow automatic selection. See the
+[Codex skill documentation](https://developers.openai.com/codex/skills)
+and [Claude Code frontmatter reference](https://code.claude.com/docs/en/skills#frontmatter-reference)
+for the harness formats. `just check-plugin-skills` detects body/reference
+drift; `just check-plugins` also validates both marketplaces and plugins.
+
 ## Testing
 
 Run the complete local preflight, including both plugin marketplaces:

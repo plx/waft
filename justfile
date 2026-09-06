@@ -5,7 +5,14 @@ build-release:
 check: check-format check-clippy check-test check-doc-test check-doc-build check-licenses check-audit check-coverage check-self-test check-plugins
 
 # Validate every agent-harness marketplace and plugin.
-check-plugins: check-claude-plugins check-codex-plugins
+check-plugins: check-plugin-skills check-claude-plugins check-codex-plugins
+
+# Codex owns the shared body/references; each harness keeps its own frontmatter.
+sync-plugin-skills:
+    python3 scripts/sync-plugin-skills.py
+
+check-plugin-skills:
+    python3 scripts/sync-plugin-skills.py --check
 
 check-claude-plugins: check-claude-marketplace check-claude-plugin
 
@@ -22,19 +29,19 @@ check-codex-plugins: check-codex-marketplace check-codex-plugin
 check-codex-marketplace:
     #!/usr/bin/env bash
     set -euo pipefail
-    codex_home="$(mktemp -d)"
-    trap 'rm -rf "$codex_home"' EXIT
-    CODEX_HOME="$codex_home" codex plugin marketplace add "$PWD" --json
+    waft_plugin_check_dir="$(mktemp -d)"
+    trap 'rm -rf "$waft_plugin_check_dir"' EXIT
+    CODEX_HOME="$waft_plugin_check_dir" codex plugin marketplace add "$PWD" --json
 
 # Installing the plugin exercises Codex's built-in plugin ingestion without
 # modifying the developer's real Codex configuration.
 check-codex-plugin:
     #!/usr/bin/env bash
     set -euo pipefail
-    codex_home="$(mktemp -d)"
-    trap 'rm -rf "$codex_home"' EXIT
-    CODEX_HOME="$codex_home" codex plugin marketplace add "$PWD" --json >/dev/null
-    CODEX_HOME="$codex_home" codex plugin add waft-codex@waft --json
+    waft_plugin_check_dir="$(mktemp -d)"
+    trap 'rm -rf "$waft_plugin_check_dir"' EXIT
+    CODEX_HOME="$waft_plugin_check_dir" codex plugin marketplace add "$PWD" --json >/dev/null
+    CODEX_HOME="$waft_plugin_check_dir" codex plugin add waft-codex@waft --json
 
 # Install a reviewed snapshot of waft and its hook under the repository's
 # common Git directory. The installer chains the previously effective hooks
