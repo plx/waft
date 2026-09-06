@@ -410,6 +410,11 @@ fn copy_names_each_skipped_file_and_reason() {
     write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
     write_file(&wt_path, ".env", "DEST_SECRET\n");
 
+    let expected = if cfg!(unix) {
+        "skip: .env (untracked conflict; --overwrite replaces the destination)"
+    } else {
+        "skip: .env (untracked conflict)"
+    };
     waft()
         .args([
             "copy",
@@ -421,10 +426,13 @@ fn copy_names_each_skipped_file_and_reason() {
         .assert()
         // A skip is not a failure; the exit status stays 0.
         .success()
-        .stderr(predicate::str::contains(
-            "skip: .env (untracked conflict; --overwrite replaces the destination)",
-        ))
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(expected))
         .stderr(predicate::str::contains("1 skipped"));
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "DEST_SECRET\n"
+    );
 }
 
 /// The permissions-differ classification names its own remedy, and the
@@ -500,7 +508,12 @@ fn copy_skip_line_matches_the_dry_run_wording() {
     write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
     write_file(&wt_path, ".env", "DEST_SECRET\n");
 
-    let expected = "skip: .env (untracked conflict; --overwrite replaces the destination)";
+    // Windows reports the conflict without suggesting unsupported overwrite.
+    let expected = if cfg!(unix) {
+        "skip: .env (untracked conflict; --overwrite replaces the destination)"
+    } else {
+        "skip: .env (untracked conflict)"
+    };
 
     // The dry run announces its plan on stdout.
     let dry_run = waft()
@@ -520,12 +533,20 @@ fn copy_skip_line_matches_the_dry_run_wording() {
         String::from_utf8_lossy(&dry_run.stdout)
     );
 
+    assert!(dry_run.status.success());
+
     // The executed run reports outcomes on stderr, in the same words.
     let executed = run_copy(main_dir.path(), &wt_path);
     assert!(
         String::from_utf8_lossy(&executed.stderr).contains(expected),
         "{}",
         String::from_utf8_lossy(&executed.stderr)
+    );
+    assert!(executed.status.success());
+    assert!(executed.stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "DEST_SECRET\n"
     );
 }
 
