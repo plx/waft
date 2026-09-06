@@ -7,8 +7,8 @@ on:
       - "site/**"
       - "AGENTS.md"
       - "README.md"
-      - "site/README.md"
       - ".github/workflows/site-publish.yml"
+      - ".github/workflows/site-check.yml"
   workflow_dispatch:
 
 permissions:

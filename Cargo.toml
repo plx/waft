@@ -21,6 +21,9 @@ include = [
     "/THIRD_PARTY_LICENSES.md",
     "/CHANGELOG.md",
     "/SECURITY.md",
+    "/ASSURANCE.md",
+    "/INSTALL.md",
+    "/RELEASE_NOTES.md",
     "/rust-toolchain.toml",
     "/about.toml",
     "/about.hbs",
@@ -29,6 +32,7 @@ include = [
     "/hooks/post-checkout",
     "/scripts/install-hooks.sh",
     "/scripts/self-test.sh",
+    "/scripts/artifact-smoke.sh",
 ]
 
 [dependencies]

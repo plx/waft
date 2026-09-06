@@ -25,6 +25,10 @@ Replace `REVIEWED_COMMIT_SHA` with the full commit you reviewed. Omitting
 `--rev` installs the current tip of the default branch and is not recommended
 for managed environments.
 
+See [installation and artifact verification](INSTALL.md) for binary archive
+checks, supported targets, and temporary installation examples. Optional hooks
+require a reviewed source checkout; binary archives contain no hook installer.
+
 ## Quick start
 
 ```sh
