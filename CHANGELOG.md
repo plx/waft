@@ -9,6 +9,12 @@ Until the first supported release, changes remain under `Unreleased`.
 
 ### Security
 
+- Preserve a foreign index lock when a signal arrives during release or the
+  lock pathname is replaced: defer termination across the release window and
+  compare cleanup with the still-open owned lock.
+- Report both recovery paths and both cleanup errors when replacement succeeds
+  but the displaced original and a staging name both survive cleanup.
+
 - Protect tracked destination paths using filesystem identity and normalized
   case matching, including case-insensitive macOS aliases.
 - Reject an unrecognized `WAFT_GIT_BACKEND` value instead of silently using the

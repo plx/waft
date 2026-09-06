@@ -149,7 +149,8 @@ pub enum DestinationExpectation {
     /// The destination did not exist during planning and must not be replaced.
     Missing,
     /// The destination existed, was untracked, and its content differed from
-    /// the source. `--overwrite` replaces it by atomic exchange.
+    /// the source. Unix `--overwrite` uses atomic exchange where available,
+    /// otherwise displacement followed by no-clobber publication.
     ReplaceExisting(FileSnapshot),
     /// The destination existed, was untracked, and its content matched the
     /// source while its permission bits did not. `--overwrite` repairs the

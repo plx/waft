@@ -1201,9 +1201,9 @@ fn replace_by_displacement(
             // The replacement is published and the displaced file is the one
             // that was planned against: this is the only unlink on this path,
             // and the guard re-proves the inode immediately before it runs.
-            // Its failure outranks a stranded staging name, because what it
-            // leaves behind is the content the destination used to hold.
-            displaced_guard.remove_now().map_err(|error| {
+            // Both cleanup failures matter: the displaced original may hold
+            // secrets, and a surviving staging name may belong to another writer.
+            let displaced_cleanup = displaced_guard.remove_now().map_err(|error| {
                 io::Error::new(
                     error.kind(),
                     format!(
@@ -1214,8 +1214,16 @@ fn replace_by_displacement(
                         displaced_path.display(),
                     ),
                 )
-            })?;
-            published.into_result(&destination_path, &staging_path)
+            });
+            let staging_cleanup = published.into_result(&destination_path, &staging_path);
+            match (displaced_cleanup, staging_cleanup) {
+                (Err(displaced), Err(staging)) => Err(io::Error::new(
+                    displaced.kind(),
+                    format!("{displaced}; additionally, {staging}"),
+                )),
+                (Err(error), _) | (_, Err(error)) => Err(error),
+                (Ok(()), Ok(())) => Ok(()),
+            }
         }
         Err(publish_error) => {
             // Someone took the vacated name before the no-clobber publish
@@ -3100,6 +3108,64 @@ mod tests {
         assert!(
             message.contains(&*kept[0].to_string_lossy()),
             "the error must name the full path of the file left behind, got: {message}"
+        );
+    }
+
+    /// Publication can succeed while both cleanup steps fail independently.
+    #[cfg(unix)]
+    #[test]
+    fn realfs_overwrite_reports_both_staging_and_displaced_leftovers() {
+        let tmp = TempDir::new().unwrap();
+        let (source_root, destination_root) = fixture(&tmp, "file.env", "new\n");
+        let dst = destination_root.join("file.env");
+        write(&dst, "old\n");
+
+        let staging_root = destination_root.clone();
+        let _hooks = publish_hooks::install(publish_hooks::Hooks {
+            exchange_unsupported: true,
+            noreplace_unsupported: true,
+            temporary_removal_fails: true,
+            after_link_published: Some(Box::new(move || {
+                let staged = temporaries(&staging_root);
+                assert_eq!(staged.len(), 1);
+                let interloper = staging_root.join("interloper");
+                write(&interloper, "not waft's file\n");
+                fs::rename(&interloper, &staged[0]).unwrap();
+            })),
+            ..publish_hooks::Hooks::default()
+        });
+        let error = copy(
+            &source_root,
+            &destination_root,
+            "file.env",
+            CopyStrategy::SimpleCopy,
+            &DestinationExpectation::ReplaceExisting(existing_snapshot(&dst)),
+            &mut || Ok(()),
+        )
+        .unwrap_err();
+
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "new\n");
+        let staged = temporaries(&destination_root);
+        let displaced = displaced_files(&destination_root);
+        assert_eq!(staged.len(), 1);
+        assert_eq!(displaced.len(), 1);
+        assert_eq!(fs::read_to_string(&staged[0]).unwrap(), "not waft's file\n");
+        assert_eq!(fs::read_to_string(&displaced[0]).unwrap(), "old\n");
+        let message = error.to_string();
+        for path in [&dst, &staged[0], &displaced[0]] {
+            assert!(
+                message.contains(&*path.to_string_lossy()),
+                "missing {}: {message}",
+                path.display()
+            );
+        }
+        assert!(
+            message.contains("no longer holds"),
+            "missing staging cleanup reason: {message}"
+        );
+        assert!(
+            message.contains("Input/output error"),
+            "missing displaced cleanup reason: {message}"
         );
     }
 

@@ -169,6 +169,7 @@ const INDEX_LOCK_RETRY_DELAYS: &[std::time::Duration] = &[
 /// closes that race against normal Git operations. Direct, non-cooperative
 /// mutation of the index remains outside this protocol.
 struct GitIndexLock {
+    #[cfg(not(unix))]
     path: PathBuf,
     file: Option<fs::File>,
 }
@@ -189,6 +190,9 @@ impl GitIndexLock {
         let mut attempt = 0usize;
         let file = loop {
             let created = OpenOptions::new().write(true).create_new(true).open(&path);
+            if let Ok(file) = &created {
+                interrupt_cleanup::record_file(file);
+            }
             // A signal arriving while the path is merely staged cannot be acted
             // on by the handler: it cannot tell whether the call above has
             // already produced a file, so it records the signal and returns
@@ -249,6 +253,7 @@ impl GitIndexLock {
         // path that records a signal ends at one of these two checks.
         resume_deferred_signal(&path, true)?;
         Ok(Self {
+            #[cfg(not(unix))]
             path,
             file: Some(file),
         })
@@ -279,14 +284,25 @@ fn resume_deferred_signal(path: &Path, holds_lock: bool) -> io::Result<()> {
 
 impl Drop for GitIndexLock {
     fn drop(&mut self) {
-        // Windows cannot unlink an open file; close first on every platform.
-        drop(self.file.take());
-        let _ = fs::remove_file(&self.path);
-        // Disarm last. An interrupt arriving mid-`Drop` then still finds the
-        // path armed and unlinks it; unlinking an already-removed path is a
-        // harmless `ENOENT`, whereas disarming first would leave a window in
-        // which neither the handler nor this function removes the lock.
-        interrupt_cleanup::disarm();
+        #[cfg(unix)]
+        {
+            // Defer signals across removal just as during creation. After
+            // unlink another Git writer can immediately create its own lock;
+            // no handler may interpret that new file as ours.
+            if interrupt_cleanup::begin_release() {
+                interrupt_cleanup::remove_recorded_lock();
+                after_lock_removed();
+                interrupt_cleanup::disarm();
+                interrupt_cleanup::resume_pending_signal(false);
+            }
+            drop(self.file.take());
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows cannot unlink an open file.
+            drop(self.file.take());
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -303,6 +319,7 @@ impl Drop for GitIndexLock {
 mod interrupt_cleanup {
     use std::cell::UnsafeCell;
     use std::mem::MaybeUninit;
+    use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
     use std::ptr;
@@ -326,6 +343,9 @@ mod interrupt_cleanup {
     unsafe impl<T> Sync for SignalCell<T> {}
 
     static STATE: AtomicU8 = AtomicU8::new(EMPTY);
+    // Kept open until release has finished; used by signal-safe fstat/lstat
+    // to avoid removing a lock whose pathname was replaced by another writer.
+    static LOCK_FD: AtomicI32 = AtomicI32::new(-1);
     static PATH: SignalCell<[u8; PATH_CAPACITY]> = SignalCell(UnsafeCell::new([0; PATH_CAPACITY]));
     /// A signal the handler could not act on because the lock file's existence
     /// was still undecided. Read back by the acquire path within microseconds.
@@ -358,6 +378,7 @@ mod interrupt_cleanup {
         }
         install_handlers();
         STATE.store(WRITING, Ordering::SeqCst);
+        LOCK_FD.store(-1, Ordering::SeqCst);
         // SAFETY: `STATE` is not `ARMED`, so no handler will read the buffer
         // while it is being written, and only one lock is live at a time.
         unsafe {
@@ -366,6 +387,16 @@ mod interrupt_cleanup {
             buffer[bytes.len()] = 0;
         }
         STATE.store(STAGED, Ordering::SeqCst);
+    }
+
+    pub(super) fn record_file(file: &std::fs::File) {
+        LOCK_FD.store(file.as_raw_fd(), Ordering::SeqCst);
+    }
+
+    pub(super) fn begin_release() -> bool {
+        STATE
+            .compare_exchange(ARMED, STAGED, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
     }
 
     /// Promote the staged path to the live lock.
@@ -383,29 +414,40 @@ mod interrupt_cleanup {
 
     /// Unlink the recorded lock path, if one is armed.
     ///
-    /// Async-signal-safe: an atomic load plus `unlink(2)`.
+    /// Consume ownership once, then verify and remove the recorded lock.
     pub(super) fn remove_armed_lock() {
-        if STATE.load(Ordering::SeqCst) != ARMED {
-            return;
+        if STATE
+            .compare_exchange(ARMED, EMPTY, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            remove_recorded_lock();
         }
-        unlink_recorded_path();
     }
 
-    /// Unlink the recorded path unconditionally.
-    ///
-    /// The caller must have established both that the buffer holds a complete
-    /// path — the state is `STAGED` or `ARMED` — and that the file at it is
-    /// this process's to remove.
-    fn unlink_recorded_path() {
-        // SAFETY: past `WRITING` the buffer holds a complete NUL-terminated
-        // path that stays valid until the next `stage`.
+    /// Remove only the entry matching the open lock descriptor. fstat/lstat
+    /// and unlink are async-signal-safe; failure to prove ownership leaves the
+    /// name alone. As with staging cleanup, POSIX cannot combine the identity
+    /// check and unlink into one conditional syscall.
+    pub(super) fn remove_recorded_lock() {
         unsafe {
-            libc::unlink(PATH.0.get().cast::<libc::c_char>());
+            let mut held: MaybeUninit<libc::stat> = MaybeUninit::uninit();
+            let mut named: MaybeUninit<libc::stat> = MaybeUninit::uninit();
+            let path = PATH.0.get().cast::<libc::c_char>();
+            if libc::fstat(LOCK_FD.load(Ordering::SeqCst), held.as_mut_ptr()) != 0
+                || libc::lstat(path, named.as_mut_ptr()) != 0
+            {
+                return;
+            }
+            let held = held.assume_init();
+            let named = named.assume_init();
+            if held.st_dev == named.st_dev && held.st_ino == named.st_ino {
+                libc::unlink(path);
+            }
         }
     }
 
-    /// Async-signal-safe throughout: atomic accesses, `unlink`, `sigaction`,
-    /// and `raise`, and nothing else.
+    /// Async-signal-safe throughout: atomic accesses, `fstat`, `lstat`,
+    /// `unlink`, `sigaction`, and `raise`.
     pub(super) extern "C" fn handle_interrupt(signal: libc::c_int) {
         // One window cannot be resolved from inside a handler: between
         // `create_new` returning and the cleanup being armed, the lock file may
@@ -457,10 +499,12 @@ mod interrupt_cleanup {
         if signal == NO_SIGNAL {
             return None;
         }
-        // Remove before dropping the recorded path, never after: a second
-        // signal arriving in between must still find something to clean up.
+        // Keep later signals deferred until cleanup is finished. In
+        // particular, never unlink the same name twice after another writer
+        // has had a chance to acquire it.
         if holds_lock && STATE.load(Ordering::SeqCst) != EMPTY {
-            unlink_recorded_path();
+            STATE.store(STAGED, Ordering::SeqCst);
+            remove_recorded_lock();
         }
         // Whether or not a lock was created, nothing is live now. Leaving the
         // state `STAGED` would make a later signal defer with no check ahead of
@@ -515,6 +559,9 @@ mod interrupt_cleanup {
             action.sa_sigaction = handle_interrupt as usize;
             action.sa_flags = libc::SA_RESTART;
             libc::sigemptyset(&mut action.sa_mask);
+            // Neither termination handler may interrupt the other's cleanup.
+            libc::sigaddset(&mut action.sa_mask, libc::SIGINT);
+            libc::sigaddset(&mut action.sa_mask, libc::SIGTERM);
 
             // Each call publishes its own readiness flag, in the only order
             // that is safe against a delivery arriving mid-installation, so
@@ -602,6 +649,8 @@ mod interrupt_cleanup {
 
     pub(super) fn arm() {}
 
+    pub(super) fn record_file(_file: &std::fs::File) {}
+
     pub(super) fn disarm() {}
 
     /// No handler is installed, so no signal is ever deferred.
@@ -622,6 +671,7 @@ mod lock_hooks {
 
     thread_local! {
         static IN_CREATION_WINDOW: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+        static IN_RELEASE_WINDOW: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
     }
 
     /// Installs `hook` for the current thread until the returned guard drops.
@@ -630,11 +680,24 @@ mod lock_hooks {
         HookGuard
     }
 
+    pub(super) fn install_release(hook: Box<dyn FnMut()>) -> HookGuard {
+        IN_RELEASE_WINDOW.with(|cell| *cell.borrow_mut() = Some(hook));
+        HookGuard
+    }
+
+    pub(super) fn after_lock_removed() {
+        let hook = IN_RELEASE_WINDOW.with(|cell| cell.borrow_mut().take());
+        if let Some(mut hook) = hook {
+            hook();
+        }
+    }
+
     pub(super) struct HookGuard;
 
     impl Drop for HookGuard {
         fn drop(&mut self) {
             IN_CREATION_WINDOW.with(|cell| *cell.borrow_mut() = None);
+            IN_RELEASE_WINDOW.with(|cell| *cell.borrow_mut() = None);
         }
     }
 
@@ -649,10 +712,13 @@ mod lock_hooks {
 }
 
 #[cfg(all(test, unix))]
-use lock_hooks::after_lock_created;
+use lock_hooks::{after_lock_created, after_lock_removed};
 
 #[cfg(not(all(test, unix)))]
 fn after_lock_created() {}
+
+#[cfg(all(not(test), unix))]
+fn after_lock_removed() {}
 
 fn ensure_destination_untracked(
     plan: &CopyPlan,
@@ -1167,6 +1233,8 @@ mod tests {
         // directly is the only way to exercise it without killing the test
         // process.
         interrupt_cleanup::stage(&armed);
+        let held_file = fs::File::open(&armed).unwrap();
+        interrupt_cleanup::record_file(&held_file);
         interrupt_cleanup::arm();
         interrupt_cleanup::remove_armed_lock();
         assert!(!armed.exists(), "an interrupt must not leave a stale lock");
@@ -1338,6 +1406,108 @@ mod tests {
         fs::remove_file(&lock).unwrap();
     }
 
+    /// Real process termination, with deterministic delivery inside each lock
+    /// window. Subprocesses isolate the process-global signal dispositions.
+    #[cfg(unix)]
+    #[test]
+    fn real_interrupts_clean_owned_locks_and_preserve_foreign_locks() {
+        use std::os::unix::process::ExitStatusExt;
+        const CHILD: &str = "WAFT_TEST_LOCK_SIGNAL_CHILD";
+        if let Ok(phase) = std::env::var(CHILD) {
+            let root = PathBuf::from(std::env::var_os("WAFT_TEST_LOCK_SIGNAL_ROOT").unwrap());
+            let signal: i32 = std::env::var("WAFT_TEST_LOCK_SIGNAL")
+                .unwrap()
+                .parse()
+                .unwrap();
+            unsafe {
+                libc::signal(libc::SIGINT, libc::SIG_DFL);
+                libc::signal(libc::SIGTERM, libc::SIG_DFL);
+            }
+            let index = root.join("index");
+            let lock = root.join("index.lock");
+            let _creation = (phase == "creation").then(|| {
+                lock_hooks::install(Box::new(move || unsafe {
+                    libc::raise(signal);
+                }))
+            });
+            let release_lock = lock.clone();
+            let _release = (phase == "release").then(|| {
+                lock_hooks::install_release(Box::new(move || {
+                    fs::write(&release_lock, b"foreign lock\n").unwrap();
+                    unsafe {
+                        libc::raise(signal);
+                    }
+                }))
+            });
+            if phase == "foreign" {
+                fs::write(&lock, b"foreign lock\n").unwrap();
+                interrupt_cleanup::stage(&lock);
+                unsafe {
+                    libc::raise(signal);
+                }
+                let _ = resume_deferred_signal(&lock, false);
+            } else {
+                let held = GitIndexLock::acquire(&index).unwrap();
+                if phase == "release" {
+                    drop(held);
+                } else {
+                    if phase == "replaced" {
+                        fs::rename(&lock, root.join("held-lock")).unwrap();
+                        fs::write(&lock, b"foreign lock\n").unwrap();
+                    }
+                    unsafe {
+                        libc::raise(signal);
+                    }
+                    // A signal must terminate before a publication can resume.
+                    fs::write(root.join("destination"), b"unexpected publication\n").unwrap();
+                    drop(held);
+                }
+            }
+            panic!("the real signal should terminate this child");
+        }
+        let _serialized = one_lock_at_a_time();
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            for phase in ["creation", "publication", "foreign", "release", "replaced"] {
+                let temp = tempfile::TempDir::new().unwrap();
+                let destination = temp.path().join("destination");
+                fs::write(&destination, b"unchanged\n").unwrap();
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "executor::tests::real_interrupts_clean_owned_locks_and_preserve_foreign_locks", "--nocapture"])
+                    .env(CHILD, phase)
+                    .env("WAFT_TEST_LOCK_SIGNAL_ROOT", temp.path())
+                    .env("WAFT_TEST_LOCK_SIGNAL", signal.to_string())
+                    .output().unwrap();
+                assert_eq!(output.status.signal(), Some(signal), "{phase}: {output:?}");
+                assert_eq!(fs::read(&destination).unwrap(), b"unchanged\n", "{phase}");
+                let lock = temp.path().join("index.lock");
+                if matches!(phase, "foreign" | "release" | "replaced") {
+                    assert_eq!(
+                        fs::read(&lock).unwrap(),
+                        b"foreign lock\n",
+                        "{phase}: a foreign lock must survive signal cleanup"
+                    );
+                } else {
+                    assert!(!lock.exists(), "{phase}: the owned lock must be removed");
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normal_lock_release_preserves_a_replaced_foreign_lock() {
+        let _serialized = one_lock_at_a_time();
+        let temp = tempfile::TempDir::new().unwrap();
+        let lock = temp.path().join("index.lock");
+        let held = GitIndexLock::acquire(&temp.path().join("index")).unwrap();
+        // Keep the old inode alive, as another process moving a lock aside
+        // would, and then install a different writer's lock at the same name.
+        fs::rename(&lock, temp.path().join("held-lock")).unwrap();
+        fs::write(&lock, b"foreign lock\n").unwrap();
+        drop(held);
+        assert_eq!(fs::read(&lock).unwrap(), b"foreign lock\n");
+    }
+
     /// Counts `SIGUSR2` deliveries and restores the previous disposition on
     /// drop.
     ///
@@ -1458,6 +1628,8 @@ mod tests {
         fs::write(&armed, b"waft\n").unwrap();
 
         interrupt_cleanup::stage(&armed);
+        let held_file = fs::File::open(&armed).unwrap();
+        interrupt_cleanup::record_file(&held_file);
         interrupt_cleanup::arm();
         interrupt_cleanup::handle_interrupt(libc::SIGUSR2);
         assert!(

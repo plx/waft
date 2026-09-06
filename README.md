@@ -122,8 +122,8 @@ the flag.
   `repaired permissions:`. This is the expected state for files published by
   pre-release waft builds, which always wrote mode `0600`.
 
-Every `--overwrite` action is checked against the exact bytes and mode
-observed while planning. A destination that changed in between is reported as
+Every `--overwrite` action is checked against the identity, length, content
+fingerprint, and mode observed while planning. A destination that changed in between is reported as
 a per-file failure and left untouched; the rest of the run continues. A
 permissions repair additionally requires the pinned source and destination
 snapshots to agree on content, so a destination rewritten between the byte
@@ -239,9 +239,9 @@ extra = ["*.bak"]
   rather than inherited from an earlier comparison, and the mode is read back
   afterwards so a repair another writer `chmod`-ed away is reported as a
   failure instead of a success
-- **Nothing unverified is deleted** — waft only unlinks a name it has just
-  proven still holds the inode it planned against, including from the cleanup
-  that runs when a publication unwinds. If a recovery step fails and leaves
+- **Verified recovery cleanup** — publication and rollback cleanup checks that
+  a name still holds the expected inode before unlinking it, including when
+  publication unwinds. If a recovery step fails and leaves
   another writer's file under a `.waft-copy-*` name, that file is kept and
   named in the error rather than cleaned up. POSIX has no conditional unlink,
   so a two-syscall window between that proof and the removal remains — on a
@@ -253,22 +253,21 @@ extra = ["*.bak"]
   components are opened relative to canonical worktree directory handles with
   `O_NOFOLLOW`; source state is matched to its planning snapshot, and a
   destination parent is revalidated before publication
-- **Durable atomic visibility** — file contents are synced to a temp file
-  before publication, then the parent directory is synced on Unix
-- **No orphan temporaries** — `.waft-copy-*` staging files are removed by a
-  drop guard, including when a publication unwinds, as long as the name still
-  holds the file waft put there; one another process has taken over is left
-  alone instead
-- **Interrupt-safe index locking** — on Unix, `SIGINT` and `SIGTERM` unlink the
-  live `index.lock` before re-raising under their previous disposition, so an
-  interrupt during the publish window cannot leave a stale lock. A signal that
-  arrives while the lock is still being created is recorded and acted on the
-  moment its ownership is known, rather than re-raised into a process that
-  would die with the lock on disk or delete a lock another writer holds. A
-  signal the process inherited as ignored is left ignored: waft would otherwise
-  drop its own lock and keep publishing without it. Other platforms have no
-  such handler; an interrupt there may require deleting `.git/**/index.lock` by
-  hand
+- **Per-file publication** — file contents are synced before publication, then
+  the parent directory is synced on Unix. Exchange-based replacement has
+  atomic visibility; the displacement fallback has a brief vacant-name window.
+- **Cleanup after ordinary errors** — a drop guard attempts to remove owned
+  `.waft-copy-*` staging files on errors and unwinding panics. A changed name
+  is left alone. Process termination, including SIGINT/SIGTERM, does not run
+  Rust drop guards and can leave staging or recovery files behind
+- **Interrupt-aware index locking** — on Unix, `SIGINT` and `SIGTERM` attempt
+  to remove the owned `index.lock` before re-raising under the previous
+  disposition. Creation and release windows defer signals until ownership is
+  known. Cleanup compares the open lock's identity with the named entry and
+  never retries removal after release, preserving another Git writer's lock.
+  Inherited ignored signals stay ignored. Filesystem errors, SIGKILL, crashes,
+  and non-Unix interruption can still leave stale locks; check ownership and
+  ensure no Git writer is active before manually removing one
 - **Dry-run is mutation-free** — `--dry-run` reads only, writes nothing, and
   reports planning failures on stderr with the same nonzero exit the real run
   would produce
@@ -338,6 +337,9 @@ race. Cleanup itself is subject to the same limit: waft proves that a name still
 holds the file it created immediately before unlinking it, and POSIX has no way
 to make those two steps one.
 
+
+See [ASSURANCE.md](ASSURANCE.md) for the tested scope, platform coverage, and
+remaining concurrency and recovery limits.
 
 ## Website development
 
