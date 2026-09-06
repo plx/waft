@@ -1,0 +1,5 @@
+/* Proposal only. Do not import into the production site. */
+.hero h1 {
+  font-size: clamp(2.5rem, 5vw, 4rem);
+  line-height: 1.05;
+}
