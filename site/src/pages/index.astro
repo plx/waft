@@ -142,60 +142,22 @@ const attributionHref = `${siteConfig.repository.url}/blob/${siteConfig.reposito
         <div class="hero__visual">
           <div class="command-card" aria-labelledby="command-card-title">
             <div class="command-card__header">
-              <div>
-                <p class="eyebrow">Terminal</p>
-                <h2 id="command-card-title">{siteConfig.landing.terminal.title}</h2>
-              </div>
-              <span>{siteConfig.landing.terminal.meta}</span>
+              <h2 id="command-card-title">{siteConfig.landing.terminal.title}</h2>
             </div>
             <pre class="command-card__body"><code>{siteConfig.landing.terminal.lines.join("\n")}</code></pre>
             <button
               class="copy-button"
               type="button"
               data-copy-text={siteConfig.landing.terminal.copy}
-              aria-label={`Copy command: ${siteConfig.landing.terminal.copy}`}
+              aria-label={`Copy preview command: ${siteConfig.landing.terminal.copy}`}
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <rect x="8" y="8" width="11" height="12" rx="2"></rect>
                 <path d="M5 15V6a2 2 0 0 1 2-2h9"></path>
               </svg>
-              <span>Copy</span>
+              <span>Copy preview command</span>
               <span class="sr-only" data-copy-status aria-live="polite"></span>
             </button>
-          </div>
-
-          <div class="transfer-panel">
-            <h2>{siteConfig.landing.transfer.title}</h2>
-            <p>
-              <code>.worktreeinclude</code>
-              {siteConfig.landing.transfer.description.replace(".worktreeinclude", "")}
-            </p>
-            <div class="transfer-list">
-              {siteConfig.landing.transfer.includes.map((pattern) => <span>{pattern}</span>)}
-            </div>
-            <div class="transfer-rule">
-              <strong>{siteConfig.landing.transfer.negation}</strong>
-              <span>{siteConfig.landing.transfer.negationDescription}</span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section class="section section--muted" id="features" aria-labelledby="features-title">
-        <div class="section-shell">
-          <div class="section-heading">
-            <h2 id="features-title">How <code>waft</code> works</h2>
-          </div>
-          <div class="feature-grid">
-            {siteConfig.landing.features.map((feature, index) => (
-              <article class="feature-card">
-                <span class="feature-card__index" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
-                <p class="feature-card__eyebrow">{feature.eyebrow}</p>
-                <h3>{feature.title}</h3>
-                <p>{feature.body}</p>
-                <a class="text-link" href={resolveHref(feature.href)}>{feature.linkLabel}</a>
-              </article>
-            ))}
           </div>
         </div>
       </section>

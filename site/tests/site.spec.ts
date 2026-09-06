@@ -8,54 +8,54 @@ type DocsPage = {
   href: string;
 };
 
-const origin = "http://127.0.0.1:4321";
+const origin = `http://127.0.0.1:${process.env.WAFT_SITE_TEST_PORT || "4321"}`;
 const projectTitle = "waft";
 const landingHeadline = "Copy ignored files.";
 const projectDescription =
-  "waft copies ignored, untracked files selected by .worktreeinclude between Git worktrees.";
+  "waft copies selected Git-ignored files from the main worktree to a linked worktree.";
 const themeStorageKey = "waft-theme";
 const repositoryUrl = "https://github.com/plx/waft";
 const basePath: string = "/waft";
 const normalizedBasePath = basePath === "/" ? "" : basePath;
 // prettier-ignore
 const docsPages: DocsPage[] = [
-    {
-      "title": "Usage",
-      "description": "Install waft and run its copy, list, info, and validate commands.",
-      "slug": "usage",
-      "href": "usage/"
-    },
-    {
-      "title": ".worktreeinclude",
-      "description": "Define file selection with .gitignore syntax.",
-      "slug": "worktreeinclude",
-      "href": "worktreeinclude/"
-    },
-    {
-      "title": "Safety",
-      "description": "Understand planning, conflicts, symlink handling, and hook trust boundaries.",
-      "slug": "safety",
-      "href": "safety/"
-    },
-    {
-      "title": "Profiles",
-      "description": "Choose claude, git, or wt file-selection behavior.",
-      "slug": "profiles",
-      "href": "profiles/"
-    },
-    {
-      "title": "Configuration",
-      "description": "Set file-selection and copy policy through config, environment, or CLI options.",
-      "slug": "configuration",
-      "href": "configuration/"
-    },
-    {
-      "title": "Architecture",
-      "description": "How waft resolves policy, selects files, and publishes copies.",
-      "slug": "architecture",
-      "href": "architecture/"
-    }
-  ];
+  {
+    "title": "Usage",
+    "description": "Installation, first copy, and command reference.",
+    "slug": "usage",
+    "href": "usage/"
+  },
+  {
+    "title": ".worktreeinclude",
+    "description": "Which files to copy and how patterns match.",
+    "slug": "worktreeinclude",
+    "href": "worktreeinclude/"
+  },
+  {
+    "title": "Safety",
+    "description": "Existing files, symlinks, and concurrent changes.",
+    "slug": "safety",
+    "href": "safety/"
+  },
+  {
+    "title": "Profiles",
+    "description": "The differences between claude, git, and wt.",
+    "slug": "profiles",
+    "href": "profiles/"
+  },
+  {
+    "title": "Configuration",
+    "description": "Config files, environment variables, and CLI overrides.",
+    "slug": "configuration",
+    "href": "configuration/"
+  },
+  {
+    "title": "Architecture",
+    "description": "How the code selects and copies files.",
+    "slug": "architecture",
+    "href": "architecture/"
+  }
+];
 const pagesToCheck = ["/", ...docsPages.map((page) => page.href)];
 const pagesToAudit = pagesToCheck;
 
@@ -152,6 +152,28 @@ test.describe("rendered site", () => {
         })
         .locator('button[data-theme-choice="light"]'),
     ).toHaveAttribute("aria-checked", "true");
+  });
+
+  test("copies only the preview command from the quick start", async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.goto(sitePath("/"));
+
+    const copyButton = page.getByRole("button", {
+      name: "Copy preview command: waft copy --dry-run",
+      exact: true,
+    });
+    await copyButton.click();
+
+    await expect(copyButton).toContainText("Copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      "waft copy --dry-run",
+    );
+    await expect(page.locator("[data-copy-status]")).toHaveText(
+      "Command copied to clipboard.",
+    );
   });
 
   test("preserves Starlight search on documentation pages", async ({

@@ -2,13 +2,13 @@
 title: "Architecture"
 sidebar:
   label: "Architecture"
-description: "How waft resolves policy, selects files, and publishes copies."
+description: "How the code selects and copies files."
 ---
 
-Each command resolves worktree context and policy, classifies files, and stops
-at the last phase it needs.
+`waft` uses Git to check file status, `.worktreeinclude` to select files, and a
+copy plan to separate those reads from writes.
 
-## Git is authoritative
+## Git backends
 
 The `GitBackend` trait supplies final ignored and tracked status. `waft` does
 not infer either status from `.gitignore` parsing alone.
@@ -16,9 +16,7 @@ not infer either status from `.gitignore` parsing alone.
 - `GitGix` is the default in-process backend built on the `gix` crate.
 - `GitCli` runs Git commands. Select it with `WAFT_GIT_BACKEND=cli`.
 
-Backend parity tests keep both implementations aligned.
-
-## `.worktreeinclude` matching is pluggable
+## File matching
 
 `worktreeinclude_engine` applies `.worktreeinclude` rules independently of the
 Git backend. It provides three matchers:
@@ -47,8 +45,5 @@ The pipeline is read-only through copy planning.
 `validate` stops after rule parsing. `list` and `info` stop after
 classification. `copy --dry-run` stops after planning.
 
-## Testing strategy
-
-Tests cover pure policy and matching logic, real Git repositories, each
-profile, backend parity, and differential checks against Git for `git`
-semantics.
+The planner and executor live in `src/planner.rs` and `src/executor.rs`.
+See [Safety](../safety/) for the checks made before each write.

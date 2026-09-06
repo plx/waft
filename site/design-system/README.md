@@ -30,9 +30,13 @@ production accessibility, navigation, routing, and documentation behavior.
 
 ## What waft is
 
-> `waft` copies `.worktreeinclude`-selected ignored files between Git worktrees.
+> `waft` copies selected Git-ignored files from the main worktree to a linked worktree.
 
-When you use `git worktree`, local configuration files (`.env`, API keys, build caches) live in `.gitignore` and don't carry over to linked worktrees. waft solves that: drop a `.worktreeinclude` file listing what you want copied, and `waft` does the rest.
+Git does not carry ignored local files into a new worktree. List the files you
+need in the main worktree's `.worktreeinclude`, then run `waft` from a linked
+worktree in the same repository. By default, it copies missing files and preserves
+existing destination paths. On Unix, `--overwrite` replaces untracked files or
+repairs their permissions. It does not create worktrees or keep files synchronized.
 
 It's a single-binary Rust CLI. The product surface is the *terminal*. The web surface is one landing page plus six MDX docs (`usage`, `worktreeinclude`, `safety`, `profiles`, `configuration`, `architecture`).
 
@@ -47,7 +51,9 @@ It's a single-binary Rust CLI. The product surface is the *terminal*. The web su
 
 ## Content Fundamentals
 
-The voice of waft's docs is **declarative, technical, second-person, and code-first**. It reads like the man page for a well-loved Unix tool.
+The website is a README and reference for a narrow CLI. Use direct descriptions,
+concrete examples, and instructions. Explain what a reader needs to know to run
+the tool or understand a result. Do not write copy to fill a component.
 
 ### Tone & casing
 
@@ -71,17 +77,24 @@ Short. Imperative or declarative. Often a single fact per sentence. Where a conc
 
 ### Page anatomy
 
-Every docs page follows the same beats:
-
-1. **One-line definition** of what the topic is (no preamble).
-2. **A code block** showing the simplest invocation, often within the first 200 words.
-3. **A reference table** for commands, options, or profiles when applicable.
-4. **Numbered or bulleted enumerations** for invariants, eligibility rules, pipeline steps.
+Let the subject determine each page's structure. Start with its useful fact or
+example. Use tables for reference material and lists for actual steps or rules;
+neither is required. Avoid a second explanation when a command table already
+says it. Preserve limitations, defaults, and exceptions even when shortening copy.
 
 The landing hero uses the eyebrow `Git worktree file copier`, the headline
-`Copy ignored files.`, a direct definition of what `waft` copies, and the
-`Usage` / `Source` actions. The actions follow the body copy directly. Do not
-add a project-metadata badge row to the hero.
+`Copy ignored files.`, the main-to-linked scope and existing-file behavior, and
+the `Usage` / `Source` actions. One example shows the rule file and the preview
+and copy commands in context. Its copy button copies only the preview command.
+The documentation index follows directly. Do not add a metadata badge row,
+feature triptych, or separate pattern summary that repeats the example.
+
+This is an intentional content-composition exception to the UI kit's landing
+page: its three feature cards and transfer panel are omitted. The remaining
+terminal fills its column. Keep the canonical colors, type, component treatments,
+and responsive behavior. The kit demonstrates available components, not required
+content slots. Aesthetic alternatives in `preview/site-review/` are proposals
+only; they do not change the production token contract.
 
 ### Vocabulary
 
@@ -91,7 +104,7 @@ The system has its own terms; respect them:
 - **eligible / eligibility** — the formal predicate for what gets copied.
 - **profile** (`claude` / `git` / `wt`) — a coordinated bundle of behavior.
 - **compat-profile** — the CLI flag form.
-- **plan, then execute** — the safety model. Always paired.
+- **plan / execute** — implementation terms; prefer “preview” and “copy” in instructions.
 - **dry-run** — hyphenated.
 - **tracked / ignored / untracked** — Git terms, used precisely.
 - **engine** / **semantics** — the matcher implementation (`claude-2026-04`, `git`, `wt-0.39`).
@@ -99,6 +112,8 @@ The system has its own terms; respect them:
 ### What it never does
 
 - Never markets ("revolutionary," "powerful," "delightful").
+- Never invents a feature section, slogan, or repeated call to action to fill a layout.
+- Never turns an implementation detail into a selling point ("pluggable," "authoritative").
 - Never says "easy" or "simple" — shows the thing instead.
 - Never apologizes for friction (`--dry-run` is presented as a virtue, not a hurdle).
 - Never uses screenshots of the terminal — actual code blocks only.

@@ -259,13 +259,6 @@ pre {
   min-width: 0;
 }
 
-.hero__visual {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 250px;
-  gap: 1.5rem;
-  align-items: start;
-}
-
 .eyebrow {
   margin: 0 0 1rem;
   color: var(--waft-accent-dark);
