@@ -41,11 +41,7 @@
     "transfer": {
       "title": "What gets copied",
       "description": ".worktreeinclude patterns follow .gitignore syntax.",
-      "includes": [
-        ".env",
-        "*.env.local",
-        "**/*.key"
-      ],
+      "includes": [".env", "*.env.local", "**/*.key"],
       "negation": "!test.key",
       "negation_description": "Negations remove a path from the include set."
     },
