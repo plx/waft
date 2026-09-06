@@ -443,6 +443,12 @@ pub enum CopyOutcome {
     /// An existing untracked destination's permission bits were repaired; its
     /// content already matched the source.
     PermissionsRepaired,
+    /// The file was left alone. Carries the planner's reason so an executed
+    /// run can explain the skip without a second `--dry-run`.
+    Skipped {
+        /// Why the file was left alone.
+        reason: SkipReason,
+    },
     /// Copy failed with an error.
     Failed {
         /// Description of the failure.

@@ -82,6 +82,25 @@ A file is eligible for copying when **all** of these are true:
 5. It is not dropped by the active exclusion set
    (`--builtin-exclude-set`, `--extra-exclude`)
 
+Under the `claude` and `git` profiles, a repository with no `.worktreeinclude`
+selects nothing at all. Because that is far more often an unconfigured
+repository than a deliberate one, `copy`, `list`, and `info` say so once on
+stderr — stdout stays machine-readable, and `--quiet` suppresses the note:
+
+```text
+note: no .worktreeinclude found; the claude profile selects nothing without one (see waft validate)
+```
+
+The note names whatever is actually responsible, so it also covers a rule file
+that exists but the active configuration never reads — one outside the
+repository root under root-only `claude-2026-04` semantics, or a symlinked one
+under `--worktreeinclude-symlink-policy ignore`. Symlink hints ask you to
+inspect targets and validate with the intended settings; they do not promise
+that changing policy will validate or select files. It is not printed for a
+consulted rule file that legitimately matches nothing, nor for a configuration
+that still selects without one (`wt`, or `--when-missing-worktreeinclude
+all-ignored`).
+
 ## Commands
 
 | Command | Description |
@@ -113,27 +132,40 @@ Without `--overwrite`, a destination that exists and differs is skipped and
 left exactly as it is. Tracked destinations are never written, with or without
 the flag.
 
+Every skipped file is named on stderr with its reason, in the same words
+`--dry-run` uses, so a run that copied nothing still says why:
+
+```text
+skip: .env (untracked conflict; --overwrite replaces the destination)
+```
+
+A skip is not a failure and does not change the exit status. `--quiet`
+suppresses these lines along with the rest of the non-error output; per-file
+failures print either way.
+
 `--overwrite` distinguishes two cases, and both name the file they act on:
 
 - **untracked conflict** — content differs. The new content is prepared in a
-  temporary file and swapped into place atomically, reported as `replaced:`.
+  temporary file and exchanged atomically where supported, with the checked
+  fallback described below otherwise, reported as `replaced:`.
 - **content equal, permissions differ** — only the mode is wrong. The mode is
   fixed on the verified file descriptor and nothing is rewritten, reported as
   `repaired permissions:`. This is the expected state for files published by
   pre-release waft builds, which always wrote mode `0600`.
 
 Every `--overwrite` action is checked against the identity, length, content
-fingerprint, and mode observed while planning. A destination that changed in between is reported as
-a per-file failure and left untouched; the rest of the run continues. A
+fingerprint, and mode observed while planning. A detected change is reported
+as a per-file failure; recovery can leave named files when restoring would
+clobber another writer. The rest of the run continues. A
 permissions repair additionally requires the pinned source and destination
 snapshots to agree on content, so a destination rewritten between the byte
 comparison and the snapshot is never quietly `chmod`-ed and called repaired.
 
 Replacement uses an atomic exchange primitive (`renameat2` `RENAME_EXCHANGE` on
 Linux, `renameatx_np` `RENAME_SWAP` on macOS) where the filesystem has one.
-Where it has none — notably SMB, NFS, and exFAT destinations — waft moves the
+If exchange is unsupported, waft moves the
 destination aside with a plain rename and publishes into the name it left, with
-no-clobber semantics. Nothing is unlinked by name: the displaced file is
+no-clobber semantics. Cleanup verifies ownership before unlinking: the displaced file is
 identified after the move, and it is removed only once the replacement is
 published and its name is proven to still hold it. If it turns out not to be
 the file that was planned against — another writer got there first — it is
@@ -227,7 +259,7 @@ extra = ["*.bak"]
 - **Proven replacement only** — `--overwrite` re-opens the destination through
   the anchored parent with `O_NOFOLLOW` and requires its device, inode,
   length, content fingerprint, and mode to still match the planning snapshot.
-  Replacement is a single atomic exchange whose swapped-out file is re-checked
+  Where supported, replacement uses an atomic exchange whose swapped-out file is re-checked
   against that same snapshot before it is unlinked; a lost race is exchanged
   back and reported as a per-file failure — unless the destination name has
   been taken again in the meantime, in which case nothing is moved back and

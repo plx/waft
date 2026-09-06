@@ -52,6 +52,18 @@ impl CompatProfile {
         }
     }
 
+    /// Whether this profile's preset selects files with no `.worktreeinclude`
+    /// present.
+    ///
+    /// Only the preset is consulted, not the resolved policy: a later layer
+    /// can set `when_missing = blank` on top of any profile. That distinction
+    /// is what the empty-selection note needs, because naming a profile as the
+    /// reason a selection came back empty is only fair when the profile itself
+    /// is what blanks it.
+    pub fn selects_without_rule_file(self) -> bool {
+        Preset::for_profile(self).when_missing == WhenMissingWorktreeinclude::AllIgnored
+    }
+
     fn parse(s: &str) -> std::result::Result<Self, String> {
         match s {
             "claude" => Ok(Self::Claude),

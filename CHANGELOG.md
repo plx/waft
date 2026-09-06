@@ -222,6 +222,47 @@ Until the first supported release, changes remain under `Unreleased`.
 - Restrict source packages to an explicit allowlist.
 - Document installation from a reviewed Git revision; waft is not yet
   published to crates.io.
+- **(breaking) Selecting a compat profile now resets that profile's own knobs
+  from lower-precedence layers.** Previously a `when_missing`, `semantics`,
+  symlink-policy, or `builtin_exclude_set` value set in any earlier layer
+  survived a later `--compat-profile`, so a profile could be selected and
+  silently not applied; now choosing a profile installs its coordinated knob
+  values at that layer — including the built-in exclude set, which changes
+  which files are selected — and only same-layer or higher-precedence
+  explicit settings override them.
+- **(breaking) Destination equality now includes permission bits.** A
+  destination whose content matched the source used to count as up-to-date
+  regardless of its mode; it is now classified as "content equal, permissions
+  differ", reported as a skip that names `--overwrite` as the remedy, and
+  repaired in place (without rewriting content) when that flag is supplied.
+
+### Added
+
+- Name every skipped file and its reason in an executed `copy` run, in the
+  same words `--dry-run` uses (for example
+  `skip: .env (untracked conflict; --overwrite replaces the destination)`).
+  Skips remain exit status 0; `--quiet` suppresses the lines along with the
+  rest of the non-error output.
+- Print a one-line note on stderr when the active configuration selects
+  nothing and no `.worktreeinclude` was consulted, so `waft list` and a bare
+  `waft` in an unconfigured repository are no longer silent. The note names
+  whatever is responsible: an absent rule file, a rule file outside the
+  repository root under root-only `claude-2026-04` semantics, a symlinked rule
+  file skipped by `--worktreeinclude-symlink-policy ignore`, or an explicit
+  `--when-missing-worktreeinclude blank` rather than the profile it overrode.
+  A consulted rule file that legitimately selects nothing does not emit it,
+  Symlink hints describe skipped entries without opening their targets or
+  promising that a different policy will validate or select files.
+  The note is also absent for a configuration that still selects without one (`wt`,
+  `--when-missing-worktreeinclude all-ignored`), nor `--quiet`.
+
+### Fixed
+
+- Report running outside a repository as `not inside a Git repository
+  (searched from <path>)` instead of the doubly prefixed, internal-sounding
+  `error: git error: gix failed to discover repository from …`. The backend's
+  own diagnostics remain in the error source chain and are printed under
+  `-v`/`--verbose`.
 
 ### Removed
 

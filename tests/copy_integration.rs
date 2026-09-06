@@ -106,6 +106,15 @@ fn setup_worktrees() -> (TempDir, TempDir) {
     (main_dir, wt_dir)
 }
 
+/// A main worktree and a linked worktree with no `.worktreeinclude` anywhere
+/// in the source repository.
+fn setup_worktrees_without_rule_file() -> (TempDir, TempDir) {
+    let (main_dir, wt_dir) = setup_worktrees();
+    git(main_dir.path(), &["rm", "--quiet", ".worktreeinclude"]);
+    git(main_dir.path(), &["commit", "-m", "drop the rule file"]);
+    (main_dir, wt_dir)
+}
+
 fn setup_with_safe_full_dir() -> (TempDir, TempDir) {
     let (main_dir, wt_dir) = setup_worktrees();
 
@@ -314,6 +323,227 @@ fn copy_skips_untracked_conflict_without_overwrite() {
         .stderr(predicate::str::contains("skip"));
 
     // Destination file should be unchanged
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "DEST_SECRET\n"
+    );
+}
+
+/// A bare `waft` in a repository with no `.worktreeinclude` used to copy
+/// nothing and say nothing at all. Under the default profile that silence is
+/// almost always a missing rule file rather than a satisfied one.
+#[test]
+fn copy_notes_a_missing_rule_file() {
+    let (main_dir, wt_dir) = setup_worktrees_without_rule_file();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=value\n");
+
+    waft()
+        .args([
+            "copy",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "note: no .worktreeinclude found; the claude profile selects nothing without one (see waft validate)",
+        ))
+        .stderr(predicate::str::contains("no eligible files found"));
+}
+
+#[test]
+fn dry_run_notes_a_missing_rule_file_and_keeps_stdout_clean() {
+    let (main_dir, wt_dir) = setup_worktrees_without_rule_file();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=value\n");
+
+    waft()
+        .args([
+            "copy",
+            "--dry-run",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("no .worktreeinclude found"));
+}
+
+#[test]
+fn copy_note_about_a_missing_rule_file_is_suppressed_under_quiet() {
+    let (main_dir, wt_dir) = setup_worktrees_without_rule_file();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=value\n");
+
+    waft()
+        .args([
+            "copy",
+            "--quiet",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::is_empty());
+}
+
+/// An executed run must say which file it left alone and why. Before this,
+/// a conflicting `.env` was reported only as a count, and the user had to
+/// re-run under `--dry-run` or `info` to find out what had been skipped.
+#[test]
+fn copy_names_each_skipped_file_and_reason() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
+    write_file(&wt_path, ".env", "DEST_SECRET\n");
+
+    let expected = if cfg!(unix) {
+        "skip: .env (untracked conflict; --overwrite replaces the destination)"
+    } else {
+        "skip: .env (untracked conflict)"
+    };
+    waft()
+        .args([
+            "copy",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        // A skip is not a failure; the exit status stays 0.
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(expected))
+        .stderr(predicate::str::contains("1 skipped"));
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "DEST_SECRET\n"
+    );
+}
+
+/// The permissions-differ classification names its own remedy, and the
+/// executed run repeats the wording `--dry-run` uses for it.
+#[cfg(unix)]
+#[test]
+fn executed_copy_names_a_permissions_only_skip_with_its_remedy() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SECRET=same\n");
+    write_file(&wt_path, ".env", "SECRET=same\n");
+    fs::set_permissions(
+        main_dir.path().join(".env"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    fs::set_permissions(wt_path.join(".env"), fs::Permissions::from_mode(0o600)).unwrap();
+
+    waft()
+        .args([
+            "copy",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "skip: .env (content equal, permissions differ; --overwrite repairs the permissions)",
+        ));
+}
+
+/// `--quiet` suppresses skip lines along with the rest of the non-error
+/// output. Only failures survive it.
+#[test]
+fn copy_skip_lines_are_suppressed_under_quiet() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
+    write_file(&wt_path, ".env", "DEST_SECRET\n");
+
+    waft()
+        .args([
+            "copy",
+            "--quiet",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::is_empty());
+
+    assert_eq!(
+        fs::read_to_string(wt_path.join(".env")).unwrap(),
+        "DEST_SECRET\n"
+    );
+}
+
+/// The executed run and the dry run describe the same skip the same way.
+#[test]
+fn copy_skip_line_matches_the_dry_run_wording() {
+    let (main_dir, wt_dir) = setup_worktrees();
+    let wt_path = wt_dir.path().join("linked");
+
+    write_file(main_dir.path(), ".env", "SOURCE_SECRET\n");
+    write_file(&wt_path, ".env", "DEST_SECRET\n");
+
+    // Windows reports the conflict without suggesting unsupported overwrite.
+    let expected = if cfg!(unix) {
+        "skip: .env (untracked conflict; --overwrite replaces the destination)"
+    } else {
+        "skip: .env (untracked conflict)"
+    };
+
+    // The dry run announces its plan on stdout.
+    let dry_run = waft()
+        .args([
+            "copy",
+            "--dry-run",
+            "--source",
+            main_dir.path().to_str().unwrap(),
+            "--dest",
+            wt_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&dry_run.stdout).contains(expected),
+        "{}",
+        String::from_utf8_lossy(&dry_run.stdout)
+    );
+
+    assert!(dry_run.status.success());
+
+    // The executed run reports outcomes on stderr, in the same words.
+    let executed = run_copy(main_dir.path(), &wt_path);
+    assert!(
+        String::from_utf8_lossy(&executed.stderr).contains(expected),
+        "{}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert!(executed.status.success());
+    assert!(executed.stdout.is_empty());
     assert_eq!(
         fs::read_to_string(wt_path.join(".env")).unwrap(),
         "DEST_SECRET\n"

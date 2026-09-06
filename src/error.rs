@@ -15,10 +15,29 @@ pub enum Error {
     },
 
     /// A Git command failed.
-    #[error("git error: {message}")]
+    ///
+    /// The prefix deliberately omits the word "error": callers print these
+    /// as `error: {self}`, and `error: git error: …` reads like a bug report
+    /// rather than a message.
+    #[error("git: {message}")]
     Git {
         /// Description of what went wrong.
         message: String,
+    },
+
+    /// No Git repository contains the path waft was asked to work from.
+    ///
+    /// This is the single most common way to invoke waft wrongly, so it gets
+    /// a plain sentence instead of the backend's discovery diagnostics. Those
+    /// stay reachable through [`std::error::Error::source`] and are printed
+    /// under `-v`/`--verbose`.
+    #[error("not inside a Git repository (searched from {})", searched_from.display())]
+    NotAGitRepository {
+        /// Path discovery started from.
+        searched_from: PathBuf,
+        /// The backend's own account of the discovery failure.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
     /// Path validation failed.
@@ -75,7 +94,9 @@ pub enum Error {
     },
 
     /// Configuration parsing or validation failed.
-    #[error("config error: {message}")]
+    ///
+    /// Prefixed like [`Error::Git`], for the same reason.
+    #[error("config: {message}")]
     Config {
         /// Description of the problem.
         message: String,

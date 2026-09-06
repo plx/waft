@@ -248,8 +248,25 @@ git -c core.hooksPath=/dev/null worktree add --quiet -b self-test/overwrite "$LI
 echo "PRE_EXISTING_LOCAL" >"$LINKED3/.env"
 
 # Without --overwrite, waft must leave the existing file alone (it may
-# exit 0 with a skip; what matters is the content is preserved).
-(cd "$LINKED3" && "$WAFT" --quiet) || true
+# exit 0 with a skip; what matters is the content is preserved). At default
+# verbosity the run has to name the file it skipped and the reason, so a
+# silently unchanged .env is never the only signal.
+SKIP_REPORT="$( (cd "$LINKED3" && "$WAFT" 2>&1 >/dev/null) || true )"
+case "$SKIP_REPORT" in
+  *"skip: .env (untracked conflict; --overwrite replaces the destination)"*)
+    ok "executed run named the skipped file and its reason" ;;
+  *)
+    fail "executed run did not explain the skip: $SKIP_REPORT" ;;
+esac
+
+# --quiet suppresses the skip report along with the rest of the non-error
+# output.
+QUIET_REPORT="$( (cd "$LINKED3" && "$WAFT" --quiet 2>&1) || true )"
+if [ -z "$QUIET_REPORT" ]; then
+  ok "--quiet suppressed the skip report"
+else
+  fail "--quiet should suppress skip reporting, got: $QUIET_REPORT"
+fi
 assert_file_content "$LINKED3/.env" "PRE_EXISTING_LOCAL"
 
 # With --overwrite, an untracked destination that differs is replaced with the

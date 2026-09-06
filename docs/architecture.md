@@ -144,8 +144,16 @@ All commands follow this pipeline:
 9. **Execution** (`executor.rs`) — on Unix, open source and destination paths
    relative to canonical worktree directory descriptors, verify the planned
    source snapshot, hold Git's cooperative index lock across the final tracked
-   check, and publish a synced temp file with no-clobber semantics. Existing
-   pathname replacement is rejected.
+   check, and publish a synced temp file with no-clobber semantics. Without
+   `--overwrite` an existing destination is skipped and named, with its reason,
+   in the run's output. With `--overwrite`, an untracked destination is
+   replaced by an atomic exchange where supported, with a checked
+   displacement/no-clobber fallback otherwise — or has only its permission bits
+   repaired when its content already matches — after re-opening it through the
+   anchored parent and confirming it still matches the device, inode, length,
+   content fingerprint, and mode recorded while planning. A detected race is a
+   per-file failure and can leave named recovery files. Tracked destinations are never
+   written under any flag combination.
 
 Commands stop at different stages: `validate` at step 4, `list` at step 7,
 `info` at step 7 plus per-path explanation, `copy --dry-run` at step 8,

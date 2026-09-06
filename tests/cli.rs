@@ -110,6 +110,48 @@ fn info_requires_paths() {
         .stderr(predicate::str::contains("PATHS"));
 }
 
+/// Running outside a repository is the most common way to invoke waft
+/// wrongly, so it gets a plain sentence rather than the backend's discovery
+/// diagnostics — and the same sentence from either backend.
+#[test]
+fn outside_a_repository_reports_a_plain_message() {
+    for backend in ["gix", "cli"] {
+        let outside = tempfile::TempDir::new().unwrap();
+        waft()
+            .env("WAFT_GIT_BACKEND", backend)
+            // A ceiling keeps discovery from walking out of the scratch
+            // directory into whatever repository may contain the temp root.
+            .env("GIT_CEILING_DIRECTORIES", outside.path())
+            .current_dir(outside.path())
+            .arg("list")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "error: not inside a Git repository",
+            ))
+            .stderr(predicate::str::contains("searched from"))
+            .stderr(predicate::str::contains("gix failed").not())
+            .stderr(predicate::str::contains("error: git error:").not());
+    }
+}
+
+/// The backend's own account of the failure stays reachable; it just is not
+/// the headline.
+#[test]
+fn outside_a_repository_explains_itself_under_verbose() {
+    let outside = tempfile::TempDir::new().unwrap();
+    waft()
+        .env("GIT_CEILING_DIRECTORIES", outside.path())
+        .current_dir(outside.path())
+        .args(["--verbose", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "error: not inside a Git repository",
+        ))
+        .stderr(predicate::str::contains("caused by:"));
+}
+
 #[test]
 fn version_flag() {
     waft()

@@ -59,7 +59,9 @@ pub(crate) fn run_list_with_context(
         }
     }
 
-    let eligible = super::eligible_records(git, &ctx.source_root, policy, ctx.core_ignore_case)?;
+    let pass = super::eligible_records(git, &ctx.source_root, policy, ctx.core_ignore_case)?;
+    super::note_empty_selection(policy, &pass, cli.quiet);
+    let eligible = pass.records;
 
     // Pre-compute destination classification data if verbose + dest available
     let verbose = cli.verbose > 0 && !cli.quiet;
