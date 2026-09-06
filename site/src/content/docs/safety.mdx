@@ -91,11 +91,16 @@ cases:
 waft copy --overwrite
 ```
 
-Both actions require the destination to still match the device, inode, length,
-content fingerprint, and mode observed while planning. A destination that
-changed in between is reported as a per-file failure; where the filesystem
-supports an atomic exchange it is left untouched, and on filesystems without
-one a lost race can instead leave the other writer's file at the destination
-with waft's prepared content preserved under a named temporary. Cleanup failures name surviving recovery paths. The rest of
-the run continues either way. Tracked destinations are never written, with or
-without the flag.
+Both actions check the destination against the identity, length, content
+fingerprint, and mode observed while planning. A detected change is a per-file
+failure. Depending on when the change is detected, recovery restores the
+displaced file or preserves it at a named recovery path when restoring would
+clobber a later writer. Cleanup failures name surviving recovery paths.
+The rest of the run continues. Tracked destinations are checked under the
+index lock with or without the flag.
+
+Windows has no supported overwrite or permission-repair path. Unix signal
+cleanup attempts to remove owned index locks on `SIGINT` and `SIGTERM`, but
+staging files can survive termination. Crashes and `SIGKILL` can leave stale
+locks as well. Inspect recovery files and establish that no Git writer is
+active before removing a stale lock.

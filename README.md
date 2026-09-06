@@ -146,24 +146,26 @@ failures print either way.
 `--overwrite` distinguishes two cases, and both name the file they act on:
 
 - **untracked conflict** — content differs. The new content is prepared in a
-  temporary file and swapped into place atomically, reported as `replaced:`.
+  temporary file and exchanged atomically where supported, with the checked
+  fallback described below otherwise, reported as `replaced:`.
 - **content equal, permissions differ** — only the mode is wrong. The mode is
   fixed on the verified file descriptor and nothing is rewritten, reported as
   `repaired permissions:`. This is the expected state for files published by
   pre-release waft builds, which always wrote mode `0600`.
 
 Every `--overwrite` action is checked against the identity, length, content
-fingerprint, and mode observed while planning. A destination that changed in between is reported as
-a per-file failure and left untouched; the rest of the run continues. A
+fingerprint, and mode observed while planning. A detected change is reported
+as a per-file failure; recovery can leave named files when restoring would
+clobber another writer. The rest of the run continues. A
 permissions repair additionally requires the pinned source and destination
 snapshots to agree on content, so a destination rewritten between the byte
 comparison and the snapshot is never quietly `chmod`-ed and called repaired.
 
 Replacement uses an atomic exchange primitive (`renameat2` `RENAME_EXCHANGE` on
 Linux, `renameatx_np` `RENAME_SWAP` on macOS) where the filesystem has one.
-Where it has none — notably SMB, NFS, and exFAT destinations — waft moves the
+If exchange is unsupported, waft moves the
 destination aside with a plain rename and publishes into the name it left, with
-no-clobber semantics. Nothing is unlinked by name: the displaced file is
+no-clobber semantics. Cleanup verifies ownership before unlinking: the displaced file is
 identified after the move, and it is removed only once the replacement is
 published and its name is proven to still hold it. If it turns out not to be
 the file that was planned against — another writer got there first — it is
@@ -257,7 +259,7 @@ extra = ["*.bak"]
 - **Proven replacement only** — `--overwrite` re-opens the destination through
   the anchored parent with `O_NOFOLLOW` and requires its device, inode,
   length, content fingerprint, and mode to still match the planning snapshot.
-  Replacement is a single atomic exchange whose swapped-out file is re-checked
+  Where supported, replacement uses an atomic exchange whose swapped-out file is re-checked
   against that same snapshot before it is unlinked; a lost race is exchanged
   back and reported as a per-file failure — unless the destination name has
   been taken again in the meantime, in which case nothing is moved back and
