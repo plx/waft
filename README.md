@@ -13,21 +13,24 @@ files you want copied, and `waft` handles the rest.
 
 ## Installation
 
-`waft` is not currently published to crates.io. Install a reviewed revision
-directly from the repository:
+Download [v0.1.0](https://github.com/plx/waft/releases/tag/v0.1.0) for Linux or
+macOS and follow [installation and artifact verification](INSTALL.md) to check
+its checksum and build provenance before running it.
+
+`waft` is not published to crates.io. To build v0.1.0 from its pinned source:
 
 ```sh
 cargo install --git https://github.com/plx/waft \
-  --rev REVIEWED_COMMIT_SHA --locked waft
+  --rev eaa4198883b9a54167e4d006cf3beb721b04d694 --locked waft
 ```
 
-Replace `REVIEWED_COMMIT_SHA` with the full commit you reviewed. Omitting
-`--rev` installs the current tip of the default branch and is not recommended
-for managed environments.
+Review the pinned commit before installing. Omitting `--rev` installs the
+current tip of the default branch and is not recommended for managed
+environments.
 
-See [installation and artifact verification](INSTALL.md) for binary archive
-checks, supported targets, and temporary installation examples. Optional hooks
-require a reviewed source checkout; binary archives contain no hook installer.
+The installation guide lists supported targets and temporary installation
+examples. Optional hooks require a reviewed source checkout; binary archives
+contain no hook installer.
 
 ## Quick start
 

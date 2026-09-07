@@ -1,9 +1,9 @@
 # Installation and verification
 
-waft is not published to crates.io. Before the first GitHub release, use a
-reviewed source revision or an explicitly chosen Release workflow artifact.
-A successful manual build is not evidence that tag validation or GitHub
-release publication has run.
+[waft v0.1.0](https://github.com/plx/waft/releases/tag/v0.1.0) provides the
+binary archives below, built from commit
+`eaa4198883b9a54167e4d006cf3beb721b04d694`. You can also build that pinned source
+revision. waft is not published to crates.io.
 
 ## Supported binary targets
 
@@ -23,10 +23,10 @@ supported publication operations. See [ASSURANCE.md](ASSURANCE.md).
 
 ## Install from a reviewed source revision
 
-Use Rust 1.90.0 and a temporary install root to try a pinned commit:
+Use Rust 1.90.0 and a temporary install root to try the v0.1.0 source:
 
 ```sh
-revision=REVIEWED_COMMIT_SHA
+revision=eaa4198883b9a54167e4d006cf3beb721b04d694
 install_root="$(mktemp -d)"
 cargo +1.90.0 install --git https://github.com/plx/waft \
   --rev "$revision" --locked --root "$install_root" waft
@@ -34,27 +34,19 @@ cargo +1.90.0 install --git https://github.com/plx/waft \
 "$install_root/bin/waft" --help
 ```
 
-Replace `REVIEWED_COMMIT_SHA` with the full reviewed commit. Omitting `--rev`
-installs the current default-branch tip. Keep the install root or copy its
-binary to a directory on your `PATH`.
+Review the pinned commit before installing. Omitting `--rev` installs the
+current default-branch tip. Keep the install root or copy its binary to a
+directory on your `PATH`.
 
 ## Download and verify a binary archive
 
-Before publication, download from a chosen successful manual Release run:
-
-```sh
-run_id=VERIFIED_RUN_ID
-archive=waft-macos-aarch64
-mkdir waft-download
-cd waft-download
-gh run download "$run_id" --repo plx/waft --name "$archive"
-```
-
-After a version has been published, download that version's release assets:
+Download the v0.1.0 release assets with the GitHub CLI:
 
 ```sh
 version=v0.1.0
 archive=waft-macos-aarch64
+mkdir waft-download
+cd waft-download
 gh release download "$version" --repo plx/waft \
   --pattern "$archive.tar.gz" --pattern "$archive.sha256"
 ```
@@ -64,8 +56,8 @@ build provenance before extracting or executing it. A checksum alone only
 checks that the archive and checksum file agree.
 
 ```sh
-revision=VERIFIED_COMMIT_SHA
-source_ref=refs/heads/main # use refs/tags/v0.1.0 for a published tag build
+revision=eaa4198883b9a54167e4d006cf3beb721b04d694
+source_ref=refs/tags/v0.1.0
 shasum -a 256 -c "$archive.sha256"
 gh attestation verify "$archive.tar.gz" --repo plx/waft \
   --signer-workflow plx/waft/.github/workflows/release.yml \
@@ -79,10 +71,9 @@ install -m 755 "$archive/waft" "$install_root/bin/waft"
 "$install_root/bin/waft" --help
 ```
 
-For a branch build, use the exact ref and commit recorded by the workflow
-run. For a published release, use its tag ref and resolved commit. GitHub
-artifact attestations establish which workflow and source produced an archive;
-they are not a signed Git tag or a guarantee that the code is defect-free.
+For another release, update the version, tag ref, and resolved commit together.
+GitHub artifact attestations establish which workflow and source produced an
+archive; they are not a signed Git tag or a guarantee that the code is defect-free.
 See the [GitHub CLI verification reference](https://cli.github.com/manual/gh_attestation_verify).
 
 ## Optional hooks

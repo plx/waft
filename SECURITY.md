@@ -2,8 +2,10 @@
 
 ## Supported versions
 
-waft has not made a supported release. Security fixes are developed on the
-default branch; adopters should pin and review a specific commit.
+Only the latest published release is supported, currently
+[v0.1.0](https://github.com/plx/waft/releases/tag/v0.1.0). Security fixes are
+developed on the default branch and shipped in a new release. Source adopters
+should pin and review a specific commit.
 
 ## Reporting a vulnerability
 
