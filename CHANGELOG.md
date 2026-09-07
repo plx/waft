@@ -3,9 +3,12 @@
 All notable changes to waft will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Until the first supported release, changes remain under `Unreleased`.
 
-## Unreleased
+## [0.1.0](https://github.com/plx/waft/releases/tag/v0.1.0) - 2026-09-07
+
+First supported release, from commit
+`eaa4198883b9a54167e4d006cf3beb721b04d694`. The entries below describe changes
+made during development before this release.
 
 ### Security
 
@@ -137,8 +140,7 @@ Until the first supported release, changes remain under `Unreleased`.
   together with the `UnsafeOverwrite` error variant. `--overwrite` now
   performs a race-safe per-file replacement, and a conflict it cannot prove
   safe is a per-file failure rather than a whole-run abort. Tracked
-  destinations remain untouchable under every flag combination. waft has never
-  had a release, so no published behavior is being broken.
+  destinations remain untouchable under every flag combination.
 - Classify "destination content equal, permissions differ" separately from a
   generic untracked conflict in plans, `--dry-run`, `info`, `list`, and skip
   reporting, and name `--overwrite` as its remedy. This is the migration path
