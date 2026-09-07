@@ -1,0 +1,20 @@
+{
+  "name": "waft",
+  "interface": {
+    "displayName": "Waft"
+  },
+  "plugins": [
+    {
+      "name": "waft-codex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/waft-codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

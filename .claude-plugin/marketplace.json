@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "waft",
+  "description": "Claude Code plugins for waft.",
+  "owner": {
+    "name": "waft contributors"
+  },
+  "plugins": [
+    {
+      "name": "waft-claude-code",
+      "description": "Reference skills for copying Git-ignored files between worktrees with waft.",
+      "version": "0.1.0",
+      "author": {
+        "name": "waft contributors"
+      },
+      "source": "./plugins/waft-claude-code"
+    }
+  ]
+}
