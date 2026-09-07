@@ -3,16 +3,7 @@
 ## Executable
 
 Check `waft --version` if availability or version is unknown. This reference
-describes waft 0.1.0. To build and install from a checkout of the waft repository
-with a Rust toolchain:
-
-```sh
-cargo install --path . --locked
-```
-
-For a local build only, use `cargo build --release --locked` and
-`./target/release/waft`. Do not run those build commands in the target project
-unless it is the waft source checkout. No binary is bundled with the skill.
+describes waft 0.1.0. No binary is bundled with the skill.
 
 ## Commands and paths
 

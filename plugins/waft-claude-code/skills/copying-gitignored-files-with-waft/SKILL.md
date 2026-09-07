@@ -13,7 +13,7 @@ copies files selected by `.worktreeinclude` and confirmed ignored and
 untracked by Git. It does not create worktrees or continuously synchronize them.
 
 The plugin supplies reference knowledge; the `waft` executable must already be
-available. If missing, see [commands and copying](references/commands.md).
+available on `PATH`.
 
 ```sh
 # From the linked worktree; source defaults to the main worktree.
@@ -43,7 +43,7 @@ Read only the references needed for the task:
 
 | Reference | Use for |
 | --- | --- |
-| [Commands and copying](references/commands.md) | Installation, path defaults, overwrite behavior, copy strategies |
+| [Commands and copying](references/commands.md) | Executable checks, path defaults, overwrite behavior, copy strategies |
 | [`.worktreeinclude` rules](references/worktreeinclude.md) | Patterns, nesting, negation and directory caveats |
 | [Compatibility profiles](references/profiles.md) | `claude`, `git`, `wt`, missing rule files, symlink policy |
 | [Configuration and advanced options](references/configuration.md) | TOML, environment variables, precedence, exclusion filters |

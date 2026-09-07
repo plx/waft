@@ -6,24 +6,19 @@ Claude Code plugin hooks. The skill does not install or enable it automatically.
 
 ## Install a reviewed snapshot
 
-In a reviewed checkout of the waft source repository:
-
-```sh
-just install-hooks
-```
-
-This builds the release binary and installs a copy of the reviewed binary,
-hook, and dispatcher under the repository's common Git directory. An absolute
-`core.hooksPath` points there, so changing branches cannot replace the installed
-code. Re-run the installer after upgrading waft.
-
-To install into another repository, run the reviewed installer from that
-target repository, with an absolute path to the binary to snapshot:
+Run the installer from a reviewed checkout of the waft repository, with the
+target repository as the working directory and an absolute path to an existing
+waft binary to snapshot:
 
 ```sh
 cd /path/to/target-repository
 WAFT=/absolute/path/to/waft bash /path/to/reviewed-waft/scripts/install-hooks.sh
 ```
+
+This installs a copy of the binary, hook, and dispatcher under the repository's
+common Git directory. An absolute `core.hooksPath` points there, so changing
+branches cannot replace the installed code. Re-run the installer after
+upgrading waft.
 
 Inspect existing hook configuration first. The installer chains the previously
 effective trusted hooks and rejects hooks sourced from a worktree, symlinked
@@ -31,9 +26,8 @@ hooks, and worktree-scoped `core.hooksPath` overrides. Preserve existing hook
 actions when resolving an installer refusal. Do not point `core.hooksPath` at
 a tracked `hooks/` directory: a checkout can replace that code before Git runs it.
 
-Restore the previous hook configuration with `just uninstall-hooks` in the
-waft checkout, or invoke the reviewed installer with `--uninstall` from the
-target repository.
+Restore the previous hook configuration by invoking the reviewed installer
+with `--uninstall` from the target repository.
 
 ## Execution policy
 
