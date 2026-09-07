@@ -2,11 +2,26 @@
 title: "Configuration"
 sidebar:
   label: "Configuration"
-description: "Set file-selection and copy policy through config, environment, or CLI options."
+description: "Config files, environment variables, and CLI overrides."
 ---
 
-`waft` applies configuration in the following order. Later scalar values
-override earlier values.
+Put project settings in `.waft.toml` in the main worktree. For example, to
+use nested include rules and exclude backup files:
+
+```toml
+version = 1
+
+[compat]
+profile = "git"
+
+[exclude]
+extra = ["*.bak"]
+```
+
+## Precedence
+
+`waft` applies configuration in the following order. Later values
+override earlier ones, except for extra exclusions, which append.
 
 1. Built-in defaults.
 2. User config: `~/.config/waft/config.toml`.
@@ -19,7 +34,7 @@ override earlier values.
 `exclude.replace_extra = true` or pass `--replace-extra-excludes` to discard
 values from earlier layers.
 
-Project configs must be regular files. Symlinked configs fail closed, and
+Project configs must be regular files. Symlinked configs cause an error, and
 discovery stops at nested repositories and registered submodules.
 
 Selecting a profile resets its four settings at that layer. Explicit settings
@@ -27,28 +42,14 @@ in the same or a later layer can override it.
 
 `--isolated` omits user configuration, `WAFT_CONFIG_PATH`, and `WAFT_*` policy
 environment variables. Built-in defaults, source-project configuration, CLI
-overrides, and operational Git backend selection still apply.
-
-## Example `.waft.toml`
-
-```toml
-version = 1
-
-[compat]
-profile = "git"
-
-[exclude]
-extra = ["*.bak"]
-
-[copy]
-strategy = "auto"
-```
+overrides, and Git backend selection still apply.
+It conflicts with `--config`.
 
 ## CLI overrides
 
 | Option                                                       | Description                                               |
 | ------------------------------------------------------------ | --------------------------------------------------------- |
-| `--compat-profile <claude\|git\|wt>`                         | Set the four profile-owned options.                       |
+| `--compat-profile <claude\|git\|wt>`                         | Apply a compatibility profile.                            |
 | `--when-missing-worktreeinclude <blank\|all-ignored>`        | Set behavior when no `.worktreeinclude` exists.           |
 | `--worktreeinclude-semantics <claude-2026-04\|git\|wt-0.39>` | Select the matcher.                                       |
 | `--worktreeinclude-symlink-policy <follow\|ignore\|error>`   | Set handling for symlinked rule files.                    |

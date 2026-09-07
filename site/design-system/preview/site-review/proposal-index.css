@@ -1,0 +1,37 @@
+/* Proposal only. Do not import into the production site. */
+.docs-grid {
+  display: block;
+}
+
+.doc-card {
+  display: grid;
+  grid-template-columns: minmax(0, 15rem) minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 1.5rem;
+  padding: 1rem 0;
+  border: 0;
+  border-top: 1px solid var(--waft-line);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.doc-card h3 {
+  font-size: 1.05rem;
+}
+
+.doc-card p,
+.doc-card .text-link {
+  margin: 0;
+}
+
+.doc-card .text-link {
+  font-size: 0.875rem;
+}
+
+@media (max-width: 900px) {
+  .doc-card {
+    grid-template-columns: 1fr;
+    gap: 0.5rem;
+  }
+}

@@ -2,11 +2,18 @@
 title: "Profiles"
 sidebar:
   label: "Profiles"
-description: "Choose claude, git, or wt file-selection behavior."
+description: "The differences between claude, git, and wt."
 ---
 
-`--compat-profile` sets the missing-file behavior, matcher, rule-file symlink
-policy, and built-in exclusions together.
+Profiles control how `.worktreeinclude` is interpreted. The default is
+`claude`. Use `git` for nested rule files or `wt` for the Worktrunk behavior
+described below.
+
+```sh
+waft copy --compat-profile git --dry-run
+```
+
+Each profile sets four options together:
 
 <table tabindex="0" aria-label="Compatibility profile comparison">
   <thead>
@@ -65,26 +72,20 @@ policy, and built-in exclusions together.
 `.worktreeinclude` and matches the observed Claude Code behavior identified by
 `claude-2026-04`.
 
-```sh
-waft copy --compat-profile claude
-```
-
 ## `git`
 
 `git` applies per-directory exclude semantics. Patterns are relative to the
 directory containing the rule file, and deeper rule files override shallower
 ones.
 
-```sh
-waft copy --compat-profile git
-```
-
 ## `wt`
 
-`wt` matches the observed behavior identified by `wt-0.39`. It starts with
-every ignored, untracked file and removes paths matched by literal-name
-negations.
+`wt` matches the observed Worktrunk behavior identified by `wt-0.39`. It starts
+with every ignored, untracked file, even without `.worktreeinclude`, and removes
+paths matched by literal-name negations. Positive patterns and glob negations
+are ignored. The `tooling-v1` exclusion set also removes tool state such as
+`.claude/` and `.conductor/`.
 
-```sh
-waft copy --compat-profile wt
-```
+These are versioned compatibility behaviors, not a promise to match future
+Claude Code or Worktrunk releases. [Configuration](../configuration/) lists
+the individual overrides.

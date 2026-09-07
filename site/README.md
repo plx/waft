@@ -61,6 +61,12 @@ The site is configured for `https://plx.github.io/waft/` with the GitHub Pages b
 The generated Playwright suite runs against mobile, tablet, and desktop projects.
 Use `just install-browsers` once locally before `just test`.
 
+If another workspace is using port 4321, run validation on an unused port:
+
+```sh
+WAFT_SITE_TEST_PORT=4331 npm run validate
+```
+
 ## Toolchain
 
 - **Astro 7** (`astro@^7.1.3`) with **Starlight 0.41** (`@astrojs/starlight@^0.41.3`).

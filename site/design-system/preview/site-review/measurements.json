@@ -1,0 +1,98 @@
+[
+  {
+    "variant": "current",
+    "device": "desktop",
+    "theme": "light",
+    "height": 1281,
+    "width": 1440,
+    "headlineSize": "96px"
+  },
+  {
+    "variant": "headline",
+    "device": "desktop",
+    "theme": "light",
+    "height": 1142,
+    "width": 1440,
+    "headlineSize": "64px"
+  },
+  {
+    "variant": "index",
+    "device": "desktop",
+    "theme": "light",
+    "height": 1290,
+    "width": 1440,
+    "headlineSize": "96px"
+  },
+  {
+    "variant": "current",
+    "device": "desktop",
+    "theme": "dark",
+    "height": 1281,
+    "width": 1440,
+    "headlineSize": "96px"
+  },
+  {
+    "variant": "headline",
+    "device": "desktop",
+    "theme": "dark",
+    "height": 1142,
+    "width": 1440,
+    "headlineSize": "64px"
+  },
+  {
+    "variant": "index",
+    "device": "desktop",
+    "theme": "dark",
+    "height": 1290,
+    "width": 1440,
+    "headlineSize": "96px"
+  },
+  {
+    "variant": "current",
+    "device": "mobile",
+    "theme": "light",
+    "height": 2275,
+    "width": 390,
+    "headlineSize": "48px"
+  },
+  {
+    "variant": "headline",
+    "device": "mobile",
+    "theme": "light",
+    "height": 2267,
+    "width": 390,
+    "headlineSize": "40px"
+  },
+  {
+    "variant": "index",
+    "device": "mobile",
+    "theme": "light",
+    "height": 2028,
+    "width": 390,
+    "headlineSize": "48px"
+  },
+  {
+    "variant": "current",
+    "device": "mobile",
+    "theme": "dark",
+    "height": 2275,
+    "width": 390,
+    "headlineSize": "48px"
+  },
+  {
+    "variant": "headline",
+    "device": "mobile",
+    "theme": "dark",
+    "height": 2267,
+    "width": 390,
+    "headlineSize": "40px"
+  },
+  {
+    "variant": "index",
+    "device": "mobile",
+    "theme": "dark",
+    "height": 2028,
+    "width": 390,
+    "headlineSize": "48px"
+  }
+]

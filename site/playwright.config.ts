@@ -2,7 +2,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 const basePath: string = "/waft";
 const normalizedBasePath = basePath === "/" ? "" : basePath;
-const localSiteUrl = `http://127.0.0.1:4321${normalizedBasePath}/`;
+const port = process.env.WAFT_SITE_TEST_PORT || "4321";
+const origin = `http://127.0.0.1:${port}`;
+const localSiteUrl = `${origin}${normalizedBasePath}/`;
 const dotReporter = ["dot"] as const;
 const htmlReporter = ["html", { open: "never" }] as const;
 const listReporter = ["list"] as const;
@@ -18,11 +20,11 @@ export default defineConfig({
     ? [dotReporter, htmlReporter]
     : [listReporter, htmlReporter],
   use: {
-    baseURL: "http://127.0.0.1:4321",
+    baseURL: origin,
     trace: "on-first-retry",
   },
   webServer: {
-    command: "npm run preview -- --host 127.0.0.1 --port 4321",
+    command: `npm run preview -- --host 127.0.0.1 --port ${port}`,
     url: localSiteUrl,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

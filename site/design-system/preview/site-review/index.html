@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>waft: aesthetic review</title>
+  <link rel="stylesheet" href="../../colors_and_type.css">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 1.5rem; background: var(--waft-surface); color: var(--waft-ink); font-family: var(--waft-font-sans); line-height: 1.5; }
+    header { max-width: 72rem; margin: 0 auto 1.5rem; }
+    h1 { font-size: 1.75rem; margin: 0 0 .5rem; }
+    p { margin: .5rem 0; }
+    .controls { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; margin: 1.5rem 0 1rem; }
+    label { display: grid; gap: .35rem; font-weight: 700; font-size: .875rem; }
+    select { min-height: 40px; padding: .4rem .65rem; background: var(--waft-panel); color: var(--waft-ink); border: 1px solid var(--waft-line-strong); border-radius: var(--waft-radius-sm); font: inherit; }
+    a { color: var(--waft-accent-dark); text-underline-offset: 3px; }
+    a:focus-visible, select:focus-visible { outline: 2px solid var(--waft-focus); outline-offset: 3px; }
+    .comparison { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem; max-width: 1800px; margin: auto; }
+    .comparison[data-device="mobile"] { max-width: 820px; }
+    figure { margin: 0; min-width: 0; }
+    figcaption { margin-bottom: .6rem; font-weight: 700; }
+    figcaption a { font-size: .875rem; font-weight: 400; margin-left: .75rem; }
+    img { display: block; width: 100%; height: auto; border: 1px solid var(--waft-line); }
+    #detail { min-height: 3rem; color: var(--waft-ink-soft); }
+    footer { max-width: 72rem; margin: 1.5rem auto 0; font-size: .875rem; }
+    @media(max-width: 640px) { body { padding: 1rem; } .comparison { gap: .75rem; } figcaption a { display: block; margin: 0; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>waft: aesthetic review</h1>
+    <p>These are optional style changes. A is the revised site in this PR; B changes one thing. Both contain the same copy.</p>
+    <div class="controls">
+      <label>Suggestion
+        <select id="suggestion">
+          <option value="headline">1. Smaller headline</option>
+          <option value="index">2. Documentation list</option>
+        </select>
+      </label>
+      <label>Viewport
+        <select id="device"><option value="desktop">Desktop: 1440 px</option><option value="mobile">Mobile: 390 px</option></select>
+      </label>
+      <label>Theme
+        <select id="theme"><option value="light">Light</option><option value="dark">Dark</option></select>
+      </label>
+    </div>
+    <p id="detail" aria-live="polite"></p>
+    <p><a id="css" href="proposal-headline.css">Inspect the exact proposed CSS</a>. Open either image at full size to compare text and spacing.</p>
+  </header>
+  <main class="comparison" data-device="desktop">
+    <figure>
+      <figcaption>A: current styling <a id="full-a" href="current-desktop-light.png" target="_blank" rel="noopener">Full size</a></figcaption>
+      <img id="a" src="current-desktop-light.png" alt="Revised waft homepage with the current styling">
+    </figure>
+    <figure>
+      <figcaption>B: proposed styling <a id="full-b" href="headline-desktop-light.png" target="_blank" rel="noopener">Full size</a></figcaption>
+      <img id="b" src="headline-desktop-light.png" alt="Revised waft homepage with the smaller headline proposal">
+    </figure>
+  </main>
+  <footer>Static browser captures. No proposed CSS is imported by the production application. <a href="../../ATTRIBUTION.md">Fan icon attribution</a>.</footer>
+  <script>
+    const suggestion = document.getElementById('suggestion');
+    const device = document.getElementById('device');
+    const theme = document.getElementById('theme');
+    const descriptions = {
+      headline: 'Suggested: reduce the headline from 96 to 64 px on desktop (48 to 40 px on mobile). It stays prominent and brings the explanation and docs closer to the top. The tradeoff is less of the original poster-like character.',
+      index: 'Suggested: replace the six boxed documentation cards with separated rows. Titles line up for scanning and there is less repeated framing. The tradeoff is losing the compact three-column overview on desktop.',
+    };
+    function update() {
+      const suffix = `${device.value}-${theme.value}.png`;
+      const current = `current-${suffix}`;
+      const proposed = `${suggestion.value}-${suffix}`;
+      document.getElementById('a').src = current;
+      document.getElementById('b').src = proposed;
+      document.getElementById('b').alt = `Revised waft homepage with the ${suggestion.options[suggestion.selectedIndex].text.slice(3)} proposal`;
+      document.getElementById('full-a').href = current;
+      document.getElementById('full-b').href = proposed;
+      document.getElementById('detail').textContent = descriptions[suggestion.value];
+      document.getElementById('css').href = `proposal-${suggestion.value}.css`;
+      document.documentElement.dataset.theme = theme.value;
+      document.querySelector('.comparison').dataset.device = device.value;
+    }
+    for (const control of [suggestion, device, theme]) control.addEventListener('change', update);
+    update();
+  </script>
+</body>
+</html>

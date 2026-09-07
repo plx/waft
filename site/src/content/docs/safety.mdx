@@ -2,90 +2,36 @@
 title: "Safety"
 sidebar:
   label: "Safety"
-description: "Understand planning, conflicts, symlink handling, and hook trust boundaries."
+description: "Existing files, symlinks, and concurrent changes."
 ---
 
-`waft` separates read-only planning from file publication. Only `copy`
-without `--dry-run` publishes files.
-
-## Guarantees
-
-- **Tracked files are not overwritten.** Tracked status is checked during
-  planning and again under Git's index lock before publication.
-- **Existing paths are not replaced by default.** Publication uses no-clobber
-  semantics. Only `--overwrite` replaces an untracked destination, and only
-  after proving it is still the file that was planned against.
-- **Symlink traversal is blocked on Unix.** Source and destination components
-  are opened relative to canonical worktree directory handles with
-  `O_NOFOLLOW`.
-- **Files are prepared before publication.** Contents are synced to a temporary
-  file, and parent directories are synced on Unix. Atomic exchange is used
-  where supported. Its fallback can leave a temporary gap at the destination
-  and named recovery files. A batch is not an atomic transaction.
-- **Dry runs are mutation-free.** `waft copy --dry-run` reads and reports only.
-
-## Concurrent changes
-
-Normal Git writers honor the index lock and cannot change trackedness across
-the final check and publication. Direct index edits that ignore Git's lock
-protocol are outside this guarantee.
-
-On Unix, directory handles prevent symlink or name swaps from redirecting a
-write. Another process can still relocate an already-open destination
-directory after final revalidation. Avoid concurrent destination directory
-moves when pathname stability matters.
-
-`waft` reacquires the index lock for each published file and reuses a cached
-tracked-path snapshot while the index fingerprint stays unchanged. A changed
-index triggers a reload. This avoids re-reading the entire index for every
-file; keep automatic manifests narrow and benchmark your own workload.
-
-## Hook trust boundary
-
-Install the optional post-checkout hook only from a reviewed revision.
-`just install-hooks` copies the hook and a pinned `waft` binary into Git's
-common metadata directory and configures an absolute hook path. It rejects
-symlinked prior hooks and worktree-specific hook overrides.
-
-The hook runs its pinned binary with `--isolated`. Ambient `WAFT`, user config,
-and `WAFT_*` policy variables cannot change automatic execution or selection.
-Source-project configuration still applies.
-
-Do not set `core.hooksPath` to a directory inside a checked-out worktree.
-Branches can replace tracked hook content before Git invokes it.
-
-## Secrets remain secrets
-
-Every selected file becomes another filesystem copy. Backup software,
-indexers, local agents, and anyone who can read the linked worktree may see it.
-Use secret injection or short-lived credentials for high-value secrets.
-
-## Preview before writing
+`waft` copies missing files and preserves existing destinations by default.
+Preview the copy with:
 
 ```sh
 waft copy --dry-run
 ```
 
-Review the selected files and the reason for each decision.
+The preview reports files to copy, skip, or leave as up-to-date. With
+`--overwrite`, it also reports replacements and permission repairs. It writes
+nothing. A later `waft copy` builds a new plan from the current state.
 
-## Overwrite behavior
+## Existing files
 
-Without `--overwrite`, an existing destination is preserved exactly as it is.
-The run names every file it skipped and why, and still exits 0:
+**Tracked files are never overwritten.** Without `--overwrite`, matching files
+are reported as up-to-date and conflicts are skipped. Skips are not failures;
+the run names each skipped file and its reason, and still exits 0:
 
 ```text
 skip: .env (untracked conflict; --overwrite replaces the destination)
 ```
 
-`--overwrite` acts on untracked destinations only, and distinguishes two
-cases:
+On Unix, `--overwrite` acts on untracked destinations in two cases:
 
-- **untracked conflict** — the content differs. The replacement is prepared in
-  a temporary file and exchanged atomically where supported, with a checked
-  displacement/no-clobber fallback otherwise, reported as `replaced:`.
-- **content equal, permissions differ** — only the mode is wrong. The mode is
-  repaired on the verified file descriptor and no content is rewritten,
-  reported as `repaired permissions:`.
+- **Untracked conflict:** content differs. The replacement is prepared in a
+  temporary file, then published as `replaced:`.
+- **Content equal, permissions differ:** the mode is repaired on the verified
+  file descriptor without rewriting content, reported as `repaired permissions:`.
 
 ```sh
 waft copy --overwrite
@@ -93,14 +39,58 @@ waft copy --overwrite
 
 Both actions check the destination against the identity, length, content
 fingerprint, and mode observed while planning. A detected change is a per-file
-failure. Depending on when the change is detected, recovery restores the
-displaced file or preserves it at a named recovery path when restoring would
-clobber a later writer. Cleanup failures name surviving recovery paths.
-The rest of the run continues. Tracked destinations are checked under the
-index lock with or without the flag.
+failure; the rest of the run continues. Windows has no supported overwrite
+or permission-repair path.
 
-Windows has no supported overwrite or permission-repair path. Unix signal
-cleanup attempts to remove owned index locks on `SIGINT` and `SIGTERM`, but
-staging files can survive termination. Crashes and `SIGKILL` can leave stale
-locks as well. Inspect recovery files and establish that no Git writer is
-active before removing a stale lock.
+## Before each write
+
+- Destination tracked status is checked during planning and again under Git's
+  index lock before the file is put in place.
+- Source symlinks are not copied. On Unix, source and destination paths are
+  opened relative to worktree directory handles with `O_NOFOLLOW`.
+- File contents are synced to a temporary file before publication. Parent
+  directories are synced on Unix. Missing destinations use no-clobber publication.
+- Replacements use atomic exchange where supported. The checked
+  displacement/no-clobber fallback can leave a temporary gap at the destination
+  and named recovery files.
+
+**The whole copy is not a transaction.** If one file fails, files already
+copied remain in the destination. Recovery restores a displaced file or
+preserves it at a named recovery path when restoring would clobber a later
+writer. Cleanup failures name surviving recovery paths.
+
+## Concurrent changes
+
+Normal Git writers honor the index lock and cannot change tracked status
+between the final check and the write. Direct index edits that ignore Git's
+lock protocol are outside this guarantee.
+
+On Unix, directory handles prevent symlink or name swaps from redirecting a
+write. Another process can still move an already-open destination directory
+after the final check. Avoid moving destination directories during a copy.
+
+`waft` reacquires the index lock for each published file and reuses a cached
+tracked-path snapshot while the index fingerprint stays unchanged. A changed
+index triggers a reload. Keep automatic manifests narrow and benchmark your
+own workload.
+
+Unix signal cleanup attempts to remove owned index locks on `SIGINT` and
+`SIGTERM`, but staging files can survive termination. Crashes and `SIGKILL`
+can leave stale locks as well. Inspect recovery files and establish that no
+Git writer is active before removing a stale lock.
+
+## Automatic copies
+
+The optional [post-checkout hook](../usage/#optional-post-checkout-hook) uses a
+pinned binary with `--isolated`. User config and `WAFT_*` policy variables do
+not affect it; source-project configuration still does.
+
+Install the hook from a reviewed revision. Do not set `core.hooksPath` to a
+directory inside a checked-out worktree: branches can replace tracked hook
+content before Git invokes it.
+
+## Local credentials
+
+Copying an environment file or credential creates another copy readable by
+anything with access to the destination. Select only the files that worktree
+needs.

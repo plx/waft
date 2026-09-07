@@ -2,23 +2,24 @@
 title: ".worktreeinclude"
 sidebar:
   label: ".worktreeinclude"
-description: "Define file selection with .gitignore syntax."
+description: "Which files to copy and how patterns match."
 ---
 
-`.worktreeinclude` patterns use `.gitignore` syntax. They select ignored files
-for `waft` to copy.
+Put `.worktreeinclude` at the root of the main worktree to select ignored
+files for copying. The default `claude` profile uses `.gitignore`-style
+patterns:
 
 ```text
-# Include environment files
+# Local environment files
 .env
 *.env.local
 
-# Include all secret keys recursively
-**/*.key
-
-# Exclude this test key
-!test.key
+# Except test environments
+!test.env.local
 ```
+
+This file selects files; it does not make Git ignore them. In this example,
+`.env` and matching local environment files must already be ignored and untracked.
 
 ## Eligibility
 
@@ -37,15 +38,10 @@ The default `claude` profile reads only the repository root
 like nested `.gitignore` files. The `wt` profile starts with every ignored,
 untracked file and applies worktrunk-compatible exclusions.
 
-Select a profile with:
-
-```sh
-waft copy --compat-profile git
-```
-
-See [Profiles](../profiles/) for the full behavior matrix.
+Without a root `.worktreeinclude`, the default profile selects nothing.
+See [Profiles](../profiles/) for the differences and how to choose one.
 
 ## Validation
 
-`waft validate` parses `.worktreeinclude` and Git ignore files and reports
-syntax errors. It does not copy files.
+Run `waft validate` to check rule-file syntax or `waft info .env` to see why a
+particular file is selected or skipped.
