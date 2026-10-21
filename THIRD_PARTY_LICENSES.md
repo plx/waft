@@ -12,11 +12,11 @@ date relative to `Cargo.lock`.
 
 ## Overview
 
-- [MIT License](#MIT) — 153
+- [MIT License](#MIT) — 147
+- [Unicode License v3](#Unicode-3.0) — 2
 - [zlib License](#Zlib) — 2
 - [Apache License 2.0](#Apache-2.0) — 1
 - [MIT No Attribution](#MIT-0) — 1
-- [Unicode License v3](#Unicode-3.0) — 1
 
 ## License texts
 
@@ -235,43 +235,6 @@ Apache License
 
 Used by:
 
-- [`sha1 0.10.6`](https://github.com/RustCrypto/hashes)
-
-```text
-Copyright (c) 2006-2009 Graydon Hoare
-Copyright (c) 2009-2013 Mozilla Foundation
-Copyright (c) 2016 Artyom Pavlov
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-```
-
-### <a id="MIT"></a>MIT License
-
-Used by:
-
 - [`percent-encoding 2.3.2`](https://github.com/servo/rust-url/)
 
 ```text
@@ -452,7 +415,7 @@ DEALINGS IN THE SOFTWARE.
 Used by:
 
 - [`heck 0.5.0`](https://github.com/withoutboats/heck)
-- [`unicode-normalization 0.1.25`](https://github.com/unicode-rs/unicode-normalization)
+- [`unicode-normalization 0.1.26`](https://github.com/unicode-rs/unicode-normalization)
 
 ```text
 Copyright (c) 2015 The Rust Project Developers
@@ -665,41 +628,6 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [`digest 0.10.7`](https://github.com/RustCrypto/traits)
-
-```text
-Copyright (c) 2017 Artyom Pavlov
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-```
-
-### <a id="MIT"></a>MIT License
-
-Used by:
-
 - [`fnv 1.0.7`](https://github.com/servo/rust-fnv)
 
 ```text
@@ -739,6 +667,44 @@ Used by:
 
 ```text
 Copyright (c) 2017 Jorge Aparicio
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+### <a id="MIT"></a>MIT License
+
+Used by:
+
+- [`sha1dc 0.1.5`](https://github.com/srijs/sha1dc)
+
+```text
+Copyright (c) 2017 Marc Stevens (Cryptology Group, Centrum Wiskunde & Informatica)
+Copyright (c) 2017 Dan Shumow (Microsoft Research)
+
+Copyright (c) 2026 Sam Reis
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -909,41 +875,6 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [`block-buffer 0.10.4`](https://github.com/RustCrypto/utils)
-
-```text
-Copyright (c) 2018-2019 The RustCrypto Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-```
-
-### <a id="MIT"></a>MIT License
-
-Used by:
-
 - [`getrandom 0.4.3`](https://github.com/rust-random/getrandom)
 
 ```text
@@ -1074,111 +1005,6 @@ SOFTWARE.
 
 Used by:
 
-- [`cpufeatures 0.2.17`](https://github.com/RustCrypto/utils)
-
-```text
-Copyright (c) 2020-2025 The RustCrypto Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-```
-
-### <a id="MIT"></a>MIT License
-
-Used by:
-
-- [`crypto-common 0.1.7`](https://github.com/RustCrypto/traits)
-
-```text
-Copyright (c) 2021 RustCrypto Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-```
-
-### <a id="MIT"></a>MIT License
-
-Used by:
-
-- [`sha1-checked 0.10.0`](https://github.com/RustCrypto/hashes)
-
-```text
-Copyright (c) 2024 The RustCrypto Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-```
-
-### <a id="MIT"></a>MIT License
-
-Used by:
-
 - [`anstream 1.0.0`](https://github.com/rust-cli/anstyle.git)
 - [`anstyle-parse 1.0.0`](https://github.com/rust-cli/anstyle.git)
 - [`anstyle-query 1.1.5`](https://github.com/rust-cli/anstyle.git)
@@ -1191,11 +1017,11 @@ Used by:
 - [`colorchoice 1.0.5`](https://github.com/rust-cli/anstyle.git)
 - [`is_terminal_polyfill 1.70.2`](https://github.com/polyfill-rs/is_terminal_polyfill)
 - [`once_cell_polyfill 1.70.2`](https://github.com/polyfill-rs/once_cell_polyfill)
-- [`serde_spanned 1.1.1`](https://github.com/toml-rs/toml)
-- [`toml 1.1.6+spec-1.1.0`](https://github.com/toml-rs/toml)
-- [`toml_datetime 1.1.1+spec-1.1.0`](https://github.com/toml-rs/toml)
-- [`toml_parser 1.1.3+spec-1.1.0`](https://github.com/toml-rs/toml)
-- [`toml_writer 1.1.2+spec-1.1.0`](https://github.com/toml-rs/toml)
+- [`serde_spanned 1.1.2`](https://github.com/toml-rs/toml)
+- [`toml 1.1.8+spec-1.1.0`](https://github.com/toml-rs/toml)
+- [`toml_datetime 1.1.2+spec-1.1.0`](https://github.com/toml-rs/toml)
+- [`toml_parser 1.1.5+spec-1.1.0`](https://github.com/toml-rs/toml)
+- [`toml_writer 1.1.3+spec-1.1.0`](https://github.com/toml-rs/toml)
 
 ```text
 Copyright (c) Individual contributors
@@ -1224,7 +1050,7 @@ SOFTWARE.
 
 Used by:
 
-- [`libc 0.2.189`](https://github.com/rust-lang/libc)
+- [`libc 0.2.191`](https://github.com/rust-lang/libc)
 
 ```text
 Copyright (c) The Rust Project Developers
@@ -1533,49 +1359,49 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [`gix-actor 0.42.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-bitmap 0.4.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-chunk 0.8.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-command 0.10.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-commitgraph 0.39.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-config-value 0.19.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-config 0.60.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-date 0.16.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-diff 0.67.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-discover 0.55.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-error 0.3.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-features 0.49.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-fs 0.22.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-glob 0.27.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-hash 0.26.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-hashtable 0.16.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-ignore 0.22.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-index 0.55.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-lock 24.0.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-macros 0.1.6`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-object 0.64.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-odb 0.84.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-pack 0.74.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-packetline 0.22.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-path 0.12.6`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-protocol 0.65.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-quote 0.8.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-ref 0.67.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-refspec 0.45.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-revision 0.49.1`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-revwalk 0.35.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-sec 0.14.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-shallow 0.13.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-tempfile 24.0.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-trace 0.1.21`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-transport 0.59.2`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-traverse 0.61.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-url 0.38.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-utils 0.3.6`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-validate 0.11.4`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-worktree 0.56.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix-zlib 0.1.0`](https://github.com/GitoxideLabs/gitoxide)
-- [`gix 0.87.1`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-actor 0.44.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-bitmap 0.6.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-chunk 0.10.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-command 0.12.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-commitgraph 0.41.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-config-value 0.21.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-config 0.62.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-date 0.18.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-diff 0.69.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-discover 0.57.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-error 0.5.1`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-fs 0.24.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-glob 0.29.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-hash 0.28.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-hashtable 0.18.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-ignore 0.24.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-index 0.57.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-lock 26.0.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-macros 0.2.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-object 0.66.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-odb 0.86.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-pack 0.76.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-packetline 0.24.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-parallel 0.50.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-path 0.14.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-protocol 0.67.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-quote 0.10.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-ref 0.69.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-refspec 0.47.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-revision 0.51.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-revwalk 0.37.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-sec 0.16.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-shallow 0.15.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-tempfile 26.0.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-trace 0.3.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-transport 0.61.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-traverse 0.63.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-url 0.40.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-utils 0.5.1`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-validate 0.13.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-worktree 0.58.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix-zlib 0.3.0`](https://github.com/GitoxideLabs/gitoxide)
+- [`gix 0.89.0`](https://github.com/GitoxideLabs/gitoxide)
 
 ```text
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -1610,37 +1436,6 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-```
-
-### <a id="MIT"></a>MIT License
-
-Used by:
-
-- [`typenum 1.19.0`](https://github.com/paholg/typenum)
-
-```text
-The MIT License (MIT)
-
-Copyright (c) 2014 Paho Lurie-Gregg
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 ```
 
@@ -1823,7 +1618,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [`prodash 31.0.0`](https://github.com/GitoxideLabs/prodash)
+- [`prodash 31.0.1`](https://github.com/GitoxideLabs/prodash)
 
 ```text
 The MIT License (MIT)
@@ -1858,12 +1653,14 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [`generic-array 0.14.7`](https://github.com/fizyk20/generic-array.git)
+- [`gix-trace 0.3.0`](https://github.com/GitoxideLabs/gitoxide)
 
 ```text
-The MIT License (MIT)
+The `gix-trace::forest` module is derived from tracing-forest 0.2.0
+(https://github.com/QnnOkabayashi/tracing-forest, commit
+86aead42ba9a72989e38ba4863d805f80b9ea1f1), licensed under the MIT license.
 
-Copyright (c) 2015 Bartłomiej Kamiński
+Copyright (c) Quinn Okabayashi
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -1872,16 +1669,17 @@ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
 ```
 
 ### <a id="MIT-0"></a>MIT No Attribution
@@ -1915,6 +1713,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 Used by:
 
 - [`unicode-ident 1.0.24`](https://github.com/dtolnay/unicode-ident)
+- [`unicode-normalization 0.1.26`](https://github.com/unicode-rs/unicode-normalization)
 
 ```text
 UNICODE LICENSE V3

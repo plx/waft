@@ -419,10 +419,10 @@ struct DiscoveryDetail(String);
 /// unreadable directory, an untrusted repository — keeps the backend's own
 /// description, because those are genuinely about `gix` and not about the
 /// user's working directory.
-fn discovery_error(path: &Path, error: gix::discover::Error) -> Error {
+fn discovery_error(path: &Path, error: gix::Error) -> Error {
     let missing = matches!(
-        &error,
-        gix::discover::Error::Discover(
+        error.downcast_any_ref::<gix::discover::upwards::Error>(),
+        Some(
             gix::discover::upwards::Error::NoGitRepository { .. }
                 | gix::discover::upwards::Error::NoGitRepositoryWithinCeiling { .. }
                 | gix::discover::upwards::Error::NoGitRepositoryWithinFs { .. }
@@ -723,13 +723,13 @@ impl GitBackend for GitGix {
                 "listing linked worktrees in {}",
                 main_repo.common_dir().display()
             ),
-            source: e,
+            source: std::io::Error::other(e),
         })?;
 
         for proxy in linked {
             let path = proxy.base().map_err(|e| Error::Io {
                 context: format!("reading linked worktree at {}", proxy.git_dir().display()),
-                source: e,
+                source: std::io::Error::other(e),
             })?;
             let path = normalize_repo_path(&path);
             if path == main_path {
@@ -809,7 +809,7 @@ impl GitBackend for GitGix {
                     .at_path(Path::new(path.as_str()), mode)
                     .map_err(|e| Error::Io {
                         context: format!("matching ignore patterns for {}", path.as_str()),
-                        source: e,
+                        source: std::io::Error::other(e),
                     })?;
 
                 let matched = platform.matching_exclude_pattern();
@@ -952,7 +952,7 @@ impl GitBackend for GitGix {
             let rel_path = Path::new(rel.as_str());
             let platform = excludes.at_path(rel_path, None).map_err(|e| Error::Io {
                 context: format!("matching ignore patterns for {}", entry.path().display()),
-                source: e,
+                source: std::io::Error::other(e),
             })?;
 
             if !platform.is_excluded() {
