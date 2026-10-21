@@ -103,6 +103,13 @@ const isCurrent = (href: string) =>
     width: clamp(2.5rem, 11vw, 9rem);
   }
 
+  /* Starlight names this button "Search" but shows a Ctrl/Cmd K hint in it,
+     which fails the label-in-name accessibility check. The shortcut and its
+     aria-keyshortcuts remain. */
+  .waft-doc-search :global(button[data-open-modal] > kbd) {
+    display: none;
+  }
+
   .waft-doc-button {
     min-height: 36px;
     display: inline-flex;
