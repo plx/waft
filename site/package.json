@@ -27,10 +27,10 @@
     "@playwright/test": "^1.63.0",
     "cspell": "^10.3.5",
     "prettier": "^3.9.9",
-    "typescript": "^7.0.2"
+    "typescript": "^6.0.3"
   },
   "overrides": {
-    "devalue": "^5.8.1"
+    "devalue": "^5.9.4"
   },
   "engines": {
     "node": ">=24.0.0"

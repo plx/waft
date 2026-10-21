@@ -197,6 +197,8 @@ test.describe("rendered site", () => {
 
     const menu = page.getByRole("button", { name: "Menu", exact: true });
     const sidebar = page.locator("#starlight__sidebar");
+    const openSidebar = page.locator("#starlight__sidebar:popover-open");
+    const mainFrame = page.locator(".main-frame");
     const compactNavigation = (page.viewportSize()?.width ?? 0) < 800;
 
     if (!compactNavigation) {
@@ -206,15 +208,13 @@ test.describe("rendered site", () => {
     }
 
     await expect(menu).toBeVisible();
-    await expect(menu).toHaveAttribute("aria-controls", "starlight__sidebar");
+    await expect(menu).toHaveAttribute("popovertarget", "starlight__sidebar");
     await expect(sidebar).toBeHidden();
 
     await menu.click();
 
-    await expect(page.locator("body")).toHaveAttribute(
-      "data-mobile-menu-expanded",
-      "",
-    );
+    await expect(openSidebar).toHaveCount(1);
+    await expect(mainFrame).toHaveAttribute("inert", "");
     await expect(sidebar).toBeVisible();
     await expect(
       sidebar.getByRole("link", { name: "Usage", exact: true }),
@@ -222,10 +222,8 @@ test.describe("rendered site", () => {
 
     await page.keyboard.press("Escape");
 
-    await expect(page.locator("body")).not.toHaveAttribute(
-      "data-mobile-menu-expanded",
-      "",
-    );
+    await expect(openSidebar).toHaveCount(0);
+    await expect(mainFrame).not.toHaveAttribute("inert", "");
     await expect(sidebar).toBeHidden();
     await expect(menu).toBeFocused();
   });
