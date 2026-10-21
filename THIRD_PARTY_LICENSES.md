@@ -12,7 +12,7 @@ date relative to `Cargo.lock`.
 
 ## Overview
 
-- [MIT License](#MIT) — 154
+- [MIT License](#MIT) — 153
 - [zlib License](#Zlib) — 2
 - [Apache License 2.0](#Apache-2.0) — 1
 - [MIT No Attribution](#MIT-0) — 1
@@ -944,42 +944,6 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [`getrandom 0.3.4`](https://github.com/rust-random/getrandom)
-
-```text
-Copyright (c) 2018-2025 The rust-random Project Developers
-Copyright (c) 2014 The Rust Project Developers
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-
-```
-
-### <a id="MIT"></a>MIT License
-
-Used by:
-
 - [`getrandom 0.4.3`](https://github.com/rust-random/getrandom)
 
 ```text
@@ -1220,15 +1184,15 @@ Used by:
 - [`anstyle-query 1.1.5`](https://github.com/rust-cli/anstyle.git)
 - [`anstyle-wincon 3.0.11`](https://github.com/rust-cli/anstyle.git)
 - [`anstyle 1.0.14`](https://github.com/rust-cli/anstyle.git)
-- [`clap 4.6.6`](https://github.com/clap-rs/clap)
-- [`clap_builder 4.6.6`](https://github.com/clap-rs/clap)
-- [`clap_derive 4.6.4`](https://github.com/clap-rs/clap)
+- [`clap 4.6.7`](https://github.com/clap-rs/clap)
+- [`clap_builder 4.6.7`](https://github.com/clap-rs/clap)
+- [`clap_derive 4.6.7`](https://github.com/clap-rs/clap)
 - [`clap_lex 1.1.0`](https://github.com/clap-rs/clap)
 - [`colorchoice 1.0.5`](https://github.com/rust-cli/anstyle.git)
 - [`is_terminal_polyfill 1.70.2`](https://github.com/polyfill-rs/is_terminal_polyfill)
 - [`once_cell_polyfill 1.70.2`](https://github.com/polyfill-rs/once_cell_polyfill)
 - [`serde_spanned 1.1.1`](https://github.com/toml-rs/toml)
-- [`toml 1.1.4+spec-1.1.0`](https://github.com/toml-rs/toml)
+- [`toml 1.1.6+spec-1.1.0`](https://github.com/toml-rs/toml)
 - [`toml_datetime 1.1.1+spec-1.1.0`](https://github.com/toml-rs/toml)
 - [`toml_parser 1.1.3+spec-1.1.0`](https://github.com/toml-rs/toml)
 - [`toml_writer 1.1.2+spec-1.1.0`](https://github.com/toml-rs/toml)
@@ -1295,7 +1259,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [`faster-hex 0.10.0`](https://github.com/NervosFoundation/faster-hex)
+- [`faster-hex 0.10.1`](https://github.com/NervosFoundation/faster-hex)
 
 ```text
 MIT License
@@ -1466,15 +1430,15 @@ Used by:
 - [`proc-macro2 1.0.106`](https://github.com/dtolnay/proc-macro2)
 - [`quote 1.0.45`](https://github.com/dtolnay/quote)
 - [`reflink-copy 0.1.30`](https://github.com/cargo-bins/reflink-copy)
-- [`rustix 1.1.4`](https://github.com/bytecodealliance/rustix)
+- [`rustix 1.1.5`](https://github.com/bytecodealliance/rustix)
 - [`rustversion 1.0.22`](https://github.com/dtolnay/rustversion)
 - [`serde 1.0.229`](https://github.com/serde-rs/serde)
 - [`serde_core 1.0.229`](https://github.com/serde-rs/serde)
 - [`serde_derive 1.0.229`](https://github.com/serde-rs/serde)
 - [`syn 2.0.117`](https://github.com/dtolnay/syn)
 - [`syn 3.0.3`](https://github.com/dtolnay/syn)
-- [`thiserror-impl 2.0.20`](https://github.com/dtolnay/thiserror)
-- [`thiserror 2.0.20`](https://github.com/dtolnay/thiserror)
+- [`thiserror-impl 2.0.21`](https://github.com/dtolnay/thiserror)
+- [`thiserror 2.0.21`](https://github.com/dtolnay/thiserror)
 - [`unicode-ident 1.0.24`](https://github.com/dtolnay/unicode-ident)
 
 ```text
