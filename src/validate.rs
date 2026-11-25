@@ -9,8 +9,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ignore::gitignore::GitignoreBuilder;
+use waft_verified::validation::{GateOutcome, ReportMode};
 
 use crate::config::SymlinkPolicy;
+use crate::error::{Error, Result};
 use crate::git::GitBackend;
 use crate::model::{RepoContext, ValidationIssue, ValidationReport, ValidationSeverity};
 
@@ -82,6 +84,42 @@ pub fn validate(
     }
 
     report
+}
+
+/// Print the validation findings `copy`, `list` and `info` show before they
+/// act, and stop the command when any finding is an error.
+///
+/// The verified `waft_verified::validation::validation_view` decides which
+/// issues are printed and whether the command stops: errors only (then
+/// `Error::Validation`) when there is an error, otherwise the warnings unless
+/// `quiet`.
+pub(crate) fn report_preflight(report: &ValidationReport, quiet: bool) -> Result<()> {
+    let view = waft_verified::validation::validation_view(
+        &report.severities(),
+        ReportMode::Preflight,
+        quiet,
+    );
+    for &index in &view.shown {
+        let issue = &report.issues[index];
+        eprintln!(
+            "{}: {}: {}",
+            severity_label(issue.severity),
+            issue.file.display(),
+            issue.message
+        );
+    }
+    match view.outcome {
+        GateOutcome::Proceed => Ok(()),
+        GateOutcome::Abort { error_count } => Err(Error::Validation { error_count }),
+    }
+}
+
+/// The word an issue's severity is printed as.
+pub(crate) fn severity_label(severity: ValidationSeverity) -> &'static str {
+    match severity {
+        ValidationSeverity::Warning => "warning",
+        ValidationSeverity::Error => "error",
+    }
 }
 
 /// Walk the repo tree and validate all files named `filename`.
@@ -178,9 +216,9 @@ fn validate_ignore_file(
     for (line_num, line_text) in content.lines().enumerate() {
         let line_1based = line_num + 1;
 
-        // Skip empty lines and comments
-        let trimmed = line_text.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        // Skip empty lines and comments (decided on the trimmed line by the
+        // same verified predicate the lint uses).
+        if waft_verified::lint::is_blank_or_comment(line_text.trim().as_bytes()) {
             continue;
         }
 
@@ -214,70 +252,47 @@ fn validate_ignore_file(
 /// - **Shadowed negations**: a negation like `!dir/file` after `dir/` was excluded.
 ///   Git won't descend into a directory-excluded path, so the negation is ineffective.
 /// - **Duplicate patterns**: the same pattern text appearing more than once.
+///
+/// Which lines get which warning, and which earlier line each warning names,
+/// is decided by the verified `waft_verified::lint::lint_lines` on the
+/// trimmed lines; this function only formats its verdicts, line by line,
+/// the duplicate warning before the shadow warning.
 fn check_suspicious_patterns(path: &Path, content: &str, report: &mut ValidationReport) {
-    // Track literal directory exclusion patterns (e.g. "build/", "vendor/pkg/")
-    let mut dir_exclusions: Vec<String> = Vec::new();
-    // Track seen patterns for duplicate detection (pattern text → first line number)
-    let mut seen_patterns: Vec<(&str, usize)> = Vec::new();
+    let lines: Vec<&str> = content.lines().map(str::trim).collect();
+    let line_bytes: Vec<&[u8]> = lines.iter().map(|line| line.as_bytes()).collect();
+    let verdicts = waft_verified::lint::lint_lines(&line_bytes);
 
-    for (line_num, line_text) in content.lines().enumerate() {
+    for (line_num, (trimmed, verdict)) in lines.iter().zip(&verdicts).enumerate() {
         let line_1based = line_num + 1;
-        let trimmed = line_text.trim();
-
-        // Skip empty lines and comments
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        // Skip lines with escaped leading characters (e.g. `\!pattern`, `\#pattern`)
-        let is_negation = trimmed.starts_with('!') && !trimmed.starts_with("\\!");
-        let pattern_text = if is_negation { &trimmed[1..] } else { trimmed };
 
         // --- Duplicate detection ---
-        if let Some((_, first_line)) = seen_patterns.iter().find(|(p, _)| *p == trimmed) {
+        if let Some(first) = verdict.duplicate_of {
             report.issues.push(ValidationIssue {
                 severity: ValidationSeverity::Warning,
                 file: path.to_path_buf(),
                 line: Some(line_1based),
                 message: format!(
                     "duplicate pattern '{}' (first appeared on line {})",
-                    trimmed, first_line
+                    trimmed,
+                    first + 1
                 ),
             });
-        } else {
-            seen_patterns.push((trimmed, line_1based));
         }
 
         // --- Shadowed negation detection ---
-        if is_negation {
-            for dir_pat in &dir_exclusions {
-                if pattern_text.starts_with(dir_pat.as_str()) {
-                    report.issues.push(ValidationIssue {
-                        severity: ValidationSeverity::Warning,
-                        file: path.to_path_buf(),
-                        line: Some(line_1based),
-                        message: format!(
-                            "negation '{}' is likely shadowed by directory exclusion '{}' \
-                             (git will not descend into excluded directories)",
-                            trimmed,
-                            dir_pat.trim_end_matches('/')
-                        ),
-                    });
-                    break; // One warning per negation is enough
-                }
-            }
-        } else {
-            // Track literal directory exclusion patterns (ending with `/`,
-            // no glob wildcards). Patterns with `*`, `?`, or `[` are not
-            // simple directory exclusions — e.g. `build/*` still allows
-            // git to descend into `build/`.
-            if pattern_text.ends_with('/')
-                && !pattern_text.contains('*')
-                && !pattern_text.contains('?')
-                && !pattern_text.contains('[')
-            {
-                dir_exclusions.push(pattern_text.to_string());
-            }
+        // The kernel proves `dir_line < line_num`, so the index is in range.
+        if let Some(dir_line) = verdict.shadowed_by {
+            report.issues.push(ValidationIssue {
+                severity: ValidationSeverity::Warning,
+                file: path.to_path_buf(),
+                line: Some(line_1based),
+                message: format!(
+                    "negation '{}' is likely shadowed by directory exclusion '{}' \
+                     (git will not descend into excluded directories)",
+                    trimmed,
+                    lines[dir_line].trim_end_matches('/')
+                ),
+            });
         }
     }
 }
@@ -878,5 +893,177 @@ mod tests {
             .filter(|i| matches!(i.severity, ValidationSeverity::Warning))
             .collect();
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+    }
+
+    /// The lint as it was written before it moved into the verified kernel,
+    /// kept only as a test oracle for the differential test below.
+    fn legacy_suspicious_patterns(content: &str) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        let mut dir_exclusions: Vec<String> = Vec::new();
+        let mut seen_patterns: Vec<(&str, usize)> = Vec::new();
+        for (line_num, line_text) in content.lines().enumerate() {
+            let line_1based = line_num + 1;
+            let trimmed = line_text.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let is_negation = trimmed.starts_with('!') && !trimmed.starts_with("\\!");
+            let pattern_text = if is_negation { &trimmed[1..] } else { trimmed };
+            if let Some((_, first_line)) = seen_patterns.iter().find(|(p, _)| *p == trimmed) {
+                out.push((
+                    line_1based,
+                    format!(
+                        "duplicate pattern '{}' (first appeared on line {})",
+                        trimmed, first_line
+                    ),
+                ));
+            } else {
+                seen_patterns.push((trimmed, line_1based));
+            }
+            if is_negation {
+                for dir_pat in &dir_exclusions {
+                    if pattern_text.starts_with(dir_pat.as_str()) {
+                        out.push((
+                            line_1based,
+                            format!(
+                                "negation '{}' is likely shadowed by directory exclusion '{}' \
+                                 (git will not descend into excluded directories)",
+                                trimmed,
+                                dir_pat.trim_end_matches('/')
+                            ),
+                        ));
+                        break;
+                    }
+                }
+            } else if pattern_text.ends_with('/')
+                && !pattern_text.contains('*')
+                && !pattern_text.contains('?')
+                && !pattern_text.contains('[')
+            {
+                dir_exclusions.push(pattern_text.to_string());
+            }
+        }
+        out
+    }
+
+    fn kernel_suspicious_patterns(content: &str) -> Vec<(usize, String)> {
+        let mut report = ValidationReport::default();
+        check_suspicious_patterns(Path::new("rules"), content, &mut report);
+        report
+            .issues
+            .into_iter()
+            .map(|issue| {
+                assert_eq!(issue.severity, ValidationSeverity::Warning);
+                assert_eq!(issue.file, Path::new("rules"));
+                (
+                    issue.line.expect("lint findings carry a line"),
+                    issue.message,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lint_matches_legacy_on_edge_cases() {
+        for content in [
+            "",
+            "build/\n!build/important.txt\n",
+            "build/\nbuild/\n!build/x\n!build/x\n",
+            "  build/  \n\t!build/x\n # c\n# c\n # c\n",
+            "a//\n!a//b\n!a/b\n",
+            "build/*\n!build/x\n",
+            "\\!x/\n!x/y\n\\!x/\n",
+            "!a/\n!a/b\n",
+            "é/\n!é/ü\né/\n",
+            "x\r\ny\r\nx\r\n",
+            "a/\nb/\n!b/c\n!a/c\n",
+            "!\n!\n#\n\n\n",
+        ] {
+            assert_eq!(
+                kernel_suspicious_patterns(content),
+                legacy_suspicious_patterns(content),
+                "content: {content:?}"
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+        /// The verified lint emits exactly the warnings the original code
+        /// emitted, byte for byte and in the same order.
+        #[test]
+        fn lint_matches_legacy_algorithm(
+            lines in proptest::collection::vec("[ab!#/*?\\[\\\\ \té]{0,5}", 0..16),
+            crlf in proptest::bool::ANY,
+        ) {
+            let content = lines.join(if crlf { "\r\n" } else { "\n" });
+            proptest::prop_assert_eq!(
+                kernel_suspicious_patterns(&content),
+                legacy_suspicious_patterns(&content)
+            );
+        }
+    }
+
+    fn issue(severity: ValidationSeverity) -> ValidationIssue {
+        ValidationIssue {
+            severity,
+            file: PathBuf::from("f"),
+            line: None,
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn severities_map_one_to_one_in_order() {
+        use waft_verified::validation::Severity;
+        let report = ValidationReport {
+            issues: vec![
+                issue(ValidationSeverity::Warning),
+                issue(ValidationSeverity::Error),
+                issue(ValidationSeverity::Warning),
+            ],
+        };
+        assert_eq!(
+            report.severities(),
+            vec![Severity::Warning, Severity::Error, Severity::Warning]
+        );
+        assert!(report.has_errors());
+        assert_eq!(report.error_count(), 1);
+
+        let warnings_only = ValidationReport {
+            issues: vec![issue(ValidationSeverity::Warning)],
+        };
+        assert!(!warnings_only.has_errors());
+        assert_eq!(warnings_only.error_count(), 0);
+        assert!(!ValidationReport::default().has_errors());
+    }
+
+    #[test]
+    fn preflight_stops_with_the_error_count() {
+        let report = ValidationReport {
+            issues: vec![
+                issue(ValidationSeverity::Error),
+                issue(ValidationSeverity::Warning),
+                issue(ValidationSeverity::Error),
+            ],
+        };
+        for quiet in [false, true] {
+            match report_preflight(&report, quiet) {
+                Err(Error::Validation { error_count }) => assert_eq!(error_count, 2),
+                other => panic!("expected a validation error, got {other:?}"),
+            }
+        }
+        let warnings_only = ValidationReport {
+            issues: vec![issue(ValidationSeverity::Warning)],
+        };
+        assert!(report_preflight(&warnings_only, false).is_ok());
+        assert!(report_preflight(&warnings_only, true).is_ok());
+    }
+
+    #[test]
+    fn severity_labels() {
+        assert_eq!(severity_label(ValidationSeverity::Warning), "warning");
+        assert_eq!(severity_label(ValidationSeverity::Error), "error");
     }
 }
