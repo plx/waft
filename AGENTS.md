@@ -25,7 +25,8 @@ design-system guidance in the same change and explain the exception.
 ## Verified kernels
 
 Before changing `verified/`, or production code in `src/` that calls
-`waft_verified`, read the "Maintaining the proofs" section of
+`waft_verified`, implements one of its traits, or converts values to or from
+its types, read the "Maintaining the proofs" section of
 `VERIFICATION.md`. Run `just check-verus` (Verus with `--no-cheating`) as well
 as the Rust checks, and update `VERIFICATION.md` when a kernel's guarantees,
 call sites or trust assumptions change.

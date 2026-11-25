@@ -1,6 +1,6 @@
 # Formal verification
 
-waft's decision logic is machine-checked with
+Much of waft's decision logic is machine-checked with
 [Verus](https://github.com/verus-lang/verus), a verifier for Rust. This record
 says which decisions are verified, what each proof establishes, what the proofs
 assume, and which parts of waft stay outside the verified boundary.
@@ -11,13 +11,13 @@ this file covers proofs.
 
 | | |
 | --- | --- |
-| Verified crate | `waft-verified` (`verified/`): 933 items verified, 0 errors, with Verus `--no-cheating` |
-| Trusted code in that crate | None. No `assume`, `admit`, `external_body`, `assume_specification`, `uninterp` or `verus::trusted`. What the crate still relies on is listed under [Trust boundary](#trust-boundary). |
+| Verified crate | `waft-verified` (`verified/`): 933 items verified, 0 errors, with Verus's `--no-cheating` check on the crate |
+| Trusted items in that crate | None: no `assume`, `admit`, `external_body`, `assume_specification`, `uninterp` or `verus::trusted`. The proofs still rely on 17 traits production implements, one unverified `vstd` function and `vstd`'s specifications of the standard library; see [Trust boundary](#trust-boundary). |
 | Kernel size | 4,984 executable lines, with 9,317 specification and 9,022 proof lines (Verus `line_count`) |
-| Production use | Ten areas of `src/` hand their decisions to the kernels: paths, context and CLI policy, configuration, validation and reports, the Git backend, the rule engine, planning, execution and the index lock, file checks, and publication |
-| Production code | 6,906 non-test, non-comment lines on `main` before this work, 7,535 now; the growth is conversion glue between production types and kernel types |
+| Production use | Ten areas of `src/` hand their main decisions to the kernels: paths, context and CLI policy, configuration, validation and reports, the Git backend, the rule engine, planning, execution and the index lock, file checks, and publication. What stays in production is listed under [Outside the verified boundary](#outside-the-verified-boundary). |
+| Production code | 6,757 non-test, non-comment, non-blank lines in `src/` on `main` before this work, 7,290 now. The growth is glue: conversions between production and kernel types, the trait implementations, and the drivers that perform the effects the kernels request. |
 | Behavior | Identical to `main` across 2,321 end-to-end CLI invocation pairs; one reachable panic is now an existing error ([details](#behavior-and-cost)) |
-| Cost | Release binary +1.8%; one more crate to compile; the Verus check takes about half a minute |
+| Cost | Release binary +1.7%; nine more crates to compile (`waft-verified`, `vstd` and seven Verus support crates); the Verus check takes about half a minute |
 
 ## What "verified" means here
 
@@ -25,26 +25,63 @@ The kernels are pure decision functions and step machines in `waft-verified`.
 Production converts its own values into kernel inputs, calls a kernel, and acts
 on the answer. Verus checks each kernel's executable code against its
 specification. An ordinary `cargo build` erases specifications and proofs, so
-the production binary runs exactly the executable code Verus checked; no item
-in `verified/` compiles differently with and without Verus.
+the production binary is built from exactly the executable source Verus
+checked. Only `use` imports of specification items differ between the two
+builds. The production compiler is Rust 1.90, while Verus reads the code with
+its own Rust 1.100.0 front end.
+
+Terms used throughout:
+
+- **Oracle:** a trait a kernel calls to ask about the world (a file's
+  identity, a matcher's verdict, an environment variable), implemented by
+  production. Verus takes the implementation's answers as given.
+- **Ghost log or trace:** a specification-only record, erased from the
+  production build, of the calls or effects a kernel has requested, in order.
+  Postconditions about the log state exactly which effects happen, and in what
+  order.
+- **Model:** a hand-written specification of something outside the crate,
+  such as the operating system, Git, or a library's matcher, that lemmas reason
+  about.
+- **Worktree family:** a repository's main worktree and its linked
+  worktrees.
+- **`git`, `claude-2026-04`, `wt-0.39`:** the three `.worktreeinclude`
+  semantics waft offers (see
+  [docs/worktreeinclude-compatibility.md](docs/worktreeinclude-compatibility.md)).
 
 The guarantees below come in three kinds, and each section says which kind it
-is relying on:
+relies on:
 
-- **Postconditions of the functions production calls.** These hold for every
-  input production can pass. A kernel's `requires` clause is not checked at run
-  time when unverified code calls it; every such clause that production relies
-  on is established at its call site, which review (not Verus) confirmed.
-- **Type invariants and typestate.** Step-machine values exist only after the
-  steps their type records were fed answers, in order. Rust privacy stops
-  production from building them directly. Nothing proves that production ran
-  the system call whose answer it fed in.
-- **Lemmas.** Some lemmas are about a kernel's own specification, so they reach
-  production through the postconditions. Others are about a hand-written model:
-  the index-lock signal model, the publication filesystem model, and the
-  reference model of Git's ignore precedence. Nothing mechanically ties those
-  models to the operating system or to Git; the sections say where that is the
-  case.
+- **Postconditions of the functions production calls.** These hold whenever
+  the function's `requires` clause holds; a `requires` clause is not checked
+  at run time when unverified code calls the kernel. Two functions production
+  calls have one, `index_lock::acquire` and `execute::failure_summary`.
+  Production establishes both at its call sites, except that the public
+  library function `executor::report_has_failures` accepts a hand-built
+  `CopyReport` that can break the second (see the executor section). Review,
+  not Verus, checked the call sites.
+- **Type invariants and typestate.** The publication step machines, the
+  streaming comparison and the fingerprinter are values that exist only after
+  the steps their type records were fed answers, in order. Rust privacy stops
+  production from building them directly. Two publication steps record a
+  destination proof without receiving it. The planner's step kernels take
+  plain observation structs that production fills in, so there the order rests
+  on production (see those sections). Nothing proves that production ran the
+  system call whose answer it fed in.
+- **Lemmas.** Some lemmas are about a kernel's own specification, so they
+  reach production through the postconditions. Others are about hand-written
+  models:
+  - the index-lock signal model;
+  - the publication filesystem model;
+  - the reference model of `ignore` and Git's per-directory excludes;
+  - a model of Git's `-z` output writers;
+  - the index-cache slot model;
+  - a model of `RealFs::source_kind`.
+
+  A few postconditions are stated over hand-written models of `std`:
+  `std_components` for Unix `Path::components`, and `line_at` and `trim` for
+  `str::lines` and `str::trim`. Nothing mechanically ties these models to the
+  operating system, `std`, `ignore` or Git. The sections say where each model
+  is used and which are pinned by tests.
 
 ## Running the proofs
 
@@ -52,30 +89,44 @@ is relying on:
 just check-verus          # or: bash scripts/verus-verify.sh
 ```
 
-The script downloads the pinned Verus release (0.2026.11.22.1ce6a59) for Linux
-x86-64 and checks its SHA-256; on other platforms set `VERUS_HOME` to an
-unpacked release of the same version. It installs the Rust toolchain that
-release needs (1.100.0), runs
-`cargo verus verify -p waft-verified --no-cheating`, re-verifies on every run,
-and fails unless Verus reports a clean result. CI runs it in the
-`formal verification (Verus)` job, which `core checks` requires.
+The script:
+
+- downloads the pinned Verus release (0.2026.11.22.1ce6a59) for Linux x86-64 and
+  checks its SHA-256. Elsewhere, set `VERUS_HOME` to an unpacked release of
+  the same version; the script then skips the download.
+- installs the Rust toolchain that release needs (1.100.0) if it
+  is missing.
+- runs `cargo verus verify -p waft-verified`, passing `--no-cheating` to
+  `waft-verified` only. `vstd`, which contains the trusted specifications of
+  `std`, is verified without it.
+- re-verifies on every run, and fails unless Verus reports a clean result.
+
+`--no-cheating` makes Verus reject `assume`, `admit`, `external_body`,
+`assume_specification`, `uninterp` and trusted items in the checked crate. CI
+runs the script in the `formal verification (Verus)` job, which `core checks`
+requires.
 
 The production build does not need Verus: `waft-verified` compiles with the
-repository's Rust 1.90 toolchain and the `vstd` crate from crates.io. That
-`vstd` version must match the Verus release, so Dependabot ignores it; update
+repository's Rust 1.90 toolchain and the `vstd` crate from crates.io.
+`cargo verus verify` compiles that same `vstd` crate with Verus. Its version is
+pinned to the one the Verus release expects, so Dependabot ignores it. Update
 the script's version, checksum and toolchain together with `vstd` in
 `verified/Cargo.toml`.
 
 While developing a kernel, verify one module at a time with
-`cargo verus focus -p waft-verified -- --verify-module <module>` (with the
-Verus directory on `PATH`). `--no-cheating` cannot be combined with
+`cargo verus focus -p waft-verified -- --verify-module <module>`, with the
+Verus directory on `PATH`. `--no-cheating` cannot be combined with
 `--verify-module`, so finish with the full script.
 
 ## What is verified
 
-Each row is a part of `src/` that hands its decisions to verified kernels. The
-line counts come from Verus's `line_count` tool and are specification, proof
-and executable lines in the area's kernels; no line in any of them is trusted.
+Each row is a part of `src/` that hands its main decisions to verified kernels.
+The line counts are specification, proof and executable lines in the area's
+kernels, from Verus's `line_count` tool. `lint.rs` was counted with the
+`build/*` text in two doc comments altered, because the tool reads it as the
+start of a block comment. The tool marks no line in any kernel as trusted. The
+contracts of the traits production implements are counted as specification
+and executable lines, and the [Trust boundary](#trust-boundary) lists them.
 
 | Area | Production | Decisions now made by verified code | Spec / proof / exec lines |
 | --- | --- | --- | --- |
@@ -85,7 +136,7 @@ and executable lines in the area's kernels; no line in any of them is trusted.
 | [Validation, lint and list/info reports](#validation-lint-and-listinfo-reports) | `src/validate.rs`, `src/subcommands/` | Validation gate and severities; rule-file symlink handling; lint findings; `list` and `info` action labels | 666 / 462 / 440 |
 | [Git backend](#git-backend) | `src/git.rs` | Tracked-path lookup; parsing of Git output; backend and case-folding policy; index cache step; rule-file existence | 1,310 / 1,493 / 659 |
 | [Rule engine](#rule-engine) | `src/worktreeinclude.rs`, `src/worktreeinclude_engine.rs`, `src/policy_filter.rs`, `src/subcommands/mod.rs` | Rule-file precedence and verdicts; rule-line grammar; exclusion verdicts; which rules apply; empty-selection diagnosis | 922 / 883 / 366 |
-| [Planner](#planner) | `src/planner.rs`, `src/eligibility_groups.rs`, `src/model.rs` | Per-file plan decisions; destination classification; directory promotion; manifests; dry-run accounting and exit status | 929 / 1,006 / 646 |
+| [Planner](#planner) | `src/planner.rs`, `src/eligibility_groups.rs`, `src/model.rs` | Per-file plan decisions; destination classification; directory promotion; manifest ordering and deduplication; dry-run accounting and exit status | 929 / 1,006 / 646 |
 | [Executor and Git index lock](#executor-and-git-index-lock) | `src/executor.rs` | Plan loop and counters; output and exit-status policy; index-lock retries; lock cleanup when a signal arrives | 1,368 / 968 / 423 |
 | [File checks: fingerprints, path components, comparison and stability](#file-checks-fingerprints-path-components-comparison-and-stability) | `src/fs.rs` | Content fingerprints; safe path walks; file comparison; stability checks; errno classification; retry and directory-creation steps | 664 / 693 / 311 (+10) |
 | [Publication protocols](#publication-protocols) | `src/fs.rs` (Unix) | No-clobber publication; which names cleanup may remove; exchange and displacement replacement with undo; permission repair; step order | 1,520 / 1,054 / 1,003 (+42) |
@@ -93,9 +144,12 @@ and executable lines in the area's kernels; no line in any of them is trusted.
 
 A "(+n)" counts lines that hold both proof and executable code.
 
-The sections below cover each area in the same layout: what production
-delegates, what the proofs establish and what they are attached to, what is
-assumed, and what is still unverified.
+The sections below cover each area in the same layout:
+
+- what production delegates;
+- what the proofs establish, and what each guarantee is attached to;
+- what is assumed;
+- what is still unverified.
 
 ## Areas
 
@@ -359,8 +413,7 @@ repository, and which target a `.git` file names.
 
 **Size:** 566 spec / 565 proof / 371 exec lines, 0 trusted. By module:
 `context` with `cli_policy` 282/265/217, `worktree_map` 48/62/27, `boundary`
-with `gitfile` 236/238/127; `component_prefix` counts under paths. No file
-contains the slash-star sequence, so the files were counted unaltered.
+with `gitfile` 236/238/127; `component_prefix` counts under paths.
 
 ### Configuration policy
 
@@ -459,8 +512,8 @@ the one `From` conversion in `src/config.rs`.
   environment key names.
 - The oracles log every call; the theorems hold for any answer, and that the
   answers are right is production's. `ProcessConfigHome` answers
-  `std::env::var_os(..).is_some()` (a set but empty or relative value counts,
-  as before) and keeps the last queried value, which `user_config_path` uses.
+  `std::env::var_os(..).is_some()`, as the replaced code did, and keeps the
+  last queried value, which `user_config_path` uses.
   `ConfigSearchWalk` keeps the root joined with the entered names, probes it
   (`.git` exists, or `git::repo_paths_equivalent` matches a gitlink after
   `RepoRelPath::normalize`) and records it on `search`. No called kernel has a
@@ -489,8 +542,7 @@ the one `From` conversion in `src/config.rs`.
 counts the two oracle traits as 5 spec and 6 exec lines). By file under
 `policy/`: `vocab` 214/279/148, `merge` 449/580/148, `raw` 102/99/97,
 `env_layer` 179/299/118, `user_source` 26/21/31, `discovery` 76/122/36;
-`policy.rs` is documentation. No file contains the slash-star sequence, so
-the files were counted unaltered.
+`policy.rs` is documentation.
 
 ### Validation, lint and list/info reports
 
@@ -753,8 +805,8 @@ existing `.worktreeinclude`.
   discovery miss with `not a git repository`; `usize_from_str` is
   `str::parse::<usize>`, by reading and the check-ignore differential test.
   `index_stamp` is injective (by construction, spot-checked by a unit test)
-  and equal stamps mean equal index contents, as Git replaces the index by
-  rename; inode reuse within the mtime granularity remains.
+  and equal stamps are assumed to mean equal index contents, because Git
+  replaces the index by rename.
 - Glue: span slicing, mapping `select`'s positions back to paths,
   `RepoRelPath::from_git_bytes`, `path_buf_from_git_bytes` and lossy UTF-8 on
   parser output; `str::trim`, `str::to_lowercase`, lossy UTF-8 and the config
@@ -791,8 +843,7 @@ existing `.worktreeinclude`.
 
 **Size:** 1310 spec / 1493 proof / 659 exec lines, 0 trusted. By file:
 `tracked.rs` 481/586/235, `git_parse.rs` 530/772/247, `git_policy.rs`
-299/135/177. The `selection` gate is counted under the rules area. No file
-contains the slash-star sequence, so the files were counted unaltered.
+299/135/177. The `selection` gate is counted under the rules area.
 
 ### Rule engine
 
@@ -866,8 +917,7 @@ two agree and where they differ.
   postconditions then give `spec_explain` over one file), the modeled verdict
   selects a path exactly when Git does, or when the root file has no verdict
   on levels `1..=len` but selects level 0, a case Git never selects
-  (`theorem_root_file_divergence_is_the_empty_path`); a bare `/` causes it for
-  every path, `*/` for every file directly in the root. With any number of
+  (`theorem_root_file_divergence_is_the_empty_path`). With any number of
   files and no negated verdict at any level, the same holds with "some file
   selects its own directory"
   (`theorem_without_negations_divergence_is_the_empty_path`). Each has a
@@ -902,10 +952,8 @@ two agree and where they differ.
   `core.ignoreCase || platform may alias`. *Postconditions.* Without negated
   matches, a candidate is excluded iff some level is selected. Below an
   excluded directory every path is excluded unless a negated pattern matches
-  it or a directory between them. The exception is needed because the path's
-  own level is asked first, so a negated `extra_excludes` pattern can keep a
-  path below a built-in directory; the kernel keeps that order from the
-  replaced code. *Lemmas about the specification.*
+  it or a directory between them; the exception follows from the level order
+  the kernel keeps from the replaced code. *Lemmas about the specification.*
 - `selection_source`: with a rule file, `WtSubtractive` under `wt-0.39`, else
   `PerPathEngine`; without one, `when_missing` alone picks `Blank` or
   `AllIgnored`. `rule_file_consulted` holds iff the location resolves to a
@@ -988,8 +1036,7 @@ does not mark the oracle contracts trusted: it counts their spec functions as
 spec and their method signatures and contract clauses mostly as exec. By
 file: `rules/precedence.rs` 316/354/133, `rules/reference.rs` 209/261/0,
 `rules/lines.rs` 126/115/65, `exclusion.rs` 74/101/28, `selection.rs`
-197/52/140; `rules.rs` holds only documentation and module declarations. No
-file contains the slash-star sequence, so the files were counted unaltered.
+197/52/140; `rules.rs` holds only documentation and module declarations.
 
 ### Planner
 
@@ -1100,8 +1147,9 @@ kernel's own failure decision.
   `kernel_snapshot` (with `FileSnapshot::content_key`), `destination_state`,
   `skip_reason` and `entry_kind`, and the agreement of `entry_kind` with
   `executor::kernel_entry`; `planned_entry` is exercised only through
-  plan-level tests. Two snapshots have the same content when their lengths
-  and 64-bit FNV-1a fingerprints match. The real-run theorem is about one
+  plan-level tests. Two snapshots count as having the same content when
+  their lengths and 64-bit FNV-1a fingerprints match, which is not byte
+  equality. The real-run theorem is about one
   plan, not two runs over a changing tree.
 - The walk reports each `ChildKind` faithfully and applies `dir_copyable`
   bottom-up. `compute` meets `theorem_partition`'s precondition by
@@ -1129,8 +1177,7 @@ kernel's own failure decision.
 **Size:** 929 spec / 1006 proof / 646 exec lines, 0 trusted. By file:
 `planner/entry.rs` 369/309/287, `planner/destination.rs` 180/117/109,
 `groups.rs` 163/428/176, `tally.rs` 217/152/74. `planner.rs` has no spec,
-proof or exec lines (module declarations and documentation only). No file
-contains the slash-star sequence, so the files were counted unaltered.
+proof or exec lines (module declarations and documentation only).
 
 ### Executor and Git index lock
 
@@ -1152,8 +1199,8 @@ of that protocol, not about the drivers.
 - Publication, counter and row of each plan entry: `execute::run_plan`, in
   `execute`, with `PlanRunner` as the `EntryRunner`. The CLI reaches only its
   real-run route with a destination root: `copy --dry-run` returns before
-  `execute` (the dry-run route is what the planning section's `tally`
-  theorems compare against), and planning without a root yields no entries.
+  `execute` (the dry-run route is what the [Planner](#planner) section's
+  `tally` theorems compare against), and planning without a root yields no entries.
 - Exit status: `execute::failure_summary`, in `report_has_failures`. Printed
   rows and summary clauses: `execute::{prints_row, summary_plan}`, in
   `render_report`.
@@ -1279,9 +1326,8 @@ of that protocol, not about the drivers.
   signal handler; that their compiled code does not allocate, lock or panic
   is by inspection (generic, statically dispatched, ghost code erased). Verus
   does not check async-signal safety.
-- Unix only. Elsewhere `interrupt_cleanup` does nothing, `acquire` never sees
-  a deferred signal, and `Drop` closes the file and calls `fs::remove_file`
-  without an identity check.
+- Unix only. Elsewhere `interrupt_cleanup` does nothing and `acquire` never
+  sees a deferred signal; no kernel or model covers lock release there.
 
 **Still unverified here**
 - In `PlanRunner::publish`: the index-path lookup, taking the lock and
@@ -1304,8 +1350,7 @@ of that protocol, not about the drivers.
 
 **Size:** 1368 spec / 968 proof / 423 exec lines, none counted as both, and 0
 trusted. By file: `execute.rs` 426/427/194, `index_lock.rs` 339/341/229,
-`index_lock/model.rs` 603/200/0. No file contains the slash-star sequence, so
-the files were counted as they are.
+`index_lock/model.rs` 603/200/0.
 
 ### File checks: fingerprints, path components, comparison and stability
 
@@ -1572,8 +1617,7 @@ latter are about the model.
   the mode, the read-back does not show the source's mode and `Repaired` is
   not reached.
 - A guard's `Drop` runs on early return and unwinding (Verus does not model
-  unwinding); the displaced guard is armed, for `v`, from the move aside on.
-  Drop removals meet the removal contract, but their outcome is discarded and
+  unwinding). Drop removals meet the removal contract, but their outcome is discarded and
   they are in no trace the model theorems take; the ordering chain, each
   publication record and each drop removal are separate traces, and no
   theorem composes them into one run.
@@ -1615,30 +1659,39 @@ latter are about the model.
 **Size:** 1520 spec / 1054 proof / 1003 exec lines, plus 42 counted as both
 proof and exec, and 0 trusted. By file: `replace` 532/415/482, `repair`
 280/124/213, `trace` 188/133/50, `model` 158/208/3, `noreplace` 152/111/90,
-`removal` 141/32/115, `ordering` 69/31/50; `publish.rs` is documentation. No
-file contains the slash-star sequence, so the files were counted as they are.
+`removal` 141/32/115, `ordering` 69/31/50; `publish.rs` is documentation.
 
 ## Trust boundary
 
-`--no-cheating` and the zero "Trusted" count say that `waft-verified` contains no
+`--no-cheating` and the zero "Trusted" count show that `waft-verified` has no
 unproved step of its own. The guarantees above still rest on the following.
 
 **Tools and libraries.**
 
 - Verus and the Z3 solver are sound, and Verus's model of Rust matches the
-  compiler. Verus checks the code with its own Rust 1.100.0 front
+  compiler. Verus reads the code with its own Rust 1.100.0 front
   end; production compiles the same source with Rust 1.90.
-- `vstd`'s specifications of the standard library are right: `Vec` and slice
-  operations, the character view of `&str`, UTF-8 encoding,
-  `char::is_whitespace`, and `sort_by` (used by `groups`). One `vstd` function
-  with an unverified body, `vstd::slice::slice_to_vec`, runs in production
-  (used by `components`).
-- The `vstd` crate the production build compiles (crates.io,
-  `=0.0.0-2026-11-22-0344`) is the `vstd` bundled with the Verus release. This is
-  assumed from the matching release date, not checked.
+- `vstd`'s specifications of the standard library the kernels use are right,
+  among them:
+  - `Vec`, slice indexing, sub-slicing and equality;
+  - `String` (`new`, `push`, `as_str`, `clone`), string literals, `Chars` and
+    the character view of `&str`, and UTF-8 encoding;
+  - `char::is_whitespace` and `char::to_ascii_lowercase`;
+  - integer `wrapping_mul`, `checked_mul` and `checked_add`;
+  - `Option::unwrap_or`;
+  - `sort_by` (used by `groups`).
+
+  One `vstd` function with an unverified body, `vstd::slice::slice_to_vec`,
+  runs in production (used by `components`).
+- `cargo verus verify` compiles the same crates.io `vstd` that the production
+  build uses (`=0.0.0-2026-11-22-0344`), so proofs and production share one `vstd`.
+  That version is the one the pinned Verus release expects.
 
 **Oracles production implements.** Kernels reach effects through traits that
-production implements; Verus trusts each implementation's postconditions.
+production implements, and Verus trusts each implementation's postconditions.
+Traits whose postconditions only record that a call happened are satisfied by
+any implementation. For them, the proofs describe real effects only if each
+method does what it names.
 
 | Trait (kernel module) | Production implementation | What production must get right |
 | --- | --- | --- |
@@ -1662,31 +1715,42 @@ production implements; Verus trusts each implementation's postconditions.
 
 **Conversions and call sites.** Production lowers its own types to kernel
 types (path components, snapshots, enums, error kinds) with exhaustive matches,
-most pinned by unit tests. Each conversion must be faithful. Every kernel
-`requires` clause production relies on is established at its call site; review
-checked this, Verus did not.
+most pinned by unit tests. Each conversion must be faithful.
 
 **Step machines.** Typestates make production feed answers back in the order
-the protocol requires and keep it from building kernel states directly. They
-do not show that the answer came from the named system call: unverified code
+the protocol requires, and keep it from building kernel states directly. They
+do not show that an answer came from the named system call. Unverified code
 could still produce any state, including `Ready` or a `Removed` outcome, from
 made-up answers. Production is trusted to feed real answers.
 
-**Models.** The signal-safety properties of the index lock, the safety theorems
-of the publication protocols, and the agreement of the `git` rule engine with
-Git are proved about hand-written models. The models are reviewed and, where
-noted, pinned by tests against the real implementation, but they are not
-derived from the operating system, Git, or the `ignore` crate.
+**Models.** The following are proved about hand-written models:
+- the signal-safety properties of the index lock;
+- the safety theorems of the publication protocols;
+- where the `git` rule engine agrees with Git and where it does not;
+- the `-z` parser round trips;
+- the index-cache provenance theorem;
+- the `source_kind` label theorem.
 
-**Platform.** Verus runs on Linux, and no kernel code is platform-conditional,
-so every kernel is verified. Production calls the publication, lock-cleanup,
-descriptor-walk, errno-classification and staging-name kernels only on Unix
-(matching [ASSURANCE.md](ASSURANCE.md)'s Windows caveat), and the verbatim-prefix
-kernel only on Windows.
+A few postconditions are stated over hand-written models of `std`. The models
+are reviewed and, where noted, pinned by tests against the real
+implementation, but they are not derived from the operating system, `std`, Git
+or the `ignore` crate.
 
-**Execution.** Verus does not model panics or unwinding. Kernels are proved
-total and panic-free (no arithmetic overflow, no out-of-bounds indexing,
-terminating loops), but production code around them can still panic.
+**Platform.** No kernel code is platform-conditional. The gate, the script and
+CI, runs on Linux x86-64 and verifies every kernel. Production calls some
+kernels only on Unix, matching [ASSURANCE.md](ASSURANCE.md)'s Windows caveat:
+publication, lock cleanup, the descriptor walk, errno classification, the
+staging-name budget and the directory-creation steps. It calls the
+verbatim-prefix kernel only on Windows.
+
+**Execution.** Verus rejects kernel code that could reach an explicit panic
+(`panic!`, `unwrap` of `None`, a failing `assert!`), overflow an integer, index
+out of bounds, or fail to terminate. Every loop and recursive function carries
+a `decreases` clause that Verus checks. Verus does not rule out unwinding from
+library calls that are not marked `no_unwind`, and no kernel function is.
+Growing a `Vec` or `String` (`push`, `slice_to_vec`) can still panic on
+capacity overflow or abort when memory runs out. Postconditions describe
+normal returns only, and production code around the kernels can still panic.
 
 ## Outside the verified boundary
 
@@ -1735,34 +1799,47 @@ rules out wrapping those APIs in trusted specifications.
 
 A proof is only as good as its specification. Every area therefore went through
 an adversarial review after it was written, a fix pass, and an independent audit
-of the fixes, and the merged tree was checked again as a whole.
+of the fixes. The merged tree was then checked as a whole at commit `2d47a55`.
+Two later changes, one shared symlink-policy model and one shared
+path-component model, were reviewed, mutation-tested and audited on their own.
+On the final tree the Verus gate, the test suite and the end-to-end comparison
+pass.
 
 - **Claims audit.** Reviewers checked each claimed theorem against its Verus
   text: the quantifiers, the conditions, and whether it is a postcondition of
   the function production calls or a lemma about a model. Of 317 claims, 284
   were accurate, 32 overstated and 1 wrong. All 33 were corrected, either by
   proving the stronger statement or by correcting the documentation.
-- **Mutation testing.** Reviewers changed kernel code on purpose (flipped
-  conditions, shifted bounds, dropped or duplicated steps, wrong fields or
-  payloads, early returns) and re-ran Verus. A specification that still
-  verifies a wrong program is too weak.
+- **Mutation testing.** Reviewers changed kernel code on purpose and re-ran
+  Verus: flipped conditions, shifted bounds, dropped or duplicated steps, wrong
+  fields or payloads, early returns. A specification that still verifies a
+  wrong program is too weak.
   - First pass: 823 mutants. Verus rejected 780; 14 were equivalent to the
-    original; 27 exposed specification gaps. Every gap was closed and the
-    mutant re-run until Verus rejected it.
-  - After all fixes were merged: 306 fresh mutants across all 43 modules. Verus
-    rejected 300; 3 were equivalent; 3 were pinned only by another module's
-    proofs or by no independent theorem (see below).
-- **Vacuity probes.** An `assert(false)` placed in each lemma and in the
-  functions with preconditions must fail to verify; otherwise the
-  preconditions contradict each other and the proof says nothing. All 77
-  probes on the final tree failed as required.
-- **Seams.** Integration checks covered the places where areas meet. A change
-  to the executor's classification breaks both the executor's proofs and the
-  dry-run tally's proofs. A change to the planner's decision breaks the
-  `list`/`info` prediction theorem. Each clause of the tally-to-executor
-  bridge theorem is needed.
+    original; 27 exposed specification gaps; 2 did not compile. Every gap was
+    closed, and each such mutant was re-run until Verus rejected it.
+  - Resample on the merged tree at `2d47a55`: 306 mutant runs across 43 of the
+    46 modules that contain code. Verus rejected 300; 3 were equivalent; 3 were
+    pinned only by another module's proofs or by no independent theorem (see
+    below).
+- **Vacuity probes.** An `assert(false)` inserted into a proof or a function
+  with preconditions must fail to verify. If it verifies, the preconditions
+  contradict each other and the proof says nothing. The resample placed one or
+  two probes per module, at the newest lemmas and at exec functions with
+  preconditions: 77 in all, and all failed as required. The fixers and auditors
+  probed the lemmas they added or changed.
+- **Seams.** Integration checks covered the places where areas meet.
+  - Changing how the executor classifies an up-to-date entry, a skip, a
+    failure, a dry-run copy or a copy without a destination root breaks both
+    the executor's proofs and the dry-run tally's proofs.
+  - Changing which counter a publication result goes to breaks only the
+    executor's proofs, because the tally theorems use only that it is one of
+    the publication counters.
+  - Changing the planner's outcome (copy, skip or failure) breaks the
+    `list`/`info` prediction theorem. Changing only the kind of copy does not,
+    by design.
+  - Every clause of the tally-to-executor bridge theorem is needed.
 - **Review findings.** 2 high and 10 medium findings were fixed, all
-  independently audited:
+  independently audited. Among them:
   - the executor's ghost log did not record which entry each event was for;
   - the fallback replacement's final verdict was not tied to the names its
     cleanup actually consumed;
@@ -1778,65 +1855,86 @@ Known limits of the specifications themselves:
   decision table they replace: the configuration vocabularies and presets,
   `spec_resolve_roots`, `selection`'s routing table, and the index-lock driver
   effects. A coordinated change to such a table and its code still verifies.
-  Independent theorems in each module pin the properties that matter (for
-  example, the reported error is the highest-precedence violation, and quiet
-  output never hides a failure), and unit tests pin the tables.
+  Independent theorems in each module pin the properties that matter, for
+  example that the reported error is the violated requirement of lowest rank
+  (highest precedence) and that quiet output never hides a failure. Unit tests
+  pin the tables.
 - The index-lock safety theorems are stated in terms of the deferral rule
   itself. Deferring a signal in more states would still satisfy them; it would
   change behavior, not safety.
-- A planner skip reason, and the executor's mapping of a publication result to
-  a counter, are each pinned by another module's theorem rather than their own.
+- Two choices are pinned only from outside their own module:
+  - a planner skip reason is pinned only by `report_view`'s planner theorem,
+    not by the planner's own theorems;
+  - which publication counter the executor assigns is pinned only by the
+    executor's own proofs; the dry-run tally's theorems do not constrain it.
 
 ## Behavior and cost
 
-**Behavior.** The kernels replace production decision code, so they mirror the
-existing behavior exactly, including quirks the area sections name. The one
-intended change: a reachable `unreachable!` panic in `RepoRelPath::normalize`
-(for example, normalizing `../x` against the root `/`) now returns the existing
-"outside the repository root" error.
+**Behavior.** The kernels were written to mirror the decision code they
+replace, including quirks the area sections name. That they match it rests on
+review and testing, not proof. The one intended change: a reachable
+`unreachable!` panic in `RepoRelPath::normalize` now returns the existing
+"outside the repository root" error. One trigger is normalizing `../x` against
+the root `/`.
 
 Evidence that nothing else changed:
 
 - **Test suite.** The full suite passes on every merge.
-- **Per-area differential checks.** Reviewers checked each production diff
-  against the code before the kernels; several ran differential tests of old and
-  new code on hundreds of thousands of generated inputs.
+- **Differential tests.** Reviewers checked each production diff against the
+  code before the kernels. Committed property tests compare old and new code
+  on 512 to 2,048 generated cases each. Reviewers also ran temporary
+  comparisons with up to several hundred thousand cases, for example 505,440
+  context-resolution combinations and 200,000 path-normalization inputs.
 - **End-to-end comparison.** Release builds of `main` and of this branch ran
-  side by side on 153 scenarios with both Git backends:
-  2,321 invocation pairs covering every subcommand and the main flags,
-  rule-file variants, file states, configuration files, environment variables,
-  odd paths and repository layouts. Output, exit status, the destination tree
-  and `git status` were identical in every pair. That run used Linux as root, so
-  permission-denied paths, macOS and Windows were not exercised end to end.
+  side by side at `c25c8b9`, the last code change: 153
+  scenarios, most of them once with each Git backend (267 scenario runs), for
+  2,321 invocation pairs.
+  - The scenarios cover every subcommand and the main flags, rule-file
+    variants, file states, configuration files, environment variables, odd
+    paths and repository layouts.
+  - Every pair matched: output, exit status, the source and destination trees,
+    `git status`, and leftover lock or staging names. Runs that panic or hang
+    do so in both binaries.
+  - The run used Linux as root on ext4 and tmpfs with one Git version. It did
+    not exercise permission-denied paths, macOS or Windows, the
+    exchange-unsupported fallback, real reflinks, concurrent writers or races,
+    signal-time lock cleanup, or a repository at `/` (the intended change).
 
-**Cost.**
+**Cost.** Build times vary by tens of seconds on the shared 4-CPU machine used;
+the times below are from one quiet pair of clean builds.
 
 | | `main` | this branch |
 | --- | --- | --- |
-| Release binary (Linux x86-64) | 6,608,864 bytes | 6,726,400 bytes (+1.8%) |
-| Clean release build, same machine | about 53 s | about 60 s (one extra crate, `waft-verified`, plus `vstd`) |
-| Verus check (`scripts/verus-verify.sh`, 4 CPUs) | none | about 25-30 s, after a one-time verification of `vstd` |
+| Release binary (Linux x86-64) | 6,608,864 bytes | about 6,720,000 bytes (+1.7%) |
+| Clean release build | about 39 s | about 44 s (nine extra crates: `waft-verified`, `vstd`, `verus_builtin`, `verus_builtin_macros`, `verus_state_machines_macros`, `verus_syn`, `verus_prettyplease`, `synstructure`, `convert_case`) |
+| Verus check (`scripts/verus-verify.sh`) | none | about 25-30 s, after a one-time verification of `vstd` |
 
 ## Defects found along the way
 
-Writing specifications for existing behavior surfaced latent defects in waft
-itself: wrong selections in corner cases, odd-filesystem robustness, misleading
-diagnostics, and a few that could lose data or crash. They were reproduced or
-confirmed against the code and reported to the maintainer privately, following
-[SECURITY.md](SECURITY.md). The verification work deliberately left them
-unfixed, so the kernels mirror current behavior. Where a kernel's theorem
-depends on such a behavior, its documentation names it as current behavior.
+Writing specifications for existing behavior surfaced latent defects in waft.
+They range from selection corner cases and odd-filesystem robustness to
+misleading diagnostics, and a few could lose data or crash. Apart from the
+panic noted under [Behavior and cost](#behavior-and-cost), this work did not
+fix them, so behavior stayed unchanged. They were reported to the maintainer
+privately, following [SECURITY.md](SECURITY.md).
 
 ## Maintaining the proofs
 
-- Put a new decision in `waft-verified` inside `verus!`, give the function that
-  production calls a postcondition that fixes its result (or the exact sequence
-  of effects it requests), and call it from `src/`. Prefer no `requires` on
-  functions production calls; when one is needed, make the fact it needs a
-  postcondition of another kernel so production carries it forward.
-- Keep kernel code free of `cfg` conditions, so the Linux Verus run verifies
-  what every platform executes.
-- Keep step-machine fields private and their types free of `Clone` and `Copy`.
-- After changing a specification, check that it still rejects wrong code:
-  mutate the code, re-run Verus, and make sure it fails.
+- **New decisions.** Put a new decision in `waft-verified`, inside `verus!`.
+  Give the function production calls a postcondition that fixes its result, or
+  the exact sequence of effects it requests, and call it from `src/`.
+- **Preconditions.** Prefer no `requires` on functions production calls. When
+  one is needed, make the fact it needs a postcondition of another kernel, so
+  that production carries it forward.
+- **Platforms.** Keep kernel code free of `cfg` conditions, so the Linux Verus
+  run verifies what every platform executes.
+- **Step machines.** Keep step-machine fields private and their types free of
+  `Clone` and `Copy`.
+- **Specification changes.** After changing a specification, check that it
+  still rejects wrong code: mutate the code, re-run Verus, and make sure it
+  fails.
+- **Production glue.** When changing production code that calls
+  `waft_verified`, implements one of its traits, or converts values to or from
+  its types, keep the [Trust boundary](#trust-boundary) and the area section
+  accurate.
 - Run `just check-verus` before pushing; CI runs it too.

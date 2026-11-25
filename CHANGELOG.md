@@ -10,11 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Verus-verified decision kernels in a new workspace crate, `waft-verified`.
   Path normalization, context resolution, configuration policy, validation,
-  the Git backend's decisions, the rule engine, planning, execution and the
-  index lock, file checks, and the Unix publication protocols now decide
-  through machine-checked code. CI verifies the crate with a pinned Verus
-  release (`just check-verus`). [VERIFICATION.md](VERIFICATION.md) records
-  what is proved, what is assumed, and what remains unverified.
+  the Git backend, the rule engine, planning, execution and the index lock,
+  file checks, and the Unix publication protocols now make their main
+  decisions through machine-checked code. CI verifies the crate with a pinned
+  Verus release (`just check-verus`). [VERIFICATION.md](VERIFICATION.md)
+  records what is proved, what is assumed, and what remains unverified, and
+  release archives include it.
 
 ### Fixed
 
