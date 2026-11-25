@@ -12,6 +12,15 @@
 //!   `validation passed`. `copy`, `list` and `info` use
 //!   [`ReportMode::Preflight`]; `waft validate` uses [`ReportMode::Validate`].
 //!
+//! It also decides, for `src/validate.rs` itself:
+//!
+//! - the severity of each problem ([`issue_severity`]) from where it was
+//!   found ([`RuleScope`]) and what it is ([`IssueKind`]);
+//! - what discovery does with a walked entry named like a rule file
+//!   ([`rule_file_action`]): validate it, report a symlinked
+//!   `.worktreeinclude` without reading it, or skip it, under the configured
+//!   symlink policy.
+//!
 //! # Theorems
 //!
 //! - [`error_count`] equals `spec_error_count`, the length of the
@@ -35,15 +44,37 @@
 //!   printed under `--quiet`; a preflight that stops prints only errors; a
 //!   preflight that proceeds prints only warnings (there are no errors to
 //!   print); and `validation passed` is never printed next to an error.
+//! - [`issue_severity`] equals `spec_issue_severity`: a problem is an error
+//!   exactly when it is not a lint finding and it was found in the
+//!   repository. With the gate, `theorem_only_repository_problems_block`
+//!   proves a command stops at validation exactly when some problem is a
+//!   non-lint problem in the repository: lint findings and problems with the
+//!   user's global excludes never block; every in-repository rule-file,
+//!   discovery-walk or boundary-lookup problem does.
+//! - [`rule_file_action`] equals `spec_rule_file_action`, and
+//!   `theorem_symlinks_read_only_when_followed` proves that, for a walk
+//!   entry's own (non-following) file type: a symlinked `.worktreeinclude`
+//!   is read only under `follow`, reported (without being read) exactly under
+//!   `error`, and skipped under `ignore`; a symlink with any other rule-file
+//!   name is never read or reported; and only regular files and followed
+//!   symlinks are ever read.
 //!
 //! # Trust assumptions
 //!
 //! - Production passes the issues' severities in report order, mapping
 //!   `ValidationSeverity::{Warning, Error}` one to one onto [`Severity`]
-//!   (an exhaustive match in `ValidationReport::severities`).
+//!   (an exhaustive match in `ValidationReport::severities`; the reverse map
+//!   is `validation_severity` in `src/validate.rs`, and a unit test checks
+//!   the round trip).
 //! - Production prints `issues[k]` for each `k` in `shown`, in order, with the
 //!   command's format string, then acts on `outcome` and `announce_pass`.
 //!   The message text and the per-command formats stay in production.
+//! - Production tags each problem with the scope it is validating
+//!   (`Repository` for in-repository rule files, `.git/info/exclude`, the
+//!   discovery walk and the gitlinks lookup; `GlobalExcludes` for the global
+//!   excludes file) and the kind of the failing step, and maps
+//!   `config::SymlinkPolicy` one to one onto [`RuleSymlinkPolicy`]. The walk
+//!   entry's file type comes from `walkdir`, which does not follow symlinks.
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
@@ -405,6 +436,190 @@ pub proof fn theorem_visibility(
     if !spec_has_errors(s) {
         assert(!spec_is_error(s[i as int]));
     }
+}
+
+/// Where a validation problem was found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleScope {
+    /// In the repository: its `.gitignore` and `.worktreeinclude` files,
+    /// `.git/info/exclude`, the discovery walk and the nested-repository
+    /// boundaries.
+    Repository,
+    /// The user's global excludes file (`core.excludesFile` or the XDG
+    /// default).
+    GlobalExcludes,
+}
+
+/// What kind of problem a validation issue reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IssueKind {
+    /// The registered gitlinks (nested-repository boundaries) could not be
+    /// read.
+    BoundaryLookup,
+    /// The discovery walk failed on an entry.
+    Walk,
+    /// A symlinked `.worktreeinclude` under `SymlinkPolicy::Error`.
+    SymlinkedWorktreeinclude,
+    /// A rule file could not be read.
+    Unreadable,
+    /// A rule file line is not a valid pattern.
+    InvalidPattern,
+    /// A rule file's patterns could not be compiled together.
+    CompileFailed,
+    /// A lint finding (duplicate or shadowed pattern).
+    Lint,
+}
+
+/// The severity policy: a problem blocks exactly when it is not a lint
+/// finding and it concerns the repository. Lint findings and problems with
+/// the user's global excludes are warnings.
+pub open spec fn spec_issue_severity(scope: RuleScope, kind: IssueKind) -> Severity {
+    if kind is Lint || scope is GlobalExcludes {
+        Severity::Warning
+    } else {
+        Severity::Error
+    }
+}
+
+/// The severity of a validation problem.
+pub fn issue_severity(scope: RuleScope, kind: IssueKind) -> (r: Severity)
+    ensures
+        r == spec_issue_severity(scope, kind),
+{
+    match kind {
+        IssueKind::Lint => Severity::Warning,
+        IssueKind::BoundaryLookup
+        | IssueKind::Walk
+        | IssueKind::SymlinkedWorktreeinclude
+        | IssueKind::Unreadable
+        | IssueKind::InvalidPattern
+        | IssueKind::CompileFailed => match scope {
+            RuleScope::Repository => Severity::Error,
+            RuleScope::GlobalExcludes => Severity::Warning,
+        },
+    }
+}
+
+/// The severities of a sequence of tagged problems.
+pub open spec fn spec_severities(tags: Seq<(RuleScope, IssueKind)>) -> Seq<Severity> {
+    tags.map_values(|t: (RuleScope, IssueKind)| spec_issue_severity(t.0, t.1))
+}
+
+/// Combined with the gate: `copy`, `list` and `info` stop at validation (and
+/// `waft validate` fails) exactly when some problem is a non-lint problem in
+/// the repository. Lint findings and global-excludes problems never stop a
+/// command; every in-repository rule-file, discovery or boundary problem
+/// does.
+pub proof fn theorem_only_repository_problems_block(tags: Seq<(RuleScope, IssueKind)>)
+    ensures
+        spec_has_errors(spec_severities(tags)) <==> exists|i: int|
+            0 <= i < tags.len() && (#[trigger] tags[i]).0 is Repository && !(tags[i].1 is Lint),
+{
+    let s = spec_severities(tags);
+    if spec_has_errors(s) {
+        let i = choose|i: int| 0 <= i < s.len() && spec_is_error(#[trigger] s[i]);
+        assert(tags[i].0 is Repository && !(tags[i].1 is Lint));
+    }
+    if exists|i: int|
+        0 <= i < tags.len() && (#[trigger] tags[i]).0 is Repository && !(tags[i].1 is Lint) {
+        let i = choose|i: int|
+            0 <= i < tags.len() && (#[trigger] tags[i]).0 is Repository && !(tags[i].1 is Lint);
+        assert(spec_is_error(s[i]));
+    }
+}
+
+/// The `.worktreeinclude` symlink policy (`config::SymlinkPolicy`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleSymlinkPolicy {
+    /// A symlinked `.worktreeinclude` is an error.
+    Error,
+    /// A symlinked `.worktreeinclude` is treated as absent.
+    Ignore,
+    /// A symlinked `.worktreeinclude` is read through the link.
+    Follow,
+}
+
+/// What discovery does with one walked entry named like a rule file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuleFileAction {
+    /// Read and validate the file.
+    Validate,
+    /// Report one "symlinked .worktreeinclude files are not allowed" issue
+    /// without reading it.
+    RejectSymlink,
+    /// Neither read nor report.
+    Skip,
+}
+
+/// What discovery does with an entry, given the rule-file name it matched,
+/// the walk's (non-following) file type, and the symlink policy.
+pub open spec fn spec_rule_file_action(
+    is_worktreeinclude: bool,
+    is_symlink: bool,
+    is_file: bool,
+    policy: RuleSymlinkPolicy,
+) -> RuleFileAction {
+    if is_worktreeinclude && is_symlink {
+        match policy {
+            RuleSymlinkPolicy::Error => RuleFileAction::RejectSymlink,
+            RuleSymlinkPolicy::Ignore => RuleFileAction::Skip,
+            RuleSymlinkPolicy::Follow => RuleFileAction::Validate,
+        }
+    } else if is_file {
+        RuleFileAction::Validate
+    } else {
+        RuleFileAction::Skip
+    }
+}
+
+/// Decide what discovery does with one walked entry named like a rule file.
+pub fn rule_file_action(
+    is_worktreeinclude: bool,
+    is_symlink: bool,
+    is_file: bool,
+    policy: RuleSymlinkPolicy,
+) -> (r: RuleFileAction)
+    ensures
+        r == spec_rule_file_action(is_worktreeinclude, is_symlink, is_file, policy),
+{
+    if is_worktreeinclude && is_symlink {
+        match policy {
+            RuleSymlinkPolicy::Error => RuleFileAction::RejectSymlink,
+            RuleSymlinkPolicy::Ignore => RuleFileAction::Skip,
+            RuleSymlinkPolicy::Follow => RuleFileAction::Validate,
+        }
+    } else if is_file {
+        RuleFileAction::Validate
+    } else {
+        RuleFileAction::Skip
+    }
+}
+
+/// Symlinks reach a rule file's contents only through an explicit
+/// `follow` policy for `.worktreeinclude`. For a walk entry's file type,
+/// which describes the entry itself (a symlink is not also a regular file):
+/// a symlinked `.worktreeinclude` is read only under `Follow`, is reported
+/// (once, without reading) only under `Error`, and is silently skipped under
+/// `Ignore`; a symlink with any other rule-file name is never read or
+/// reported; and only a symlink or a regular file is ever read.
+pub proof fn theorem_symlinks_read_only_when_followed(
+    is_worktreeinclude: bool,
+    is_symlink: bool,
+    is_file: bool,
+    policy: RuleSymlinkPolicy,
+)
+    requires
+        !(is_symlink && is_file),
+    ensures
+        ({
+            let a = spec_rule_file_action(is_worktreeinclude, is_symlink, is_file, policy);
+            &&& is_symlink && a is Validate ==> is_worktreeinclude && policy is Follow
+            &&& a is RejectSymlink <==> (is_worktreeinclude && is_symlink && policy is Error)
+            &&& !is_worktreeinclude && is_symlink ==> a is Skip
+            &&& a is Validate ==> is_file || is_symlink
+            &&& !is_symlink ==> (a is Validate <==> is_file)
+        }),
+{
 }
 
 } // verus!

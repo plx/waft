@@ -9,7 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ignore::gitignore::GitignoreBuilder;
-use waft_verified::validation::{GateOutcome, ReportMode};
+use waft_verified::validation::{
+    GateOutcome, IssueKind, ReportMode, RuleFileAction, RuleScope, RuleSymlinkPolicy, Severity,
+};
 
 use crate::config::SymlinkPolicy;
 use crate::error::{Error, Result};
@@ -27,7 +29,7 @@ pub fn validate(
         Ok(gitlinks) => gitlinks,
         Err(error) => {
             report.issues.push(ValidationIssue {
-                severity: ValidationSeverity::Error,
+                severity: severity_of(RuleScope::Repository, IssueKind::BoundaryLookup),
                 file: ctx.source_root.clone(),
                 line: None,
                 message: format!("cannot determine nested repository boundaries: {error}"),
@@ -41,7 +43,7 @@ pub fn validate(
         &ctx.source_root,
         ".gitignore",
         ctx.core_ignore_case,
-        ValidationSeverity::Error,
+        RuleScope::Repository,
         symlink_policy,
         &gitlinks,
         &mut report,
@@ -52,7 +54,7 @@ pub fn validate(
         &ctx.source_root,
         ".worktreeinclude",
         ctx.core_ignore_case,
-        ValidationSeverity::Error,
+        RuleScope::Repository,
         symlink_policy,
         &gitlinks,
         &mut report,
@@ -65,7 +67,7 @@ pub fn validate(
             &exclude_path,
             &ctx.source_root,
             ctx.core_ignore_case,
-            ValidationSeverity::Error,
+            RuleScope::Repository,
             &mut report,
         );
     }
@@ -78,7 +80,7 @@ pub fn validate(
             &global_path,
             &ctx.source_root,
             ctx.core_ignore_case,
-            ValidationSeverity::Warning,
+            RuleScope::GlobalExcludes,
             &mut report,
         );
     }
@@ -122,12 +124,36 @@ pub(crate) fn severity_label(severity: ValidationSeverity) -> &'static str {
     }
 }
 
+/// The severity the verified policy assigns to a problem of `kind` found in
+/// `scope`: errors for every non-lint problem in the repository, warnings for
+/// lint findings and for the user's global excludes.
+fn severity_of(scope: RuleScope, kind: IssueKind) -> ValidationSeverity {
+    validation_severity(waft_verified::validation::issue_severity(scope, kind))
+}
+
+/// The production severity for a kernel severity.
+fn validation_severity(severity: Severity) -> ValidationSeverity {
+    match severity {
+        Severity::Warning => ValidationSeverity::Warning,
+        Severity::Error => ValidationSeverity::Error,
+    }
+}
+
+/// The kernel's view of the `.worktreeinclude` symlink policy.
+fn rule_symlink_policy(policy: SymlinkPolicy) -> RuleSymlinkPolicy {
+    match policy {
+        SymlinkPolicy::Follow => RuleSymlinkPolicy::Follow,
+        SymlinkPolicy::Ignore => RuleSymlinkPolicy::Ignore,
+        SymlinkPolicy::Error => RuleSymlinkPolicy::Error,
+    }
+}
+
 /// Walk the repo tree and validate all files named `filename`.
 fn discover_and_validate(
     root: &Path,
     filename: &str,
     case_insensitive: bool,
-    severity: ValidationSeverity,
+    scope: RuleScope,
     symlink_policy: SymlinkPolicy,
     gitlinks: &HashSet<String>,
     report: &mut ValidationReport,
@@ -138,7 +164,7 @@ fn discover_and_validate(
             Ok(e) => e,
             Err(e) => {
                 report.issues.push(ValidationIssue {
-                    severity,
+                    severity: severity_of(scope, IssueKind::Walk),
                     file: root.to_path_buf(),
                     line: None,
                     message: format!("error walking directory: {e}"),
@@ -154,34 +180,32 @@ fn discover_and_validate(
         let path = entry.path();
 
         // walkdir does not follow symlinks by default, so symlink entries
-        // have is_symlink()=true and is_file()=false. Handle them explicitly
-        // before falling through to the regular-file validation path.
-        if filename == ".worktreeinclude" && entry.file_type().is_symlink() {
-            match symlink_policy {
-                SymlinkPolicy::Error => {
-                    report.issues.push(ValidationIssue {
-                        severity: ValidationSeverity::Error,
-                        file: path.to_path_buf(),
-                        line: None,
-                        message: "symlinked .worktreeinclude files are not allowed".to_string(),
-                    });
-                    continue;
-                }
-                SymlinkPolicy::Ignore => {
-                    // Treat as if absent — neither validate nor report.
-                    continue;
-                }
-                SymlinkPolicy::Follow => {
-                    // Read through the symlink. fs::read_to_string follows
-                    // symlinks by default, so validate_ignore_file works.
-                    validate_ignore_file(path, root, case_insensitive, severity, report);
-                    continue;
-                }
+        // have is_symlink()=true and is_file()=false. The verified kernel
+        // decides what each entry gets: a symlinked .worktreeinclude follows
+        // the symlink policy (reported without being read, treated as absent,
+        // or read through the link); any other entry is validated only when
+        // it is a regular file.
+        let file_type = entry.file_type();
+        match waft_verified::validation::rule_file_action(
+            filename == ".worktreeinclude",
+            file_type.is_symlink(),
+            file_type.is_file(),
+            rule_symlink_policy(symlink_policy),
+        ) {
+            RuleFileAction::RejectSymlink => {
+                report.issues.push(ValidationIssue {
+                    severity: severity_of(scope, IssueKind::SymlinkedWorktreeinclude),
+                    file: path.to_path_buf(),
+                    line: None,
+                    message: "symlinked .worktreeinclude files are not allowed".to_string(),
+                });
             }
-        }
-
-        if entry.file_type().is_file() {
-            validate_ignore_file(path, root, case_insensitive, severity, report);
+            // A followed symlink is read through: fs::read_to_string follows
+            // symlinks by default, so validate_ignore_file works.
+            RuleFileAction::Validate => {
+                validate_ignore_file(path, root, case_insensitive, scope, report);
+            }
+            RuleFileAction::Skip => {}
         }
     }
 }
@@ -191,14 +215,14 @@ fn validate_ignore_file(
     path: &Path,
     root: &Path,
     case_insensitive: bool,
-    severity: ValidationSeverity,
+    scope: RuleScope,
     report: &mut ValidationReport,
 ) {
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
             report.issues.push(ValidationIssue {
-                severity,
+                severity: severity_of(scope, IssueKind::Unreadable),
                 file: path.to_path_buf(),
                 line: None,
                 message: format!("cannot read file: {e}"),
@@ -224,7 +248,7 @@ fn validate_ignore_file(
 
         if let Err(err) = builder.add_line(Some(path.to_path_buf()), line_text) {
             report.issues.push(ValidationIssue {
-                severity,
+                severity: severity_of(scope, IssueKind::InvalidPattern),
                 file: path.to_path_buf(),
                 line: Some(line_1based),
                 message: format!("invalid pattern: {err}"),
@@ -235,7 +259,7 @@ fn validate_ignore_file(
     // Try to build the matcher to catch any aggregate errors
     if let Err(err) = builder.build() {
         report.issues.push(ValidationIssue {
-            severity,
+            severity: severity_of(scope, IssueKind::CompileFailed),
             file: path.to_path_buf(),
             line: None,
             message: format!("failed to compile patterns: {err}"),
@@ -243,7 +267,7 @@ fn validate_ignore_file(
     }
 
     // Run lint-style checks for suspicious-but-legal patterns
-    check_suspicious_patterns(path, &content, report);
+    check_suspicious_patterns(path, &content, scope, report);
 }
 
 /// Lint-style checks for suspicious-but-legal patterns.
@@ -257,7 +281,13 @@ fn validate_ignore_file(
 /// is decided by the verified `waft_verified::lint::lint_lines` on the
 /// trimmed lines; this function only formats its verdicts, line by line,
 /// the duplicate warning before the shadow warning.
-fn check_suspicious_patterns(path: &Path, content: &str, report: &mut ValidationReport) {
+fn check_suspicious_patterns(
+    path: &Path,
+    content: &str,
+    scope: RuleScope,
+    report: &mut ValidationReport,
+) {
+    let severity = severity_of(scope, IssueKind::Lint);
     let lines: Vec<&str> = content.lines().map(str::trim).collect();
     let line_bytes: Vec<&[u8]> = lines.iter().map(|line| line.as_bytes()).collect();
     let verdicts = waft_verified::lint::lint_lines(&line_bytes);
@@ -268,7 +298,7 @@ fn check_suspicious_patterns(path: &Path, content: &str, report: &mut Validation
         // --- Duplicate detection ---
         if let Some(first) = verdict.duplicate_of {
             report.issues.push(ValidationIssue {
-                severity: ValidationSeverity::Warning,
+                severity,
                 file: path.to_path_buf(),
                 line: Some(line_1based),
                 message: format!(
@@ -283,7 +313,7 @@ fn check_suspicious_patterns(path: &Path, content: &str, report: &mut Validation
         // The kernel proves `dir_line < line_num`, so the index is in range.
         if let Some(dir_line) = verdict.shadowed_by {
             report.issues.push(ValidationIssue {
-                severity: ValidationSeverity::Warning,
+                severity,
                 file: path.to_path_buf(),
                 line: Some(line_1based),
                 message: format!(
@@ -948,7 +978,12 @@ mod tests {
 
     fn kernel_suspicious_patterns(content: &str) -> Vec<(usize, String)> {
         let mut report = ValidationReport::default();
-        check_suspicious_patterns(Path::new("rules"), content, &mut report);
+        check_suspicious_patterns(
+            Path::new("rules"),
+            content,
+            RuleScope::Repository,
+            &mut report,
+        );
         report
             .issues
             .into_iter()
@@ -1059,6 +1094,93 @@ mod tests {
         };
         assert!(report_preflight(&warnings_only, false).is_ok());
         assert!(report_preflight(&warnings_only, true).is_ok());
+    }
+
+    /// A symlinked `.worktreeinclude` whose target holds an invalid pattern
+    /// is reported unread under `error`, absent under `ignore`, and read
+    /// through under `follow`; a symlinked `.gitignore` is never read.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_rule_files_follow_the_policy() {
+        let dir = make_repo();
+        let target = dir.path().join("target.rules");
+        fs::write(&target, "\\\n").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join(".worktreeinclude")).unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join(".gitignore")).unwrap();
+        let ctx = make_ctx(&dir);
+        let git = MockGit::new(None);
+
+        let messages = |policy| -> Vec<String> {
+            validate(&ctx, &git, policy)
+                .issues
+                .into_iter()
+                .map(|issue| format!("{:?} {:?} {}", issue.severity, issue.line, issue.message))
+                .collect()
+        };
+        assert_eq!(
+            messages(SymlinkPolicy::Error),
+            vec!["Error None symlinked .worktreeinclude files are not allowed".to_string()]
+        );
+        assert!(messages(SymlinkPolicy::Ignore).is_empty());
+        let followed = messages(SymlinkPolicy::Follow);
+        assert!(
+            !followed.is_empty()
+                && followed
+                    .iter()
+                    .all(|m| m.starts_with("Error ") && !m.contains("symlinked")),
+            "{followed:?}"
+        );
+    }
+
+    #[test]
+    fn kernel_severity_conversions_round_trip() {
+        for severity in [Severity::Warning, Severity::Error] {
+            let report = ValidationReport {
+                issues: vec![issue(validation_severity(severity))],
+            };
+            assert_eq!(report.severities(), vec![severity]);
+        }
+    }
+
+    #[test]
+    fn symlink_policy_maps_to_its_namesake() {
+        assert_eq!(
+            rule_symlink_policy(SymlinkPolicy::Follow),
+            RuleSymlinkPolicy::Follow
+        );
+        assert_eq!(
+            rule_symlink_policy(SymlinkPolicy::Ignore),
+            RuleSymlinkPolicy::Ignore
+        );
+        assert_eq!(
+            rule_symlink_policy(SymlinkPolicy::Error),
+            RuleSymlinkPolicy::Error
+        );
+    }
+
+    #[test]
+    fn severity_policy_table() {
+        use IssueKind::*;
+        for kind in [
+            BoundaryLookup,
+            Walk,
+            SymlinkedWorktreeinclude,
+            Unreadable,
+            InvalidPattern,
+            CompileFailed,
+        ] {
+            assert_eq!(
+                severity_of(RuleScope::Repository, kind),
+                ValidationSeverity::Error
+            );
+            assert_eq!(
+                severity_of(RuleScope::GlobalExcludes, kind),
+                ValidationSeverity::Warning
+            );
+        }
+        for scope in [RuleScope::Repository, RuleScope::GlobalExcludes] {
+            assert_eq!(severity_of(scope, Lint), ValidationSeverity::Warning);
+        }
     }
 
     #[test]
