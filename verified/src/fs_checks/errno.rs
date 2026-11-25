@@ -14,7 +14,10 @@
 //!   order, duplicates (on Linux `ENOTSUP == EOPNOTSUPP`) or number.
 //! - `theorem_unlisted_errno_never_falls_back`: an errno different from every
 //!   table entry (for example `EEXIST`, `ENOENT`, `EACCES`, `EXDEV`) is never
-//!   classified as unsupported.
+//!   classified as unsupported. This only spells out the `false` half of
+//!   `is_listed`'s postcondition (it follows from the definition of
+//!   `Seq::contains`) and adds no assurance of its own; which errnos belong
+//!   in the table is a trust assumption (below).
 //!
 //! # Trust assumptions
 //!

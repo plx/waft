@@ -19,27 +19,37 @@
 //!   strategy table: `SimpleCopy` never attempts a reflink on any platform,
 //!   `CowCopy` always does, and `Auto` does exactly where the platform default
 //!   is a reflink (macOS) — `theorem_strategy_table`.
-//! - `TempNameAttempts::try_another` grants an attempt iff fewer than
-//!   [`TEMP_NAME_ATTEMPTS`] (128) were granted, and counts it; the count never
-//!   exceeds 128 (type invariant), so `create_anchored_temp` issues at most
-//!   128 exclusive creates and its loop terminates.
+//! - `TempNameAttempts::try_another`, on a counter that has answered `calls`
+//!   calls since `TempNameAttempts::new`, grants an attempt iff `calls < 128`:
+//!   a fresh counter grants exactly its first 128 calls and refuses every
+//!   later one. The attempts granted so far are `min(calls, 128)`
+//!   (`granted_after`, kept by the type invariant). The budget is stated as
+//!   the literal 128 in these postconditions, so [`TEMP_NAME_ATTEMPTS`] cannot
+//!   change without the specification changing with it.
 //! - `creates_missing_directory` holds iff the walk may create (`create`) and
-//!   `openat` reported `ENOENT`; any other failure ends the walk with that
-//!   error.
-//! - `after_mkdir`: `Created` and `AlreadyExists` (a lost race) both continue
-//!   with a re-open of the component through `openat(O_NOFOLLOW |
-//!   O_DIRECTORY)` — what `mkdirat` made is never trusted directly — and the
-//!   new directory and its parent are synced iff this run's `mkdirat` created
-//!   it; any other `mkdirat` error ends the walk with that error.
+//!   `openat` reported `ENOENT`.
+//! - `after_mkdir` is `Ok(true)` iff `mkdirat` answered `Created`, `Ok(false)`
+//!   iff it answered `AlreadyExists` (a lost race), and `Err(e)` iff it
+//!   answered `Failed(e)`.
 //!
 //! # Trust assumptions
 //!
 //! - Production maps `CopyStrategy` to [`Strategy`] variant for variant and
 //!   passes `cfg!(target_os = "macos")` as the platform preference.
-//! - Production calls `try_another` once before each exclusive create and
-//!   retries only when that create failed with `EEXIST`.
+//! - Production creates one fresh `TempNameAttempts` per
+//!   `create_anchored_temp` call, calls `try_another` once before each
+//!   exclusive create, and retries only when that create failed with
+//!   `EEXIST`. With the `try_another` postconditions above, this bounds each
+//!   call to at most 128 exclusive creates and makes its loop terminate;
+//!   neither bound is proved about production itself.
 //! - Production classifies `mkdirat`'s answer faithfully (`Ok`, `EEXIST`,
-//!   other) and re-opens the component whenever `after_mkdir` returns `Ok`.
+//!   other) and acts on the kernel's answers as follows, none of which the
+//!   kernel proves: when `creates_missing_directory` is false, any `openat`
+//!   failure ends the walk with that error; when `after_mkdir` is `Ok`, the
+//!   component is re-opened through `openat(O_NOFOLLOW | O_DIRECTORY)` (what
+//!   `mkdirat` made is never trusted directly), and on `Ok(true)` the new
+//!   directory and its parent are synced; on `Err(e)` the walk ends with
+//!   `e`.
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
@@ -88,15 +98,27 @@ pub proof fn theorem_strategy_table(platform_prefers_reflink: bool)
 /// How many fresh staging names `create_anchored_temp` tries.
 pub const TEMP_NAME_ATTEMPTS: u32 = 128;
 
+/// The attempts a fresh counter has granted after answering `calls` calls
+/// of `try_another`: one per call until 128 were granted, then none.
+pub open spec fn granted_after(calls: nat) -> nat {
+    if calls < 128 {
+        calls
+    } else {
+        128
+    }
+}
+
 /// The attempts granted so far to `create_anchored_temp`.
 pub struct TempNameAttempts {
     made: u32,
+    #[allow(dead_code)]
+    calls: Ghost<nat>,
 }
 
 impl TempNameAttempts {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        self.made <= TEMP_NAME_ATTEMPTS
+        self.made as nat == granted_after(self.calls@)
     }
 
     /// Attempts granted so far.
@@ -104,32 +126,43 @@ impl TempNameAttempts {
         self.made as nat
     }
 
-    /// No attempt granted yet.
-    pub fn new() -> (r: TempNameAttempts)
-        ensures
-            r.made() == 0,
-    {
-        TempNameAttempts { made: 0 }
+    /// Calls of `try_another` answered so far.
+    pub closed spec fn calls(&self) -> nat {
+        self.calls@
     }
 
-    /// Grant one more attempt, unless the budget is spent.
+    /// No attempt asked for or granted yet.
+    pub fn new() -> (r: TempNameAttempts)
+        ensures
+            r.calls() == 0,
+            r.made() == 0,
+    {
+        TempNameAttempts { made: 0, calls: Ghost(0) }
+    }
+
+    /// Grant one more attempt, unless the budget is spent: the call is
+    /// granted iff fewer than 128 calls were answered before it.
     pub fn try_another(&mut self) -> (r: bool)
         ensures
-            r == (old(self).made() < TEMP_NAME_ATTEMPTS),
+            r == (old(self).calls() < 128),
+            final(self).calls() == old(self).calls() + 1,
+            final(self).made() == granted_after(final(self).calls()),
             final(self).made() == if r {
                 old(self).made() + 1
             } else {
                 old(self).made()
             },
-            final(self).made() <= TEMP_NAME_ATTEMPTS,
+            final(self).made() <= 128,
     {
         proof {
             use_type_invariant(&*self);
         }
+        let ghost calls = self.calls@ + 1;
         if self.made < TEMP_NAME_ATTEMPTS {
-            *self = TempNameAttempts { made: self.made + 1 };
+            *self = TempNameAttempts { made: self.made + 1, calls: Ghost(calls) };
             true
         } else {
+            *self = TempNameAttempts { made: self.made, calls: Ghost(calls) };
             false
         }
     }
@@ -138,6 +171,7 @@ impl TempNameAttempts {
 impl Default for TempNameAttempts {
     fn default() -> (r: TempNameAttempts)
         ensures
+            r.calls() == 0,
             r.made() == 0,
     {
         TempNameAttempts::new()
