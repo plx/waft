@@ -20,26 +20,26 @@
 //!
 //! # Theorems
 //!
-//! - `explain` returns [`spec_explain`] (the deepest matching file's
+//! - `explain` returns `spec_explain` (the deepest matching file's
 //!   verdict, overridden by the first cross-file ancestor selection when it
 //!   is a negation), and `explain_root_only` returns `spec_explain` for the
 //!   root file alone. Both prove their exact query sequence
-//!   ([`explain_trace`], [`file_trace`]): the matcher queries are the old
+//!   (`explain_trace`, `file_trace`): the matcher queries are the old
 //!   code's, in the old order, and every query is in range.
-//! - [`theorem_no_match_iff_no_file_matches`]: `NoMatch` exactly when no
+//! - `theorem_no_match_iff_no_file_matches`: `NoMatch` exactly when no
 //!   applicable rule file matches the path.
-//! - [`theorem_deeper_file_wins`] and
-//!   [`theorem_deepest_selection_decides`]: once a deeper file matches, the
+//! - `theorem_deeper_file_wins` and
+//!   `theorem_deepest_selection_decides`: once a deeper file matches, the
 //!   path verdicts of shallower files are irrelevant.
-//! - [`theorem_negation_needs_no_selected_ancestor`] (caveat soundness): a
+//! - `theorem_negation_needs_no_selected_ancestor` (caveat soundness): a
 //!   negation deselects only when it is the deepest file's verdict and no
 //!   applicable file selects any ancestor directory; and
-//!   [`theorem_negation_deselects_without_selected_ancestor`] (caveat
+//!   `theorem_negation_deselects_without_selected_ancestor` (caveat
 //!   completeness): otherwise such a negation does deselect.
-//! - [`theorem_verdict_provenance`]: the reported file and witness come from
+//! - `theorem_verdict_provenance`: the reported file and witness come from
 //!   a query that really produced them, with the exact tie-break order that
 //!   `info` and `list -v` print.
-//! - [`theorem_single_file_explain`] (root-only reuse): with one rule file
+//! - `theorem_single_file_explain` (root-only reuse): with one rule file
 //!   the cross-file caveat is a no-op, so the root-only engine and the `git`
 //!   engine agree on a repository whose only rule file is the root one.
 //!
@@ -302,6 +302,23 @@ pub open spec fn spec_cross_file<W>(ai: spec_fn(usize, usize) -> Option<W>, n: u
 /// The verdict of the `git` engine: the deepest matching file's verdict,
 /// except that a negation never deselects a path when any applicable file
 /// selects one of its ancestor directories.
+///
+/// This mirrors current behavior, including where it departs from Git
+/// (each is proved on a concrete input in [`super::reference`]):
+///
+/// - Scope: an ancestor selection counts even when the ancestor lies at or
+///   above the selecting file's own directory, which Git never consults for
+///   that file (`*` plus `!secret.key` in `app/config` still selects
+///   `app/config/secret.key`).
+/// - Isolation: the cross-file caveat asks each file about an ancestor in
+///   isolation, so a deeper file re-including that directory (`!b/`) does
+///   not stop a shallower `a/b/` from selecting `a/b/x`.
+/// - Ancestor negations as path verdicts: a file's path verdict comes from
+///   `matched_path_or_any_parents`, so a re-included *directory* (`!x/`) is
+///   that file's verdict for every path below it and, being deeper, beats a
+///   shallower selection of the path itself (`*.env`).
+/// - The empty path: `matched_path_or_any_parents` also tests the rule
+///   file's own directory, so a bare `/` line selects every path.
 pub open spec fn spec_explain<W>(
     pm: spec_fn(usize) -> Option<(MatchKind, W)>,
     ai: spec_fn(usize, usize) -> Option<W>,
@@ -762,7 +779,7 @@ pub fn explain<W, O: RuleMatchOracle<W>>(o: &mut O) -> (v: Verdict<W>)
 /// Evaluate only rule file 0, the repository-root file (the
 /// `claude-2026-04` engine's `evaluate_root_only_path`).
 ///
-/// [`theorem_single_file_explain`] shows that this is [`explain`]'s verdict
+/// `theorem_single_file_explain` shows that this is [`explain`]'s verdict
 /// for the root file alone: with one rule file the cross-file caveat never
 /// changes the result, so it is not run (and its queries are not issued).
 pub fn explain_root_only<W, O: RuleMatchOracle<W>>(o: &mut O) -> (v: Verdict<W>)

@@ -17,15 +17,15 @@
 //!
 //! # Theorems
 //!
-//! - `path_excluded` returns [`spec_excluded`]: the first level with a
+//! - `path_excluded` returns `spec_excluded`: the first level with a
 //!   verdict exists and is a selection. Its query log shows it asks the
 //!   levels in order, path first, and stops at the first verdict.
-//! - [`theorem_excluded_without_negation`]: when no level matches a negated
+//! - `theorem_excluded_without_negation`: when no level matches a negated
 //!   pattern, a candidate is excluded iff *some* level is selected.
-//! - [`theorem_excluded_directory_excludes_subtree`]: if a directory is
+//! - `theorem_excluded_directory_excludes_subtree`: if a directory is
 //!   excluded, so is every path below it unless a negated pattern matches the
 //!   path or a directory between the two.
-//! - [`lemma_quirk_negated_extra_reincludes_guarded_path`] (current
+//! - `lemma_quirk_negated_extra_reincludes_guarded_path` (current
 //!   behavior, not fixed): with the built-in `.claude/` and an extra
 //!   `!.claude/settings.json`, the directory `.claude` is excluded but
 //!   `.claude/settings.json` is kept. Extras are added after the built-ins,
@@ -98,6 +98,11 @@ pub open spec fn is_first_level_match(lm: spec_fn(usize) -> Option<MatchKind>, k
 }
 
 /// A candidate is excluded iff the first level with a verdict is selected.
+///
+/// Current behavior, kept: because the path's own level is asked first, a
+/// negated `extra_excludes` pattern matching the path keeps it even inside a
+/// directory a built-in pattern excludes
+/// (`lemma_quirk_negated_extra_reincludes_guarded_path`).
 pub open spec fn spec_excluded(lm: spec_fn(usize) -> Option<MatchKind>, k: usize) -> bool {
     exists|l: usize| is_first_level_match(lm, k, l) && lm(l) == Some(MatchKind::Ignore)
 }
@@ -293,7 +298,7 @@ pub open spec fn quirk_claude_dir_levels() -> spec_fn(usize) -> Option<MatchKind
 /// `.claude` is excluded, `.claude/settings.json` sits one level below it,
 /// and it is kept, because the path's own negated match is found before the
 /// walk reaches `.claude`. (So the "unless a negation matches" clause of
-/// [`theorem_excluded_directory_excludes_subtree`] cannot be dropped.)
+/// `theorem_excluded_directory_excludes_subtree` cannot be dropped.)
 pub proof fn lemma_quirk_negated_extra_reincludes_guarded_path()
     ensures
         spec_excluded(quirk_claude_dir_levels(), 2),

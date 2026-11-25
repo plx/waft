@@ -16,7 +16,7 @@
 //! ancestor's absolute path through unchanged because its byte-prefix strip
 //! fails. Git never consults those answers; waft does.
 //!
-//! [`model_pm`] and [`model_ai`] are the oracle answers this model
+//! `model_pm` and `model_ai` are the oracle answers this model
 //! induces: `matched_path_or_any_parents` walks from the path up to the
 //! rule file's own directory and returns the first match, and an ancestor
 //! query asks one level. This correspondence is a trusted description of
@@ -26,19 +26,19 @@
 //!
 //! # Results
 //!
-//! - [`theorem_root_file_agrees_with_git`]: with only the root rule file
+//! - `theorem_root_file_agrees_with_git`: with only the root rule file
 //!   (the `claude-2026-04` engine, or the `git` engine without nested
 //!   files) waft selects a path exactly when Git would, unless the root file
 //!   matches the repository root itself (a bare `/` line).
-//! - [`theorem_without_negations_agrees_with_git`]: with any number of
+//! - `theorem_without_negations_agrees_with_git`: with any number of
 //!   nested rule files, waft selects a path exactly when Git would, provided
 //!   no rule file has a negated verdict and none matches its own directory.
 //! - Four lemmas exhibit concrete inputs on which the current `git` engine
 //!   and Git disagree. They document current behavior; they are not fixed:
-//!   [`lemma_quirk_nested_file_reaches_outside_its_directory`],
-//!   [`lemma_quirk_cross_file_caveat_ignores_deeper_reinclusion`],
-//!   [`lemma_quirk_ancestor_negation_shadows_shallower_selection`] and
-//!   [`lemma_quirk_bare_slash_selects_everything`].
+//!   `lemma_quirk_nested_file_reaches_outside_its_directory`,
+//!   `lemma_quirk_cross_file_caveat_ignores_deeper_reinclusion`,
+//!   `lemma_quirk_ancestor_negation_shadows_shallower_selection` and
+//!   `lemma_quirk_bare_slash_selects_everything`.
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
@@ -201,7 +201,7 @@ pub open spec fn root_depth() -> spec_fn(usize) -> int {
 /// With only the repository-root rule file, waft's verdict selects a path
 /// exactly when Git would, provided the root file does not select the
 /// repository root itself (which only a bare `/` line does; see
-/// [`lemma_quirk_bare_slash_selects_everything`]). This covers the
+/// `lemma_quirk_bare_slash_selects_everything`). This covers the
 /// `claude-2026-04` engine, which reads only the root file, and the `git`
 /// engine for repositories without nested rule files.
 pub proof fn theorem_root_file_agrees_with_git(own: spec_fn(usize, int) -> Option<MatchKind>, len: int)

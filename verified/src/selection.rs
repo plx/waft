@@ -20,23 +20,23 @@
 //!
 //! # Theorems
 //!
-//! - `selection_source`: [`theorem_when_missing_only_without_rule_file`]
+//! - `selection_source`: `theorem_when_missing_only_without_rule_file`
 //!   (`when_missing` is consulted iff no rule file exists) and
-//!   [`theorem_rule_file_engages_rules`] (a rule file always routes through
+//!   `theorem_rule_file_engages_rules` (a rule file always routes through
 //!   the rules, never through the fallback).
-//! - `rule_file_consulted` returns [`spec_rule_file_consulted`] and its
+//! - `rule_file_consulted` returns `spec_rule_file_consulted` and its
 //!   probe log shows the symlink check runs only under the `ignore` policy
 //!   and only for a regular file;
-//!   [`theorem_ignore_policy_never_consults_a_symlink`].
+//!   `theorem_ignore_policy_never_consults_a_symlink`.
 //! - The wt gate and the per-path gate agree except for a symlink whose
 //!   target is not a regular file under `follow`/`error`, which only wt
-//!   reads ([`theorem_wt_gate_differs_only_for_non_regular_symlink_targets`],
-//!   [`lemma_quirk_wt_reads_symlink_to_non_regular_file`]; current
+//!   reads (`theorem_wt_gate_differs_only_for_non_regular_symlink_targets`,
+//!   `lemma_quirk_wt_reads_symlink_to_non_regular_file`; current
 //!   behavior, not fixed: a symlink to `/dev/zero` or a FIFO is read).
-//! - `diagnose_empty_selection` returns [`spec_diagnosis`] with an exact
+//! - `diagnose_empty_selection` returns `spec_diagnosis` with an exact
 //!   probe log (the expensive, fallible `follow` walk runs only for an empty
 //!   blank selection under the `ignore` policy), and
-//!   [`theorem_diagnosis_soundness`] states the observed facts behind every
+//!   `theorem_diagnosis_soundness` states the observed facts behind every
 //!   reported cause.
 //!
 //! # Trust assumptions

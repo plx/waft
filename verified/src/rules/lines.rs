@@ -22,17 +22,17 @@
 //!
 //! # Theorems
 //!
-//! - Each function returns its declarative spec ([`trim_end_len`],
-//!   [`spec_rule_line_pattern_len`], [`spec_wt_target`]); the lookup returns
+//! - Each function returns its declarative spec (`trim_end_len`,
+//!   `spec_rule_line_pattern_len`, `spec_wt_target`); the lookup returns
 //!   the greatest matching index and `None` only when no line matches.
-//! - [`theorem_wt_targets_are_literal`]: a wt target comes only from a
+//! - `theorem_wt_targets_are_literal`: a wt target comes only from a
 //!   trimmed line starting with `!`, holds no glob metacharacter, and drops
 //!   at most one `/`; comments, blank lines and positive patterns never
 //!   yield one.
-//! - [`lemma_quirk_indented_hash_is_a_pattern_but_a_wt_comment`]: the two
+//! - `lemma_quirk_indented_hash_is_a_pattern_but_a_wt_comment`: the two
 //!   grammars disagree on an indented `#` (current behavior, by design of
 //!   each engine, recorded as an inconsistency).
-//! - [`lemma_quirk_escaped_trailing_space_loses_provenance`]: for a line
+//! - `lemma_quirk_escaped_trailing_space_loses_provenance`: for a line
 //!   ending in an escaped space, the recorded text differs from the glob's
 //!   original text (as `ignore` keeps it), so the lookup fails and `info`
 //!   reports line 0 (current behavior, not fixed).
@@ -41,7 +41,7 @@
 //!
 //! `str::lines` splits the file (production), `str::trim`/`trim_end` strip
 //! `char::is_whitespace` (vstd's specification of it lists the Unicode
-//! White_Space code points), and [`ignore_original_text`] is a hand-written
+//! White_Space code points), and `ignore_original_text` is a hand-written
 //! model of `ignore` 0.4.33's `GitignoreBuilder::add_line`, used only to
 //! state the provenance quirk. Production converts each line to its chars
 //! and builds the recorded or target `String` from the returned range.
