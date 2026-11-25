@@ -30,6 +30,9 @@
 //!   (the `claude-2026-04` engine, or the `git` engine without nested
 //!   files) waft selects a path exactly when Git would, unless the root file
 //!   matches the repository root itself (a bare `/` line).
+//! - [`theorem_without_negations_agrees_with_git`]: with any number of
+//!   nested rule files, waft selects a path exactly when Git would, provided
+//!   no rule file has a negated verdict and none matches its own directory.
 //! - Four lemmas exhibit concrete inputs on which the current `git` engine
 //!   and Git disagree. They document current behavior; they are not fixed:
 //!   [`lemma_quirk_nested_file_reaches_outside_its_directory`],
@@ -258,6 +261,100 @@ pub proof fn theorem_root_file_agrees_with_git(own: spec_fn(usize, int) -> Optio
                 assert(git_level_verdict(own, depth, 1, k) == Some(MatchKind::Ignore));
             }
         },
+    }
+}
+
+/// A walk over a range with a verdict finds one.
+pub proof fn lemma_walk_up_finds(own: spec_fn(usize, int) -> Option<MatchKind>, i: usize, k: int, lo: int, l: int)
+    requires
+        lo <= l <= k,
+        own(i, l) is Some,
+    ensures
+        walk_up(own, i, k, lo) is Some,
+{
+    if walk_up(own, i, k, lo) is None {
+        lemma_walk_up_none(own, i, k, lo);
+    }
+}
+
+/// Without negations, any number of nested rule files agrees with Git:
+/// when no rule file has a negated verdict at any level and none matches
+/// its own directory (no bare `/` line), the `git` engine selects a path
+/// exactly when Git would. The divergences below all need a negation or a
+/// bare `/`.
+pub proof fn theorem_without_negations_agrees_with_git(
+    own: spec_fn(usize, int) -> Option<MatchKind>,
+    depth: spec_fn(usize) -> int,
+    n: usize,
+    len: int,
+)
+    requires
+        1 <= len <= usize::MAX,
+        forall|i: usize, k: int| i < n ==> #[trigger] own(i, k) != Some(MatchKind::Whitelist),
+        forall|i: usize| i < n ==> 0 <= #[trigger] depth(i) < len,
+        forall|i: usize| i < n ==> #[trigger] own(i, depth(i)) is None,
+    ensures
+        waft_selects(own, depth, n, len) <==> git_selects(own, depth, n, len),
+{
+    let pm = model_pm(own, depth, len);
+    let ai = model_ai(own, len);
+    let m = (len - 1) as usize;
+    super::precedence::theorem_no_match_iff_no_file_matches(pm, ai, n, m);
+    if waft_selects(own, depth, n, len) {
+        let i = choose|i: usize| i < n && #[trigger] pm(i) is Some;
+        let v = walk_up(own, i, len, depth(i))->Some_0;
+        lemma_walk_up_some(own, i, len, depth(i), v);
+        let l = choose|l: int|
+            depth(i) <= l <= len && #[trigger] own(i, l) == Some(v) && forall|h: int| l < h <= len ==> #[trigger] own(
+                i,
+                h,
+            ) is None;
+        assert(own(i, l) != Some(MatchKind::Whitelist));
+        assert(l != depth(i));
+        assert(exists|d: usize| is_git_decider(own, depth, n, l, d)) by {
+            lemma_git_decider_exists(own, depth, n, l, i);
+        }
+        let d = choose|d: usize| is_git_decider(own, depth, n, l, d);
+        assert(own(d, l) != Some(MatchKind::Whitelist));
+        assert(git_level_verdict(own, depth, n, l) == Some(MatchKind::Ignore));
+    }
+    if git_selects(own, depth, n, len) {
+        let k = choose|k: int| 1 <= k <= len && #[trigger] git_level_verdict(own, depth, n, k) == Some(MatchKind::Ignore);
+        let d = choose|d: usize| is_git_decider(own, depth, n, k, d);
+        lemma_walk_up_finds(own, d, len, depth(d), k);
+        assert(pm(d) is Some);
+        let v = super::precedence::spec_explain(pm, ai, n, m);
+        if v is ExcludedByNegation {
+            let c = v->ExcludedByNegation_ctx;
+            super::precedence::theorem_negation_needs_no_selected_ancestor(pm, ai, n, m, c, ());
+            let wv = walk_up(own, c, len, depth(c))->Some_0;
+            lemma_walk_up_some(own, c, len, depth(c), wv);
+        }
+    }
+}
+
+/// Some applicable rule file has a verdict at level `k`, so a deciding
+/// (deepest such) one exists.
+pub proof fn lemma_git_decider_exists(
+    own: spec_fn(usize, int) -> Option<MatchKind>,
+    depth: spec_fn(usize) -> int,
+    n: usize,
+    k: int,
+    i: usize,
+)
+    requires
+        i < n,
+        depth(i) < k,
+        own(i, k) is Some,
+    ensures
+        exists|d: usize| is_git_decider(own, depth, n, k, d),
+    decreases n - i,
+{
+    if exists|j: usize| i < j < n && depth(j) < k && #[trigger] own(j, k) is Some {
+        let j = choose|j: usize| i < j < n && depth(j) < k && #[trigger] own(j, k) is Some;
+        lemma_git_decider_exists(own, depth, n, k, j);
+    } else {
+        assert(is_git_decider(own, depth, n, k, i));
     }
 }
 
