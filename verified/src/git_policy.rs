@@ -5,9 +5,10 @@
 //! - Which Git backend `WAFT_GIT_BACKEND` selects ([`select_backend`]).
 //! - Whether a checkout folds case ([`case_folding_applies`]) and how
 //!   `git config --bool` output reads ([`parse_bool_output`]).
-//! - When the per-repository index snapshot cache may answer, and when a
-//!   freshly built snapshot may be stored ([`cached_state_is_current`],
-//!   [`may_cache_build`]).
+//! - The whole per-repository index snapshot cache step ([`index_state`]):
+//!   when to stat the index, when the cached snapshot may answer, when to
+//!   build, and when a freshly built snapshot may be stored. Production only
+//!   supplies the effects ([`IndexCacheIo`]).
 //! - Whether a `git` failure message reports a missing repository
 //!   ([`mentions_missing_repository`]).
 //! - Whether a walked entry counts as an existing `.worktreeinclude`, which
@@ -20,11 +21,19 @@
 //!   `gix` or `cli`, and is otherwise an error (no silent fallback).
 //! - `theorem_configured_case_policy_wins`: an explicit `core.ignoreCase`
 //!   decides; only an absent key defers to the platform.
+//! - `index_state` performs exactly the effects `cache_call_trace`
+//!   describes, in that order, and returns the served or built snapshot.
+//! - `theorem_cache_call_effects`: the index is stat-ed before anything
+//!   else; a missing index is never looked up or stored; a snapshot is
+//!   stored only under a stamp observed both at the start of the call and
+//!   immediately after that very snapshot was built; a call that builds
+//!   nothing serves a snapshot stored under exactly the stamp it observed
+//!   first.
 //! - `theorem_cache_serves_only_attributable_snapshots`: over any sequence
-//!   of cache calls and index changes, a snapshot is served only when the
-//!   index stamp observed at the start of the serving call is present and
-//!   equals the stamps taken immediately before and after that snapshot was
-//!   built. A missing index is never served from, or stored in, the cache.
+//!   of calls, with the index changing arbitrarily between and during them,
+//!   a served snapshot was built by an earlier call that observed the
+//!   serving call's first stamp both before and right after the build. A
+//!   missing index is never served from, or stored in, the cache.
 //! - `theorem_rule_file_existence`: directories and special files never
 //!   count as rule files, and under the `Ignore` symlink policy a symlinked
 //!   one never counts, so existence agrees with selection.
@@ -39,6 +48,10 @@
 //!   identity, size and modification time, and equal stamps mean equal index
 //!   contents (Git publishes the index by rename; inode reuse within the
 //!   timestamp granularity is the residual risk).
+//! - [`IndexCacheIo`]: production's effects do what their names say:
+//!   `observe_index` stats the index when called, `build` reads the index as
+//!   it stands, and the slot (`look_up`, `store`) returns what was last
+//!   stored for the repository.
 //! - The discovery phrase is matched against the message production
 //!   lowercased with `str::to_lowercase`.
 
@@ -344,63 +357,394 @@ pub fn may_cache_build(before: Option<IndexStamp>, after: Option<IndexStamp>) ->
     }
 }
 
-/// A cache slot: the stamp a snapshot was stored under, and the stamps
-/// taken immediately before and after that snapshot was built.
-pub struct CacheSlot {
-    /// The stamp the snapshot is stored under.
-    pub stored: IndexStamp,
-    /// The stamp taken before the build.
-    pub built_before: Option<IndexStamp>,
-    /// The stamp taken after the build.
-    pub built_after: Option<IndexStamp>,
+/// One effect of an [`index_state`] call, with what it returned.
+pub enum CacheEvent<T> {
+    /// The index file was stat-ed: its stamp, or `None` when it could not be.
+    Observed(Option<IndexStamp>),
+    /// The repository's cache slot was read: the stamp and snapshot stored
+    /// in it, if any.
+    LookedUp(Option<(IndexStamp, T)>),
+    /// A fresh snapshot was built from the index: the snapshot, or `None`
+    /// when the build failed.
+    Built(Option<T>),
+    /// The snapshot was stored in the repository's slot under the stamp.
+    Stored(IndexStamp, T),
 }
 
-/// One `index_state` call: with the stamp `now` observed at its start and,
-/// when it builds, the stamp `after` observed once the build finished.
-/// Returns whether the cached snapshot was served, and the slot afterwards.
-pub open spec fn cache_step(slot: Option<CacheSlot>, now: Option<IndexStamp>, after: Option<
-    IndexStamp,
->) -> (bool, Option<CacheSlot>) {
-    let stored = match slot {
-        Some(s) => Some(s.stored),
-        None => None,
-    };
-    if serve_spec(now, stored) {
-        (true, slot)
-    } else if store_spec(now, after) {
-        (false, Some(CacheSlot { stored: now->Some_0, built_before: now, built_after: after }))
-    } else {
-        (false, slot)
+/// The snapshot a build produced, or `None` when it failed.
+pub open spec fn built_snapshot<T, E>(r: Result<T, E>) -> Option<T> {
+    match r {
+        Ok(x) => Some(x),
+        Err(_) => None,
     }
 }
 
-/// Every slot is attributable: its snapshot was built between two equal,
-/// present stamps, and it is stored under exactly that stamp.
-pub open spec fn slot_attributable(slot: Option<CacheSlot>) -> bool {
-    match slot {
-        Some(s) => s.built_before == Some(s.stored) && s.built_after == Some(s.stored),
-        None => true,
+/// The index snapshot cache's effects for one repository, implemented by
+/// production.
+///
+/// Trusted: `observe_index` stats the index file at the moment it is
+/// called; `look_up` returns what the most recent `store` for this
+/// repository put in its slot, or `None`; `build` reads a fresh snapshot
+/// from the index as it stands; `store` replaces the slot's contents.
+/// `events` is a ghost log of every effect and what it returned, which lets
+/// the kernel state exactly which effects it performs, and in which order.
+pub trait IndexCacheIo<T, E> {
+    /// Every effect so far, in order.
+    spec fn events(&self) -> Seq<CacheEvent<T>>;
+
+    /// Stat the index file.
+    fn observe_index(&mut self) -> (stamp: Option<IndexStamp>)
+        ensures
+            final(self).events() == old(self).events().push(CacheEvent::Observed(stamp)),
+    ;
+
+    /// Read the repository's cache slot.
+    fn look_up(&mut self) -> (slot: Option<(IndexStamp, T)>)
+        ensures
+            final(self).events() == old(self).events().push(CacheEvent::LookedUp(slot)),
+    ;
+
+    /// Build a fresh snapshot from the index.
+    fn build(&mut self) -> (snapshot: Result<T, E>)
+        ensures
+            final(self).events() == old(self).events().push(
+                CacheEvent::Built(built_snapshot(snapshot)),
+            ),
+    ;
+
+    /// Store `snapshot` in the repository's slot under `stamp`.
+    fn store(&mut self, stamp: IndexStamp, snapshot: &T)
+        ensures
+            final(self).events() == old(self).events().push(CacheEvent::Stored(stamp, *snapshot)),
+    ;
+}
+
+/// Whether the slot `hit` answers a call that first observed `now`: the
+/// slot holds a snapshot stored under exactly that stamp.
+pub open spec fn slot_serves<T>(now: Option<IndexStamp>, hit: Option<(IndexStamp, T)>) -> bool {
+    match hit {
+        Some(h) => serve_spec(now, Some(h.0)),
+        None => false,
     }
 }
 
-/// Over any sequence of calls (with arbitrary index changes in between), the
-/// cache stays attributable, and whenever it serves a snapshot, that
-/// snapshot was built while the index carried exactly the stamp observed at
-/// the start of the serving call. A missing index (`now == None`) is never
-/// served and never stored.
-pub proof fn theorem_cache_serves_only_attributable_snapshots(
-    slot: Option<CacheSlot>,
+/// The effects one [`index_state`] call performs, given what they returned:
+/// the stamp `now` observed first, the slot `hit` read, the snapshot `built`
+/// (`None`: the build failed), and the stamp `after` observed once the build
+/// finished. Arguments the call never reaches are ignored.
+///
+/// The index is stat-ed first. When that fails, a snapshot is built and
+/// nothing else happens. Otherwise the slot is read and a snapshot stored
+/// under exactly the observed stamp is served. Otherwise a snapshot is built
+/// (a failed build ends the call), the index is stat-ed again, and the build
+/// is stored under the first stamp when the second stat observed it too.
+pub open spec fn cache_call_trace<T>(
     now: Option<IndexStamp>,
+    hit: Option<(IndexStamp, T)>,
+    built: Option<T>,
+    after: Option<IndexStamp>,
+) -> Seq<CacheEvent<T>> {
+    match now {
+        None => seq![CacheEvent::Observed(now), CacheEvent::Built(built)],
+        Some(stamp) => if slot_serves(now, hit) {
+            seq![CacheEvent::Observed(now), CacheEvent::LookedUp(hit)]
+        } else {
+            match built {
+                None => seq![
+                    CacheEvent::Observed(now),
+                    CacheEvent::LookedUp(hit),
+                    CacheEvent::Built(built),
+                ],
+                Some(x) => if store_spec(now, after) {
+                    seq![
+                        CacheEvent::Observed(now),
+                        CacheEvent::LookedUp(hit),
+                        CacheEvent::Built(built),
+                        CacheEvent::Observed(after),
+                        CacheEvent::Stored(stamp, x),
+                    ]
+                } else {
+                    seq![
+                        CacheEvent::Observed(now),
+                        CacheEvent::LookedUp(hit),
+                        CacheEvent::Built(built),
+                        CacheEvent::Observed(after),
+                    ]
+                },
+            }
+        },
+    }
+}
+
+/// The snapshot the call returns (`None`: it returns the build's error):
+/// the served one, or else whatever the build produced.
+pub open spec fn cache_call_result<T>(
+    now: Option<IndexStamp>,
+    hit: Option<(IndexStamp, T)>,
+    built: Option<T>,
+) -> Option<T> {
+    if now is Some && slot_serves(now, hit) {
+        Some(hit->Some_0.1)
+    } else {
+        built
+    }
+}
+
+/// Answer one index snapshot request for a repository: serve the cached
+/// snapshot when the index still carries the stamp it was stored under;
+/// otherwise build a fresh one, and store it only when the index did not
+/// change while it was being built. A missing index is never cached.
+///
+/// Its `ensures` pins the exact effects and their order
+/// (`cache_call_trace`) and the returned snapshot.
+// Verus does not support `let` chains, so the serve check stays nested.
+#[allow(clippy::collapsible_if)]
+pub fn index_state<T, E, Io: IndexCacheIo<T, E>>(io: &mut Io) -> (r: Result<T, E>)
+    ensures
+        exists|
+            now: Option<IndexStamp>,
+            hit: Option<(IndexStamp, T)>,
+            built: Option<T>,
+            after: Option<IndexStamp>,
+        |
+            final(io).events() == old(io).events() + #[trigger] cache_call_trace(
+                now,
+                hit,
+                built,
+                after,
+            ) && cache_call_result(now, hit, built) == built_snapshot(r),
+{
+    let ghost e0 = io.events();
+    let now = io.observe_index();
+    let stamp = match now {
+        Some(stamp) => stamp,
+        None => {
+            let r = io.build();
+            proof {
+                let built = built_snapshot(r);
+                assert(io.events() =~= e0 + cache_call_trace(
+                    now,
+                    None::<(IndexStamp, T)>,
+                    built,
+                    None,
+                ));
+                assert(cache_call_result(now, None::<(IndexStamp, T)>, built) == built);
+            }
+            return r;
+        },
+    };
+    let hit = io.look_up();
+    let ghost slot = hit;
+    if let Some((stored, snapshot)) = hit {
+        if cached_state_is_current(now, Some(stored)) {
+            proof {
+                assert(slot_serves(now, slot));
+                assert(io.events() =~= e0 + cache_call_trace(now, slot, None::<T>, None));
+                assert(cache_call_result(now, slot, None::<T>) == Some(snapshot));
+            }
+            return Ok(snapshot);
+        }
+    }
+    proof {
+        assert(!slot_serves(now, slot));
+    }
+    let r = io.build();
+    let snapshot = match r {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            proof {
+                assert(io.events() =~= e0 + cache_call_trace(now, slot, None::<T>, None));
+                assert(cache_call_result(now, slot, None::<T>) == None::<T>);
+            }
+            return Err(e);
+        },
+    };
+    let after = io.observe_index();
+    if may_cache_build(now, after) {
+        io.store(stamp, &snapshot);
+    }
+    proof {
+        assert(io.events() =~= e0 + cache_call_trace(now, slot, Some(snapshot), after));
+        assert(cache_call_result(now, slot, Some(snapshot)) == Some(snapshot));
+    }
+    Ok(snapshot)
+}
+
+/// The trace `t` built `x` and stored it under `s`, after observing `s`
+/// at the start of the call and again immediately after the build.
+pub open spec fn built_and_stored_under<T>(t: Seq<CacheEvent<T>>, s: IndexStamp, x: T) -> bool {
+    &&& t.len() == 5
+    &&& t[0] == CacheEvent::<T>::Observed(Some(s))
+    &&& t[2] == CacheEvent::<T>::Built(Some(x))
+    &&& t[3] == CacheEvent::<T>::Observed(Some(s))
+    &&& t[4] == CacheEvent::<T>::Stored(s, x)
+}
+
+/// What one call does, for every combination of answers: the index is
+/// stat-ed before anything else; a missing index is never looked up or
+/// stored, and the snapshot is rebuilt; a snapshot is stored only under a
+/// stamp observed both at the start of the call and immediately after that
+/// very snapshot was built, and only as the call's last effect; a call that
+/// builds nothing serves the slot's snapshot, which was stored under exactly
+/// the stamp it observed first; and a call that builds returns its build.
+pub proof fn theorem_cache_call_effects<T>(
+    now: Option<IndexStamp>,
+    hit: Option<(IndexStamp, T)>,
+    built: Option<T>,
     after: Option<IndexStamp>,
 )
-    requires
-        slot_attributable(slot),
     ensures
-        slot_attributable(cache_step(slot, now, after).1),
-        cache_step(slot, now, after).0 ==> now is Some && slot is Some && slot->Some_0.built_before
-            == now && slot->Some_0.built_after == now,
-        now is None ==> !cache_step(slot, now, after).0 && cache_step(slot, now, after).1 == slot,
+        ({
+            let t = cache_call_trace(now, hit, built, after);
+            let r = cache_call_result(now, hit, built);
+            &&& t.len() > 0 && t[0] == CacheEvent::<T>::Observed(now)
+            &&& now is None ==> t == seq![
+                CacheEvent::<T>::Observed(None),
+                CacheEvent::<T>::Built(built),
+            ] && r == built
+            &&& forall|k: int|
+                #![trigger t[k]]
+                0 <= k < t.len() && t[k] is Stored ==> k == t.len() - 1 && built_and_stored_under(
+                    t,
+                    t[k]->Stored_0,
+                    t[k]->Stored_1,
+                )
+            &&& (forall|k: int| #![trigger t[k]] 0 <= k < t.len() ==> !(t[k] is Built)) ==> (
+            now is Some && hit is Some && now == Some(hit->Some_0.0) && r == Some(hit->Some_0.1))
+            &&& forall|k: int|
+                #![trigger t[k]]
+                0 <= k < t.len() && t[k] is Built ==> r == t[k]->Built_0
+        }),
 {
+    let t = cache_call_trace(now, hit, built, after);
+    if now is Some && !slot_serves(now, hit) {
+        assert(t[2] is Built);
+    }
+}
+
+/// The slot after a call whose effects were `t`: what it stored last, or
+/// else what the slot held before.
+pub open spec fn slot_after<T>(slot: Option<(IndexStamp, T)>, t: Seq<CacheEvent<T>>) -> Option<
+    (IndexStamp, T),
+> {
+    if t.len() > 0 && t.last() is Stored {
+        Some((t.last()->Stored_0, t.last()->Stored_1))
+    } else {
+        slot
+    }
+}
+
+/// The slot before call `i` of a sequence of calls on one repository, where
+/// call `j` observed `calls[j].0` first, built `calls[j].1`, and observed
+/// `calls[j].2` after its build, and every read of the slot returns what was
+/// last stored in it (the trusted map semantics). The slot starts empty.
+pub open spec fn slot_before<T>(
+    calls: Seq<(Option<IndexStamp>, Option<T>, Option<IndexStamp>)>,
+    i: nat,
+) -> Option<(IndexStamp, T)>
+    decreases i,
+{
+    if i == 0 {
+        None
+    } else {
+        let prev = slot_before(calls, (i - 1) as nat);
+        let c = calls[i - 1];
+        slot_after(prev, cache_call_trace(c.0, prev, c.1, c.2))
+    }
+}
+
+/// The effects of call `i` of the sequence `calls`.
+pub open spec fn call_trace<T>(
+    calls: Seq<(Option<IndexStamp>, Option<T>, Option<IndexStamp>)>,
+    i: nat,
+) -> Seq<CacheEvent<T>> {
+    cache_call_trace(calls[i as int].0, slot_before(calls, i), calls[i as int].1, calls[i as int].2)
+}
+
+/// Whatever the slot holds before call `i` was built and stored by an
+/// earlier call that observed its stamp before and after building it.
+proof fn lemma_slot_provenance<T>(
+    calls: Seq<(Option<IndexStamp>, Option<T>, Option<IndexStamp>)>,
+    i: nat,
+)
+    requires
+        i <= calls.len(),
+    ensures
+        slot_before(calls, i) is Some ==> exists|j: int|
+            0 <= j < i && built_and_stored_under(
+                #[trigger] call_trace(calls, j as nat),
+                slot_before(calls, i)->Some_0.0,
+                slot_before(calls, i)->Some_0.1,
+            ),
+    decreases i,
+{
+    if i > 0 {
+        let m = (i - 1) as nat;
+        lemma_slot_provenance(calls, m);
+        let prev = slot_before(calls, m);
+        let t = call_trace(calls, m);
+        let c = calls[m as int];
+        theorem_cache_call_effects(c.0, prev, c.1, c.2);
+        if t.len() > 0 && t.last() is Stored {
+            let k = t.len() - 1;
+            assert(t[k] == t.last());
+            assert(built_and_stored_under(t, t.last()->Stored_0, t.last()->Stored_1));
+            assert(slot_before(calls, i) == Some((t.last()->Stored_0, t.last()->Stored_1)));
+        } else {
+            assert(slot_before(calls, i) == prev);
+            if prev is Some {
+                let j = choose|j: int|
+                    0 <= j < m && built_and_stored_under(
+                        #[trigger] call_trace(calls, j as nat),
+                        prev->Some_0.0,
+                        prev->Some_0.1,
+                    );
+                assert(0 <= j < i);
+            }
+        }
+    }
+}
+
+/// Over any sequence of calls on one repository, with the index changing
+/// arbitrarily between and during them, a call that serves a cached
+/// snapshot (builds nothing) serves one that an earlier call built while the
+/// index carried exactly the stamp this call observed first: that earlier
+/// call observed the stamp at its start and again right after the build.
+/// A missing index is never served.
+pub proof fn theorem_cache_serves_only_attributable_snapshots<T>(
+    calls: Seq<(Option<IndexStamp>, Option<T>, Option<IndexStamp>)>,
+    i: int,
+)
+    requires
+        0 <= i < calls.len(),
+    ensures
+        ({
+            let t = call_trace(calls, i as nat);
+            let now = calls[i].0;
+            let r = cache_call_result(now, slot_before(calls, i as nat), calls[i].1);
+            (forall|k: int| #![trigger t[k]] 0 <= k < t.len() ==> !(t[k] is Built)) ==> {
+                &&& now is Some
+                &&& r is Some
+                &&& exists|j: int|
+                    0 <= j < i && built_and_stored_under(
+                        #[trigger] call_trace(calls, j as nat),
+                        now->Some_0,
+                        r->Some_0,
+                    )
+            }
+        }),
+{
+    let slot = slot_before(calls, i as nat);
+    let t = call_trace(calls, i as nat);
+    theorem_cache_call_effects(calls[i].0, slot, calls[i].1, calls[i].2);
+    lemma_slot_provenance(calls, i as nat);
+    let u = cache_call_trace(calls[i].0, slot, calls[i].1, calls[i].2);
+    assert(t == u);
+    if forall|k: int| #![trigger t[k]] 0 <= k < t.len() ==> !(t[k] is Built) {
+        assert forall|k: int| #![trigger u[k]] 0 <= k < u.len() implies !(u[k] is Built) by {
+            assert(t[k] == u[k]);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -11,9 +11,13 @@
 //! keys of UTF-8 and non-UTF-8 paths ([`utf8_fold_key`],
 //! [`non_utf8_fold_key`]).
 //!
-//! The lookup is a verified hash index ([`KeyTable`]): bucket `b` holds
-//! exactly the ascending positions whose key hashes to `b`, so per-query work
-//! is bounded by one bucket while the answer never depends on the hash.
+//! The lookup is a verified hash index ([`KeyTable`]) with one bucket per
+//! key: bucket `b` holds exactly the ascending positions whose key hashes to
+//! `b`, so a query scans one bucket and the answer never depends on the hash.
+//! Only the bucket count is proved. How evenly keys spread is not: the hash
+//! is seeded FNV-1a with a murmur finalizer, not a keyed PRF, so one bucket's
+//! worth of work per query is the expected cost, not a guaranteed bound
+//! against crafted index names.
 //!
 //! # Theorems
 //!
@@ -24,6 +28,10 @@
 //!   filesystem to resolve the query and a colliding entry to the same
 //!   object. Its `ensures` also pins the exact sequence of filesystem probes
 //!   (`probe_trace`).
+//! - `TrackedLookup::select` returns exactly the positions of the tracked
+//!   queries, and its `ensures` pins its filesystem probes too
+//!   (`select_trace`: each query's `probe_trace`, in query order, nothing
+//!   else).
 //! - `theorem_exact_spelling_always_tracked`: an exact spelling is tracked
 //!   whatever the fold function, case policy or filesystem say, and is
 //!   decided without probing the filesystem. A wrong Unicode table can never
@@ -37,6 +45,10 @@
 //!   protection.
 //! - `theorem_probes_stay_in_the_collision`: the only paths probed are the
 //!   query (first) and index entries that fold onto it, in index order.
+//! - `theorem_select_probes_stay_in_the_collisions`: a batch probes only its
+//!   queries and index entries that fold onto one of them;
+//!   `theorem_select_on_folding_checkout_never_probes`: on a case-folding
+//!   checkout a batch probes nothing.
 //! - `lemma_positions_of_exact` (bucket exactness): `KeyTable::positions`
 //!   lists every position holding the key, ascending, and nothing else.
 //! - `lemma_tracked_positions_exact`: `select` is exactly a filter of the
@@ -272,10 +284,21 @@ impl KeyTable {
             )
     }
 
-    /// Index `keys`; `seed` only affects how keys spread across buckets.
+    /// The number of buckets.
+    pub closed spec fn bucket_count(&self) -> nat {
+        self.buckets@.len() as nat
+    }
+
+    /// Index `keys` in one bucket per key (one bucket for no keys); `seed`
+    /// only affects how keys spread across buckets.
     pub fn build(seed: u64, keys: &[Vec<u8>]) -> (t: Self)
         ensures
             t.indexes(views(keys@)),
+            t.bucket_count() == if keys@.len() == 0 {
+                1
+            } else {
+                keys@.len()
+            },
     {
         let ghost ks = views(keys@);
         let n = keys.len();
@@ -336,7 +359,10 @@ impl KeyTable {
     }
 
     /// Whether some position holds `q`.
-    pub fn contains_key(&self, keys: &[Vec<u8>], q: &[u8]) -> (r: bool)
+    ///
+    /// Crate-private: its `requires` ties the table to the very keys it was
+    /// built from, which unverified callers could not be held to.
+    pub(crate) fn contains_key(&self, keys: &[Vec<u8>], q: &[u8]) -> (r: bool)
         requires
             self.indexes(views(keys@)),
         ensures
@@ -380,7 +406,9 @@ impl KeyTable {
     }
 
     /// Every position holding `q`, ascending.
-    pub fn positions(&self, keys: &[Vec<u8>], q: &[u8]) -> (r: Vec<usize>)
+    ///
+    /// Crate-private for the same reason as `KeyTable::contains_key`.
+    pub(crate) fn positions(&self, keys: &[Vec<u8>], q: &[u8]) -> (r: Vec<usize>)
         requires
             self.indexes(views(keys@)),
         ensures
@@ -673,6 +701,29 @@ pub open spec fn tracked_positions<F: FoldOracle, O: IdentityOracle>(
     }
 }
 
+/// The filesystem probes a batch of the first `n` queries issues, in order:
+/// each query's `probe_trace`, in query order.
+pub open spec fn select_trace<F: FoldOracle, O: IdentityOracle>(
+    entries: Seq<Seq<u8>>,
+    protect: bool,
+    queries: Seq<Seq<u8>>,
+    n: nat,
+    o: O,
+) -> Seq<Seq<u8>>
+    decreases n,
+{
+    if n == 0 {
+        Seq::empty()
+    } else {
+        select_trace::<F, O>(entries, protect, queries, (n - 1) as nat, o) + probe_trace::<F, O>(
+            entries,
+            protect,
+            queries[n - 1],
+            o,
+        )
+    }
+}
+
 /// The byte strings of a slice of byte slices.
 pub open spec fn query_views(qs: Seq<&[u8]>) -> Seq<Seq<u8>> {
     qs.map_values(|q: &[u8]| q@)
@@ -832,8 +883,10 @@ proof fn lemma_probe_until_match_members<O: IdentityOracle>(
 /// Precomputed tracked-name lookup over one index's entries.
 ///
 /// Per query: one hash probe for the exact spelling, one fold and hash probe
-/// for the folded bucket, and filesystem probes only for the entries of that
-/// one bucket. Work is bounded by the bucket, never by the index size.
+/// for the folded bucket, and filesystem probes only for index entries that
+/// fold onto the query. With one bucket per key, a bucket's worth of work per
+/// query is the expected cost; it is not a proved bound, because the hash
+/// does not stop crafted names from sharing a bucket.
 pub struct TrackedLookup<F: FoldOracle> {
     fold: F,
     entries: Vec<Vec<u8>>,
@@ -1040,10 +1093,19 @@ impl<F: FoldOracle> TrackedLookup<F> {
         false
     }
 
-    /// The positions of the tracked queries, ascending.
+    /// The positions of the tracked queries, ascending, probing the
+    /// filesystem exactly as `select_trace` describes: each query's
+    /// `probe_trace`, in query order, and nothing else.
     pub fn select<O: IdentityOracle>(&self, oracle: &mut O, queries: &[&[u8]]) -> (r: Vec<usize>)
         ensures
             r@ == tracked_positions::<F, O>(
+                self.entries_view(),
+                self.protects_folded_names(),
+                query_views(queries@),
+                queries@.len() as nat,
+                *old(oracle),
+            ),
+            final(oracle).probes() == old(oracle).probes() + select_trace::<F, O>(
                 self.entries_view(),
                 self.protects_folded_names(),
                 query_views(queries@),
@@ -1062,6 +1124,7 @@ impl<F: FoldOracle> TrackedLookup<F> {
                 ) <==> exists|j: int| 0 <= j < r@.len() && r@[j] as int == i),
     {
         let ghost o0 = *oracle;
+        let ghost base = oracle.probes();
         let ghost qs = query_views(queries@);
         let _n = queries.len();
         proof {
@@ -1088,19 +1151,35 @@ impl<F: FoldOracle> TrackedLookup<F> {
                     i as nat,
                     o0,
                 ),
+                o0 == *old(oracle),
+                base == old(oracle).probes(),
+                oracle.probes() == base + select_trace::<F, O>(
+                    self.entries_view(),
+                    self.protects_folded_names(),
+                    qs,
+                    i as nat,
+                    o0,
+                ),
             decreases queries.len() - i,
         {
             let ghost before = *oracle;
             let hit = self.contains(oracle, queries[i]);
             proof {
+                let es = self.entries_view();
+                let protect = self.protects_folded_names();
                 assert(qs[i as int] == queries@[i as int]@);
-                lemma_is_tracked_depends_on_identity::<F, O>(
-                    self.entries_view(),
-                    self.protects_folded_names(),
+                lemma_is_tracked_depends_on_identity::<F, O>(es, protect, qs[i as int], before, o0);
+                lemma_probe_trace_depends_on_identity::<F, O>(
+                    es,
+                    protect,
                     qs[i as int],
                     before,
                     o0,
                 );
+                let prev = select_trace::<F, O>(es, protect, qs, i as nat, o0);
+                let step = probe_trace::<F, O>(es, protect, qs[i as int], o0);
+                assert(select_trace::<F, O>(es, protect, qs, (i + 1) as nat, o0) == prev + step);
+                assert(oracle.probes() =~= base + (prev + step));
             }
             if hit {
                 out.push(i);
@@ -1215,6 +1294,142 @@ proof fn lemma_is_tracked_depends_on_identity<F: FoldOracle, O: IdentityOracle>(
                 b.identity(entries[i]),
             );
         assert(a.identity(entries[i]) == b.identity(entries[i]));
+    }
+}
+
+/// Two oracles that agree on every identity probe the same paths in the same
+/// order.
+proof fn lemma_probe_trace_depends_on_identity<F: FoldOracle, O: IdentityOracle>(
+    entries: Seq<Seq<u8>>,
+    protect: bool,
+    q: Seq<u8>,
+    a: O,
+    b: O,
+)
+    requires
+        forall|p: Seq<u8>| #[trigger] a.identity(p) == b.identity(p),
+    ensures
+        probe_trace::<F, O>(entries, protect, q, a) == probe_trace::<F, O>(entries, protect, q, b),
+{
+    assert(a.identity(q) == b.identity(q));
+    lemma_probe_until_match_depends_on_identity(
+        a,
+        b,
+        colliding_entries::<F>(entries, q),
+        a.identity(q),
+    );
+}
+
+proof fn lemma_probe_until_match_depends_on_identity<O: IdentityOracle>(
+    a: O,
+    b: O,
+    paths: Seq<Seq<u8>>,
+    id: Option<FileId>,
+)
+    requires
+        forall|p: Seq<u8>| #[trigger] a.identity(p) == b.identity(p),
+    ensures
+        probe_until_match(a, paths, id) == probe_until_match(b, paths, id),
+    decreases paths.len(),
+{
+    if paths.len() > 0 {
+        assert(a.identity(paths[0]) == b.identity(paths[0]));
+        lemma_probe_until_match_depends_on_identity(a, b, paths.drop_first(), id);
+    }
+}
+
+/// On a case-folding checkout a whole batch of queries is decided without a
+/// single filesystem probe.
+pub proof fn theorem_select_on_folding_checkout_never_probes<F: FoldOracle, O: IdentityOracle>(
+    entries: Seq<Seq<u8>>,
+    queries: Seq<Seq<u8>>,
+    n: nat,
+    o: O,
+)
+    ensures
+        select_trace::<F, O>(entries, true, queries, n, o) == Seq::<Seq<u8>>::empty(),
+    decreases n,
+{
+    if n > 0 {
+        theorem_select_on_folding_checkout_never_probes::<F, O>(entries, queries, (n - 1) as nat, o);
+        assert(select_trace::<F, O>(entries, true, queries, n, o) =~= Seq::<Seq<u8>>::empty());
+    }
+}
+
+/// `p` is the query `q` itself or an index entry that folds onto it.
+pub open spec fn probe_target<F: FoldOracle>(entries: Seq<Seq<u8>>, q: Seq<u8>, p: Seq<u8>) -> bool {
+    p == q || exists|e: int|
+        0 <= e < entries.len() && #[trigger] entries[e] == p && F::fold(entries[e]) == F::fold(q)
+}
+
+/// `p` is one of the first `n` queries or an index entry that folds onto
+/// one of them.
+pub open spec fn in_queried_collisions<F: FoldOracle>(
+    entries: Seq<Seq<u8>>,
+    queries: Seq<Seq<u8>>,
+    n: nat,
+    p: Seq<u8>,
+) -> bool {
+    exists|i: int| 0 <= i < n && #[trigger] probe_target::<F>(entries, queries[i], p)
+}
+
+/// Every path a batch probes is one of its queries or an index entry that
+/// folds onto one of them: nothing outside the queried collisions is ever
+/// `stat`ed.
+pub proof fn theorem_select_probes_stay_in_the_collisions<F: FoldOracle, O: IdentityOracle>(
+    entries: Seq<Seq<u8>>,
+    protect: bool,
+    queries: Seq<Seq<u8>>,
+    n: nat,
+    o: O,
+)
+    requires
+        n <= queries.len(),
+        entries.len() <= usize::MAX,
+    ensures
+        forall|k: int|
+            0 <= k < select_trace::<F, O>(entries, protect, queries, n, o).len()
+                ==> in_queried_collisions::<F>(
+                entries,
+                queries,
+                n,
+                #[trigger] select_trace::<F, O>(entries, protect, queries, n, o)[k],
+            ),
+    decreases n,
+{
+    if n > 0 {
+        let m = (n - 1) as nat;
+        theorem_select_probes_stay_in_the_collisions::<F, O>(entries, protect, queries, m, o);
+        theorem_probes_stay_in_the_collision::<F, O>(entries, protect, queries[m as int], o);
+        let prev = select_trace::<F, O>(entries, protect, queries, m, o);
+        let step = probe_trace::<F, O>(entries, protect, queries[m as int], o);
+        let t = select_trace::<F, O>(entries, protect, queries, n, o);
+        assert(t == prev + step);
+        assert forall|k: int| 0 <= k < t.len() implies in_queried_collisions::<F>(
+            entries,
+            queries,
+            n,
+            #[trigger] t[k],
+        ) by {
+            if k < prev.len() {
+                assert(t[k] == prev[k]);
+                assert(in_queried_collisions::<F>(entries, queries, m, prev[k]));
+                let i = choose|i: int|
+                    0 <= i < m && #[trigger] probe_target::<F>(entries, queries[i], prev[k]);
+                assert(probe_target::<F>(entries, queries[i], t[k]));
+            } else {
+                let j = k - prev.len();
+                assert(t[k] == step[j]);
+                if j > 0 {
+                    let e = choose|e: int|
+                        0 <= e < entries.len() && #[trigger] entries[e] == step[j] && F::fold(
+                            entries[e],
+                        ) == F::fold(queries[m as int]);
+                    assert(entries[e] == t[k]);
+                }
+                assert(probe_target::<F>(entries, queries[m as int], t[k]));
+            }
+        }
     }
 }
 
