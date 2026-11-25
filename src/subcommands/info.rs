@@ -7,10 +7,13 @@ use std::path::PathBuf;
 use crate::cli::Cli;
 use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::git::{GitBackend, default_git_backend};
-use crate::model::{RepoContext, ValidationSeverity};
+use crate::model::RepoContext;
 use crate::validate;
+use waft_verified::report_view::{
+    self, ActionLabel, DestLabel, InfoDestination, LstatType, SkipKind, SourceKindLabel,
+};
 
 /// Arguments for the info command.
 #[derive(Debug, Args)]
@@ -48,25 +51,8 @@ pub(crate) fn run_info_with_context(
 
     // Validate
     let report = validate::validate(ctx, git, policy.symlink_policy);
-    if report.has_errors() {
-        for issue in &report.issues {
-            if matches!(issue.severity, ValidationSeverity::Error) {
-                eprintln!("error: {}: {}", issue.file.display(), issue.message);
-            }
-        }
-        return Err(Error::Validation {
-            error_count: report.error_count(),
-        });
-    }
-
-    // Print warnings
-    if !cli.quiet {
-        for issue in &report.issues {
-            if matches!(issue.severity, ValidationSeverity::Warning) {
-                eprintln!("warning: {}: {}", issue.file.display(), issue.message);
-            }
-        }
-    }
+    // Errors stop the command; otherwise warnings print unless quiet.
+    validate::report_preflight(&report, cli.quiet)?;
 
     // Normalize all input paths to repo-relative
     let mut rel_paths = Vec::new();
@@ -107,16 +93,19 @@ pub(crate) fn run_info_with_context(
     // Print info for each path
     for rp in &rel_paths {
         let abs_path = rp.to_path(&ctx.source_root);
+        // One `lstat`; the verified kernel names its file type with the same
+        // precedence the planner's source examination uses.
         let source_metadata = std::fs::symlink_metadata(&abs_path).ok();
-        let source_exists = source_metadata.is_some();
-        let source_kind = match source_metadata.as_ref().map(|m| m.file_type()) {
-            None => "missing",
-            Some(kind) if kind.is_symlink() => "symlink",
-            Some(kind) if kind.is_file() => "file",
-            Some(kind) if kind.is_dir() => "directory",
-            Some(_) => "other",
-        };
-        let source_is_regular = source_kind == "file";
+        let source_kind = report_view::source_kind(source_metadata.as_ref().map(|m| {
+            let file_type = m.file_type();
+            LstatType {
+                is_symlink: file_type.is_symlink(),
+                is_file: file_type.is_file(),
+                is_dir: file_type.is_dir(),
+            }
+        }));
+        let source_exists = source_kind.exists();
+        let source_is_regular = source_kind.is_regular_file();
 
         let is_tracked = tracked_set.contains(rp);
         // The alias question is about `rp`, not about the eligible entry, so
@@ -169,7 +158,7 @@ pub(crate) fn run_info_with_context(
         let wti = engine.evaluate(
             &ctx.source_root,
             rp.as_str(),
-            source_kind == "directory",
+            source_kind.is_directory(),
             ctx.core_ignore_case,
             policy.symlink_policy,
         );
@@ -181,7 +170,7 @@ pub(crate) fn run_info_with_context(
                 "source_exists: {}",
                 if source_exists { "yes" } else { "no" }
             );
-            println!("source_kind: {source_kind}");
+            println!("source_kind: {}", source_kind_text(source_kind));
             println!("tracked: {}", if is_tracked { "yes" } else { "no" });
             println!("gitignore: {gitignore_str}");
             println!("worktreeinclude: {wti_str}");
@@ -195,7 +184,9 @@ pub(crate) fn run_info_with_context(
             // Only run full classification when source is a regular file
             // (matching planner preconditions). For missing/non-regular sources
             // classify_destination's read-based comparison would be misleading.
-            if source_is_regular {
+            // The classification runs even when quiet; the presence check for
+            // other sources only when something will be printed.
+            let destination = if source_is_regular {
                 let state = crate::planner::classify_destination(
                     rp,
                     &abs_path,
@@ -203,73 +194,29 @@ pub(crate) fn run_info_with_context(
                     &dest_tracked_set,
                     &fs,
                 );
-                if !cli.quiet {
-                    match state {
-                        crate::model::DestinationState::Missing => {
-                            println!("destination: missing");
-                            if eligible {
-                                println!("planned_action: copy");
-                            }
-                        }
-                        crate::model::DestinationState::UpToDate => {
-                            println!("destination: up-to-date");
-                            if eligible {
-                                println!("planned_action: no-op");
-                            }
-                        }
-                        crate::model::DestinationState::PermissionsDiffer => {
-                            println!("destination: permissions-differ");
-                            if eligible {
-                                // The remedy is named only where it works; the
-                                // classification itself is the same everywhere.
-                                println!(
-                                    "planned_action: skip ({})",
-                                    if crate::fs::overwrite_supported() {
-                                        "content equal, permissions differ; --overwrite repairs"
-                                    } else {
-                                        "content equal, permissions differ"
-                                    }
-                                );
-                            }
-                        }
-                        crate::model::DestinationState::UntrackedConflict => {
-                            println!("destination: untracked-conflict");
-                            if eligible {
-                                println!(
-                                    "planned_action: skip ({})",
-                                    if crate::fs::overwrite_supported() {
-                                        "untracked conflict; --overwrite replaces"
-                                    } else {
-                                        "untracked conflict"
-                                    }
-                                );
-                            }
-                        }
-                        crate::model::DestinationState::TrackedConflict => {
-                            println!("destination: tracked-conflict");
-                            if eligible {
-                                println!("planned_action: skip (tracked conflict)");
-                            }
-                        }
-                        crate::model::DestinationState::TypeConflict => {
-                            println!("destination: type-conflict");
-                            if eligible {
-                                println!("planned_action: skip (type conflict)");
-                            }
-                        }
-                        crate::model::DestinationState::UnsafePath => {
-                            println!("destination: unsafe-path");
-                            if eligible {
-                                println!("planned_action: skip (unsafe path)");
-                            }
-                        }
-                    }
-                }
+                Some(InfoDestination::Classified(super::list::dest_state_view(
+                    &state,
+                )))
             } else if !cli.quiet {
-                if std::fs::symlink_metadata(&dest_path).is_ok() {
-                    println!("destination: exists");
-                } else {
-                    println!("destination: missing");
+                Some(InfoDestination::Unclassified {
+                    present: std::fs::symlink_metadata(&dest_path).is_ok(),
+                })
+            } else {
+                None
+            };
+            if let Some(destination) = destination
+                && !cli.quiet
+            {
+                // The remedy is named only where it works; the classification
+                // itself is the same everywhere.
+                let view = report_view::info_destination(
+                    destination,
+                    eligible,
+                    crate::fs::overwrite_supported(),
+                );
+                println!("destination: {}", destination_text(view.destination));
+                if let Some(action) = view.planned_action {
+                    println!("planned_action: {}", info_action_text(action));
                 }
             }
         }
@@ -279,6 +226,62 @@ pub(crate) fn run_info_with_context(
     }
 
     Ok(())
+}
+
+/// The text `info` prints for a source kind.
+fn source_kind_text(kind: SourceKindLabel) -> &'static str {
+    match kind {
+        SourceKindLabel::Missing => "missing",
+        SourceKindLabel::Symlink => "symlink",
+        SourceKindLabel::File => "file",
+        SourceKindLabel::Directory => "directory",
+        SourceKindLabel::Other => "other",
+    }
+}
+
+/// The text `info` prints for a destination label.
+fn destination_text(label: DestLabel) -> &'static str {
+    match label {
+        DestLabel::Missing => "missing",
+        DestLabel::UpToDate => "up-to-date",
+        DestLabel::PermissionsDiffer => "permissions-differ",
+        DestLabel::UntrackedConflict => "untracked-conflict",
+        DestLabel::TrackedConflict => "tracked-conflict",
+        DestLabel::TypeConflict => "type-conflict",
+        DestLabel::UnsafePath => "unsafe-path",
+        DestLabel::Exists => "exists",
+    }
+}
+
+/// The text `info` prints for a planned action.
+///
+/// The kernel proves `info` never plans `UnsupportedSourceType` (it plans
+/// only for classified regular sources); the arm exists for exhaustiveness.
+fn info_action_text(action: ActionLabel) -> &'static str {
+    match action {
+        ActionLabel::Copy => "copy",
+        ActionLabel::NoOp => "no-op",
+        ActionLabel::Skip { reason, remedy } => match reason {
+            SkipKind::PermissionsDiffer => {
+                if remedy {
+                    "skip (content equal, permissions differ; --overwrite repairs)"
+                } else {
+                    "skip (content equal, permissions differ)"
+                }
+            }
+            SkipKind::UntrackedConflict => {
+                if remedy {
+                    "skip (untracked conflict; --overwrite replaces)"
+                } else {
+                    "skip (untracked conflict)"
+                }
+            }
+            SkipKind::TrackedConflict => "skip (tracked conflict)",
+            SkipKind::TypeConflict => "skip (type conflict)",
+            SkipKind::UnsafePath => "skip (unsafe path)",
+            SkipKind::UnsupportedSourceType => "skip (unsupported source type)",
+        },
+    }
 }
 
 /// Print the active resolved policy in a stable, machine-readable format.
@@ -301,4 +304,95 @@ fn print_resolved_policy(policy: &ResolvedPolicy) {
         }
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_kind_labels_and_precedence() {
+        let lstat = |is_symlink, is_file, is_dir| {
+            Some(LstatType {
+                is_symlink,
+                is_file,
+                is_dir,
+            })
+        };
+        let text = |observed| source_kind_text(report_view::source_kind(observed));
+        assert_eq!(text(None), "missing");
+        assert_eq!(text(lstat(true, false, false)), "symlink");
+        assert_eq!(text(lstat(false, true, false)), "file");
+        assert_eq!(text(lstat(false, false, true)), "directory");
+        assert_eq!(text(lstat(false, false, false)), "other");
+        let file = report_view::source_kind(lstat(false, true, false));
+        assert!(file.is_regular_file() && file.exists() && !file.is_directory());
+        let missing = report_view::source_kind(None);
+        assert!(!missing.exists() && !missing.is_regular_file());
+    }
+
+    #[test]
+    fn destination_and_action_texts_match_the_published_wording() {
+        let all = [
+            (DestLabel::Missing, "missing"),
+            (DestLabel::UpToDate, "up-to-date"),
+            (DestLabel::PermissionsDiffer, "permissions-differ"),
+            (DestLabel::UntrackedConflict, "untracked-conflict"),
+            (DestLabel::TrackedConflict, "tracked-conflict"),
+            (DestLabel::TypeConflict, "type-conflict"),
+            (DestLabel::UnsafePath, "unsafe-path"),
+            (DestLabel::Exists, "exists"),
+        ];
+        for (label, text) in all {
+            assert_eq!(destination_text(label), text);
+        }
+        let skip = |reason, remedy| ActionLabel::Skip { reason, remedy };
+        assert_eq!(info_action_text(ActionLabel::Copy), "copy");
+        assert_eq!(info_action_text(ActionLabel::NoOp), "no-op");
+        assert_eq!(
+            info_action_text(skip(SkipKind::UntrackedConflict, true)),
+            "skip (untracked conflict; --overwrite replaces)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::UntrackedConflict, false)),
+            "skip (untracked conflict)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::PermissionsDiffer, true)),
+            "skip (content equal, permissions differ; --overwrite repairs)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::PermissionsDiffer, false)),
+            "skip (content equal, permissions differ)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::TrackedConflict, false)),
+            "skip (tracked conflict)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::TypeConflict, false)),
+            "skip (type conflict)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::UnsafePath, false)),
+            "skip (unsafe path)"
+        );
+    }
+
+    #[test]
+    fn info_destination_plans_only_for_eligible_classified_paths() {
+        use report_view::{DestState, info_destination};
+        let classified = InfoDestination::Classified(DestState::Missing);
+        let view = info_destination(classified, true, true);
+        assert_eq!(view.destination, DestLabel::Missing);
+        assert_eq!(view.planned_action, Some(ActionLabel::Copy));
+        assert_eq!(
+            info_destination(classified, false, true).planned_action,
+            None
+        );
+        let present = InfoDestination::Unclassified { present: true };
+        let view = info_destination(present, true, true);
+        assert_eq!(view.destination, DestLabel::Exists);
+        assert_eq!(view.planned_action, None);
+    }
 }

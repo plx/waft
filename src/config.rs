@@ -15,11 +15,19 @@
 //! Project configuration discovery is bounded to the resolved source
 //! repository. `--isolated` omits the user and environment policy layers for
 //! managed, reproducible invocation.
+//!
+//! The decisions in this module (the accepted spellings, presets, layer
+//! merge and order, config-file acceptance, the environment key table and
+//! boolean tokens, the user config base variable, and which directories
+//! discovery searches) are made by the Verus-verified kernels in
+//! `waft_verified::policy`; this module converts its types to the kernels'
+//! and performs the I/O and error formatting around them.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
+use waft_verified::policy::{discovery, env_layer, merge, raw, user_source, vocab};
 
 use crate::error::{Error, Result};
 
@@ -45,11 +53,7 @@ pub enum CompatProfile {
 impl CompatProfile {
     /// Stable string identifier for this profile.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude => "claude",
-            Self::Git => "git",
-            Self::Wt => "wt",
-        }
+        vocab::CompatProfile::from(self).as_str()
     }
 
     /// Whether this profile's preset selects files with no `.worktreeinclude`
@@ -59,19 +63,44 @@ impl CompatProfile {
     /// can set `when_missing = blank` on top of any profile. That distinction
     /// is what the empty-selection note needs, because naming a profile as the
     /// reason a selection came back empty is only fair when the profile itself
-    /// is what blanks it.
+    /// is what blanks it. The verified kernel proves this holds exactly for
+    /// `wt`, and that a resolved `blank` under such a profile was set
+    /// explicitly by a layer at or after the last profile selection
+    /// (`policy::merge::theorem_attribution`).
     pub fn selects_without_rule_file(self) -> bool {
-        Preset::for_profile(self).when_missing == WhenMissingWorktreeinclude::AllIgnored
+        merge::selects_without_rule_file(self.into())
     }
 
     fn parse(s: &str) -> std::result::Result<Self, String> {
-        match s {
-            "claude" => Ok(Self::Claude),
-            "git" => Ok(Self::Git),
-            "wt" => Ok(Self::Wt),
-            other => Err(format!(
-                "unknown compat profile {other:?}; expected claude|git|wt"
-            )),
+        vocab::CompatProfile::parse(s)
+            .map(Self::from)
+            .ok_or_else(|| Self::unknown_value(s))
+    }
+
+    fn unknown_value(s: &str) -> String {
+        format!(
+            "unknown compat profile {s:?}; expected {}",
+            vocab::CompatProfile::EXPECTED
+        )
+    }
+}
+
+impl From<CompatProfile> for vocab::CompatProfile {
+    fn from(value: CompatProfile) -> Self {
+        match value {
+            CompatProfile::Claude => Self::Claude,
+            CompatProfile::Git => Self::Git,
+            CompatProfile::Wt => Self::Wt,
+        }
+    }
+}
+
+impl From<vocab::CompatProfile> for CompatProfile {
+    fn from(value: vocab::CompatProfile) -> Self {
+        match value {
+            vocab::CompatProfile::Claude => Self::Claude,
+            vocab::CompatProfile::Git => Self::Git,
+            vocab::CompatProfile::Wt => Self::Wt,
         }
     }
 }
@@ -89,19 +118,37 @@ pub enum WhenMissingWorktreeinclude {
 impl WhenMissingWorktreeinclude {
     /// Stable string identifier.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Blank => "blank",
-            Self::AllIgnored => "all-ignored",
-        }
+        vocab::WhenMissingWorktreeinclude::from(self).as_str()
     }
 
     fn parse(s: &str) -> std::result::Result<Self, String> {
-        match s {
-            "blank" => Ok(Self::Blank),
-            "all-ignored" => Ok(Self::AllIgnored),
-            other => Err(format!(
-                "unknown when_missing_worktreeinclude {other:?}; expected blank|all-ignored"
-            )),
+        vocab::WhenMissingWorktreeinclude::parse(s)
+            .map(Self::from)
+            .ok_or_else(|| Self::unknown_value(s))
+    }
+
+    fn unknown_value(s: &str) -> String {
+        format!(
+            "unknown when_missing_worktreeinclude {s:?}; expected {}",
+            vocab::WhenMissingWorktreeinclude::EXPECTED
+        )
+    }
+}
+
+impl From<WhenMissingWorktreeinclude> for vocab::WhenMissingWorktreeinclude {
+    fn from(value: WhenMissingWorktreeinclude) -> Self {
+        match value {
+            WhenMissingWorktreeinclude::Blank => Self::Blank,
+            WhenMissingWorktreeinclude::AllIgnored => Self::AllIgnored,
+        }
+    }
+}
+
+impl From<vocab::WhenMissingWorktreeinclude> for WhenMissingWorktreeinclude {
+    fn from(value: vocab::WhenMissingWorktreeinclude) -> Self {
+        match value {
+            vocab::WhenMissingWorktreeinclude::Blank => Self::Blank,
+            vocab::WhenMissingWorktreeinclude::AllIgnored => Self::AllIgnored,
         }
     }
 }
@@ -123,21 +170,39 @@ pub enum WorktreeincludeSemantics {
 impl WorktreeincludeSemantics {
     /// Stable string identifier.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Claude202604 => "claude-2026-04",
-            Self::Git => "git",
-            Self::Wt039 => "wt-0.39",
-        }
+        vocab::WorktreeincludeSemantics::from(self).as_str()
     }
 
     fn parse(s: &str) -> std::result::Result<Self, String> {
-        match s {
-            "claude-2026-04" => Ok(Self::Claude202604),
-            "git" => Ok(Self::Git),
-            "wt-0.39" => Ok(Self::Wt039),
-            other => Err(format!(
-                "unknown worktreeinclude semantics {other:?}; expected claude-2026-04|git|wt-0.39"
-            )),
+        vocab::WorktreeincludeSemantics::parse(s)
+            .map(Self::from)
+            .ok_or_else(|| Self::unknown_value(s))
+    }
+
+    fn unknown_value(s: &str) -> String {
+        format!(
+            "unknown worktreeinclude semantics {s:?}; expected {}",
+            vocab::WorktreeincludeSemantics::EXPECTED
+        )
+    }
+}
+
+impl From<WorktreeincludeSemantics> for vocab::WorktreeincludeSemantics {
+    fn from(value: WorktreeincludeSemantics) -> Self {
+        match value {
+            WorktreeincludeSemantics::Claude202604 => Self::Claude202604,
+            WorktreeincludeSemantics::Git => Self::Git,
+            WorktreeincludeSemantics::Wt039 => Self::Wt039,
+        }
+    }
+}
+
+impl From<vocab::WorktreeincludeSemantics> for WorktreeincludeSemantics {
+    fn from(value: vocab::WorktreeincludeSemantics) -> Self {
+        match value {
+            vocab::WorktreeincludeSemantics::Claude202604 => Self::Claude202604,
+            vocab::WorktreeincludeSemantics::Git => Self::Git,
+            vocab::WorktreeincludeSemantics::Wt039 => Self::Wt039,
         }
     }
 }
@@ -157,21 +222,39 @@ pub enum SymlinkPolicy {
 impl SymlinkPolicy {
     /// Stable string identifier.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Follow => "follow",
-            Self::Ignore => "ignore",
-            Self::Error => "error",
-        }
+        vocab::SymlinkPolicy::from(self).as_str()
     }
 
     fn parse(s: &str) -> std::result::Result<Self, String> {
-        match s {
-            "follow" => Ok(Self::Follow),
-            "ignore" => Ok(Self::Ignore),
-            "error" => Ok(Self::Error),
-            other => Err(format!(
-                "unknown symlink policy {other:?}; expected follow|ignore|error"
-            )),
+        vocab::SymlinkPolicy::parse(s)
+            .map(Self::from)
+            .ok_or_else(|| Self::unknown_value(s))
+    }
+
+    fn unknown_value(s: &str) -> String {
+        format!(
+            "unknown symlink policy {s:?}; expected {}",
+            vocab::SymlinkPolicy::EXPECTED
+        )
+    }
+}
+
+impl From<SymlinkPolicy> for vocab::SymlinkPolicy {
+    fn from(value: SymlinkPolicy) -> Self {
+        match value {
+            SymlinkPolicy::Follow => Self::Follow,
+            SymlinkPolicy::Ignore => Self::Ignore,
+            SymlinkPolicy::Error => Self::Error,
+        }
+    }
+}
+
+impl From<vocab::SymlinkPolicy> for SymlinkPolicy {
+    fn from(value: vocab::SymlinkPolicy) -> Self {
+        match value {
+            vocab::SymlinkPolicy::Follow => Self::Follow,
+            vocab::SymlinkPolicy::Ignore => Self::Ignore,
+            vocab::SymlinkPolicy::Error => Self::Error,
         }
     }
 }
@@ -190,19 +273,37 @@ pub enum BuiltinExcludeSet {
 impl BuiltinExcludeSet {
     /// Stable string identifier.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::ToolingV1 => "tooling-v1",
-        }
+        vocab::BuiltinExcludeSet::from(self).as_str()
     }
 
     fn parse(s: &str) -> std::result::Result<Self, String> {
-        match s {
-            "none" => Ok(Self::None),
-            "tooling-v1" => Ok(Self::ToolingV1),
-            other => Err(format!(
-                "unknown builtin exclude set {other:?}; expected none|tooling-v1"
-            )),
+        vocab::BuiltinExcludeSet::parse(s)
+            .map(Self::from)
+            .ok_or_else(|| Self::unknown_value(s))
+    }
+
+    fn unknown_value(s: &str) -> String {
+        format!(
+            "unknown builtin exclude set {s:?}; expected {}",
+            vocab::BuiltinExcludeSet::EXPECTED
+        )
+    }
+}
+
+impl From<BuiltinExcludeSet> for vocab::BuiltinExcludeSet {
+    fn from(value: BuiltinExcludeSet) -> Self {
+        match value {
+            BuiltinExcludeSet::None => Self::None,
+            BuiltinExcludeSet::ToolingV1 => Self::ToolingV1,
+        }
+    }
+}
+
+impl From<vocab::BuiltinExcludeSet> for BuiltinExcludeSet {
+    fn from(value: vocab::BuiltinExcludeSet) -> Self {
+        match value {
+            vocab::BuiltinExcludeSet::None => Self::None,
+            vocab::BuiltinExcludeSet::ToolingV1 => Self::ToolingV1,
         }
     }
 }
@@ -227,21 +328,41 @@ pub enum CopyStrategy {
 impl CopyStrategy {
     /// Stable string identifier.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::SimpleCopy => "simple-copy",
-            Self::CowCopy => "cow-copy",
-        }
+        vocab::CopyStrategy::from(self).as_str()
     }
 
+    /// Parses a canonical name or one of the aliases `default`, `simple`,
+    /// `cow` and `reflink` (TOML and `WAFT_COPY_STRATEGY` only).
     fn parse(s: &str) -> std::result::Result<Self, String> {
-        match s {
-            "auto" | "default" => Ok(Self::Auto),
-            "simple-copy" | "simple" => Ok(Self::SimpleCopy),
-            "cow-copy" | "cow" | "reflink" => Ok(Self::CowCopy),
-            other => Err(format!(
-                "unknown copy strategy {other:?}; expected auto|simple-copy|cow-copy"
-            )),
+        vocab::CopyStrategy::parse(s)
+            .map(Self::from)
+            .ok_or_else(|| Self::unknown_value(s))
+    }
+
+    fn unknown_value(s: &str) -> String {
+        format!(
+            "unknown copy strategy {s:?}; expected {}",
+            vocab::CopyStrategy::EXPECTED
+        )
+    }
+}
+
+impl From<CopyStrategy> for vocab::CopyStrategy {
+    fn from(value: CopyStrategy) -> Self {
+        match value {
+            CopyStrategy::Auto => Self::Auto,
+            CopyStrategy::SimpleCopy => Self::SimpleCopy,
+            CopyStrategy::CowCopy => Self::CowCopy,
+        }
+    }
+}
+
+impl From<vocab::CopyStrategy> for CopyStrategy {
+    fn from(value: vocab::CopyStrategy) -> Self {
+        match value {
+            vocab::CopyStrategy::Auto => Self::Auto,
+            vocab::CopyStrategy::SimpleCopy => Self::SimpleCopy,
+            vocab::CopyStrategy::CowCopy => Self::CowCopy,
         }
     }
 }
@@ -292,67 +413,73 @@ pub struct ResolvedPolicy {
     pub copy_strategy: CopyStrategy,
 }
 
-/// Knob values implied by a compat profile preset.
-///
-/// Profiles never contribute `extra_excludes`; that array is owned by the
-/// layered config. `profile` is implicit in the preset itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Preset {
-    when_missing: WhenMissingWorktreeinclude,
-    semantics: WorktreeincludeSemantics,
-    symlink_policy: SymlinkPolicy,
-    builtin_exclude_set: BuiltinExcludeSet,
-}
+impl ConfigLayer {
+    /// Lower this layer to the verified merge kernel's view of it.
+    ///
+    /// The destructuring is exhaustive so a new field fails to compile until
+    /// it is mapped.
+    fn kernel_view(&self) -> merge::LayerView<'_> {
+        let Self {
+            profile,
+            when_missing,
+            semantics,
+            symlink_policy,
+            builtin_exclude_set,
+            extra_excludes,
+            replace_extra_excludes,
+            copy_strategy,
+        } = self;
+        merge::LayerView {
+            knobs: merge::KnobLayer {
+                profile: profile.map(Into::into),
+                when_missing: when_missing.map(Into::into),
+                semantics: semantics.map(Into::into),
+                symlink_policy: symlink_policy.map(Into::into),
+                builtin_exclude_set: builtin_exclude_set.map(Into::into),
+                copy_strategy: copy_strategy.map(Into::into),
+                replace_extra: *replace_extra_excludes,
+            },
+            extras: extra_excludes,
+        }
+    }
 
-impl Preset {
-    fn for_profile(profile: CompatProfile) -> Self {
-        match profile {
-            CompatProfile::Claude => Self {
-                when_missing: WhenMissingWorktreeinclude::Blank,
-                semantics: WorktreeincludeSemantics::Claude202604,
-                symlink_policy: SymlinkPolicy::Follow,
-                builtin_exclude_set: BuiltinExcludeSet::None,
-            },
-            CompatProfile::Git => Self {
-                when_missing: WhenMissingWorktreeinclude::Blank,
-                semantics: WorktreeincludeSemantics::Git,
-                symlink_policy: SymlinkPolicy::Ignore,
-                builtin_exclude_set: BuiltinExcludeSet::None,
-            },
-            CompatProfile::Wt => Self {
-                when_missing: WhenMissingWorktreeinclude::AllIgnored,
-                semantics: WorktreeincludeSemantics::Wt039,
-                symlink_policy: SymlinkPolicy::Follow,
-                builtin_exclude_set: BuiltinExcludeSet::ToolingV1,
-            },
+    /// Lift kernel knobs plus this layer's extra excludes to a layer
+    /// (exhaustive).
+    fn from_kernel(knobs: merge::KnobLayer, extra_excludes: Vec<String>) -> Self {
+        let merge::KnobLayer {
+            profile,
+            when_missing,
+            semantics,
+            symlink_policy,
+            builtin_exclude_set,
+            copy_strategy,
+            replace_extra,
+        } = knobs;
+        Self {
+            profile: profile.map(Into::into),
+            when_missing: when_missing.map(Into::into),
+            semantics: semantics.map(Into::into),
+            symlink_policy: symlink_policy.map(Into::into),
+            builtin_exclude_set: builtin_exclude_set.map(Into::into),
+            extra_excludes,
+            replace_extra_excludes: replace_extra,
+            copy_strategy: copy_strategy.map(Into::into),
         }
     }
 }
 
-/// Default compat profile applied when no layer sets `compat.profile`.
-const DEFAULT_PROFILE: CompatProfile = CompatProfile::Claude;
-
-/// Default copy strategy applied when no layer sets `copy.strategy`.
-const DEFAULT_COPY_STRATEGY: CopyStrategy = CopyStrategy::Auto;
-
 impl Default for ResolvedPolicy {
     /// Resolve to the default profile's preset.
     ///
-    /// `DEFAULT_PROFILE` is `claude`, so the OOTB experience matches
+    /// The default profile is `claude`, so the OOTB experience matches
     /// observed Claude Code behavior. Users who want the previous
     /// per-directory Git semantics can set `--compat-profile git` (or
     /// `compat.profile = "git"` in `.waft.toml`).
     fn default() -> Self {
-        let preset = Preset::for_profile(DEFAULT_PROFILE);
-        Self {
-            profile: DEFAULT_PROFILE,
-            when_missing: preset.when_missing,
-            semantics: preset.semantics,
-            symlink_policy: preset.symlink_policy,
-            builtin_exclude_set: preset.builtin_exclude_set,
+        Self::from_kernel(merge::Resolution {
+            knobs: merge::default_knobs(),
             extra_excludes: Vec::new(),
-            copy_strategy: DEFAULT_COPY_STRATEGY,
-        }
+        })
     }
 }
 
@@ -371,44 +498,42 @@ impl ResolvedPolicy {
     /// - `extra_excludes` accumulate across layers; a layer's
     ///   `replace_extra_excludes = true` clears accumulated values before
     ///   appending the layer's own values.
+    ///
+    /// The decision is made by the verified kernel
+    /// `waft_verified::policy::merge::resolve_layers`, which is proven equal
+    /// to a closed form (see that module's documentation).
     pub fn from_layers<'a, I>(layers: I) -> Self
     where
         I: IntoIterator<Item = &'a ConfigLayer>,
     {
-        let mut resolved = Self::default();
-        for layer in layers {
-            if let Some(v) = layer.profile {
-                let preset = Preset::for_profile(v);
-                resolved.profile = v;
-                resolved.when_missing = preset.when_missing;
-                resolved.semantics = preset.semantics;
-                resolved.symlink_policy = preset.symlink_policy;
-                resolved.builtin_exclude_set = preset.builtin_exclude_set;
-            }
-            if let Some(v) = layer.when_missing {
-                resolved.when_missing = v;
-            }
-            if let Some(v) = layer.semantics {
-                resolved.semantics = v;
-            }
-            if let Some(v) = layer.symlink_policy {
-                resolved.symlink_policy = v;
-            }
-            if let Some(v) = layer.builtin_exclude_set {
-                resolved.builtin_exclude_set = v;
-            }
-            if let Some(v) = layer.copy_strategy {
-                resolved.copy_strategy = v;
-            }
-            if layer.replace_extra_excludes == Some(true) {
-                resolved.extra_excludes.clear();
-            }
-            resolved
-                .extra_excludes
-                .extend(layer.extra_excludes.iter().cloned());
-        }
+        let views: Vec<merge::LayerView<'a>> =
+            layers.into_iter().map(ConfigLayer::kernel_view).collect();
+        Self::from_kernel(merge::resolve_layers(&views))
+    }
 
-        resolved
+    /// Lift a kernel resolution back to the production types (exhaustive).
+    fn from_kernel(resolution: merge::Resolution) -> Self {
+        let merge::Resolution {
+            knobs,
+            extra_excludes,
+        } = resolution;
+        let merge::ResolvedKnobs {
+            profile,
+            when_missing,
+            semantics,
+            symlink_policy,
+            builtin_exclude_set,
+            copy_strategy,
+        } = knobs;
+        Self {
+            profile: profile.into(),
+            when_missing: when_missing.into(),
+            semantics: semantics.into(),
+            symlink_policy: symlink_policy.into(),
+            builtin_exclude_set: builtin_exclude_set.into(),
+            extra_excludes,
+            copy_strategy: copy_strategy.into(),
+        }
     }
 }
 
@@ -473,54 +598,63 @@ pub fn parse_toml(source: &str, content: &str) -> Result<ConfigLayer> {
         message: format!("{source}: {e}"),
     })?;
 
-    if let Some(v) = raw.version
-        && v != 1
-    {
-        return Err(Error::Config {
-            message: format!("{source}: unsupported config version {v}; expected 1"),
-        });
+    // An absent section behaves exactly like an empty one.
+    let RawConfig {
+        version,
+        compat,
+        worktreeinclude,
+        exclude,
+        copy,
+    } = raw;
+    let RawCompat { profile } = compat.unwrap_or_default();
+    let RawWorktreeinclude {
+        when_missing,
+        semantics,
+        symlink_policy,
+    } = worktreeinclude.unwrap_or_default();
+    let RawExclude {
+        builtin_set,
+        extra,
+        replace_extra,
+    } = exclude.unwrap_or_default();
+    let RawCopy { strategy } = copy.unwrap_or_default();
+
+    // The verified kernel applies the version gate, checks the fields in a
+    // fixed order, and parses each present field.
+    let knobs = raw::layer_from_raw(raw::RawKnobs {
+        version,
+        profile: profile.as_deref(),
+        when_missing: when_missing.as_deref(),
+        semantics: semantics.as_deref(),
+        symlink_policy: symlink_policy.as_deref(),
+        builtin_exclude_set: builtin_set.as_deref(),
+        copy_strategy: strategy.as_deref(),
+        replace_extra,
+    })
+    .map_err(|e| Error::Config {
+        message: match e {
+            raw::RawError::UnsupportedVersion(v) => {
+                format!("{source}: unsupported config version {v}; expected 1")
+            }
+            raw::RawError::UnknownValue(field, s) => {
+                format!("{source}: {}", unknown_value_message(field, s))
+            }
+        },
+    })?;
+
+    Ok(ConfigLayer::from_kernel(knobs, extra.unwrap_or_default()))
+}
+
+/// The "unknown ..." message for a rejected config-file value.
+fn unknown_value_message(field: raw::RawField, value: &str) -> String {
+    match field {
+        raw::RawField::CompatProfile => CompatProfile::unknown_value(value),
+        raw::RawField::WhenMissing => WhenMissingWorktreeinclude::unknown_value(value),
+        raw::RawField::Semantics => WorktreeincludeSemantics::unknown_value(value),
+        raw::RawField::SymlinkPolicy => SymlinkPolicy::unknown_value(value),
+        raw::RawField::BuiltinExcludeSet => BuiltinExcludeSet::unknown_value(value),
+        raw::RawField::CopyStrategy => CopyStrategy::unknown_value(value),
     }
-
-    let mut layer = ConfigLayer::default();
-    let cfg_err = |e: String| Error::Config {
-        message: format!("{source}: {e}"),
-    };
-
-    if let Some(compat) = raw.compat
-        && let Some(s) = compat.profile
-    {
-        layer.profile = Some(CompatProfile::parse(&s).map_err(cfg_err)?);
-    }
-
-    if let Some(wti) = raw.worktreeinclude {
-        if let Some(s) = wti.when_missing {
-            layer.when_missing = Some(WhenMissingWorktreeinclude::parse(&s).map_err(cfg_err)?);
-        }
-        if let Some(s) = wti.semantics {
-            layer.semantics = Some(WorktreeincludeSemantics::parse(&s).map_err(cfg_err)?);
-        }
-        if let Some(s) = wti.symlink_policy {
-            layer.symlink_policy = Some(SymlinkPolicy::parse(&s).map_err(cfg_err)?);
-        }
-    }
-
-    if let Some(excl) = raw.exclude {
-        if let Some(s) = excl.builtin_set {
-            layer.builtin_exclude_set = Some(BuiltinExcludeSet::parse(&s).map_err(cfg_err)?);
-        }
-        if let Some(extra) = excl.extra {
-            layer.extra_excludes = extra;
-        }
-        layer.replace_extra_excludes = excl.replace_extra;
-    }
-
-    if let Some(copy) = raw.copy
-        && let Some(s) = copy.strategy
-    {
-        layer.copy_strategy = Some(CopyStrategy::parse(&s).map_err(cfg_err)?);
-    }
-
-    Ok(layer)
 }
 
 // --- Environment variable layer ---
@@ -543,92 +677,91 @@ where
     let mut layer = ConfigLayer::default();
 
     for (k, v) in vars {
-        match k.as_str() {
-            "WAFT_COMPAT_PROFILE" => {
-                layer.profile = Some(CompatProfile::parse(&v).map_err(|e| Error::Config {
-                    message: format!("{ENV_SOURCE} (WAFT_COMPAT_PROFILE): {e}"),
-                })?);
+        // The verified key table recognizes exactly the eight names below
+        // (case-sensitive); every other variable is ignored.
+        let Some(key) = env_layer::EnvKey::classify(&k) else {
+            continue;
+        };
+        // `key.as_str()` is proven equal to `k` here.
+        let invalid = |e: String| Error::Config {
+            message: format!("{ENV_SOURCE} ({}): {e}", key.as_str()),
+        };
+        match key {
+            env_layer::EnvKey::CompatProfile => {
+                layer.profile = Some(CompatProfile::parse(&v).map_err(invalid)?);
             }
-            "WAFT_WHEN_MISSING_WORKTREEINCLUDE" => {
-                layer.when_missing =
-                    Some(
-                        WhenMissingWorktreeinclude::parse(&v).map_err(|e| Error::Config {
-                            message: format!(
-                                "{ENV_SOURCE} (WAFT_WHEN_MISSING_WORKTREEINCLUDE): {e}"
-                            ),
-                        })?,
-                    );
+            env_layer::EnvKey::WhenMissingWorktreeinclude => {
+                layer.when_missing = Some(WhenMissingWorktreeinclude::parse(&v).map_err(invalid)?);
             }
-            "WAFT_WORKTREEINCLUDE_SEMANTICS" => {
-                layer.semantics =
-                    Some(
-                        WorktreeincludeSemantics::parse(&v).map_err(|e| Error::Config {
-                            message: format!("{ENV_SOURCE} (WAFT_WORKTREEINCLUDE_SEMANTICS): {e}"),
-                        })?,
-                    );
+            env_layer::EnvKey::WorktreeincludeSemantics => {
+                layer.semantics = Some(WorktreeincludeSemantics::parse(&v).map_err(invalid)?);
             }
-            "WAFT_WORKTREEINCLUDE_SYMLINK_POLICY" => {
-                layer.symlink_policy =
-                    Some(SymlinkPolicy::parse(&v).map_err(|e| Error::Config {
-                        message: format!("{ENV_SOURCE} (WAFT_WORKTREEINCLUDE_SYMLINK_POLICY): {e}"),
-                    })?);
+            env_layer::EnvKey::WorktreeincludeSymlinkPolicy => {
+                layer.symlink_policy = Some(SymlinkPolicy::parse(&v).map_err(invalid)?);
             }
-            "WAFT_BUILTIN_EXCLUDE_SET" => {
-                layer.builtin_exclude_set =
-                    Some(BuiltinExcludeSet::parse(&v).map_err(|e| Error::Config {
-                        message: format!("{ENV_SOURCE} (WAFT_BUILTIN_EXCLUDE_SET): {e}"),
-                    })?);
+            env_layer::EnvKey::BuiltinExcludeSet => {
+                layer.builtin_exclude_set = Some(BuiltinExcludeSet::parse(&v).map_err(invalid)?);
             }
-            "WAFT_EXTRA_EXCLUDE" => {
-                layer.extra_excludes = v
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect();
+            env_layer::EnvKey::ExtraExclude => {
+                // Verified equal to `v.split(',').map(str::trim)
+                // .filter(|s| !s.is_empty())`.
+                layer.extra_excludes = env_layer::parse_exclude_list(&v);
             }
-            "WAFT_REPLACE_EXTRA_EXCLUDES" => {
-                layer.replace_extra_excludes =
-                    Some(parse_env_bool(&v).map_err(|e| Error::Config {
-                        message: format!("{ENV_SOURCE} (WAFT_REPLACE_EXTRA_EXCLUDES): {e}"),
-                    })?);
+            env_layer::EnvKey::ReplaceExtraExcludes => {
+                layer.replace_extra_excludes = Some(parse_env_bool(&v).map_err(invalid)?);
             }
-            "WAFT_COPY_STRATEGY" => {
-                layer.copy_strategy = Some(CopyStrategy::parse(&v).map_err(|e| Error::Config {
-                    message: format!("{ENV_SOURCE} (WAFT_COPY_STRATEGY): {e}"),
-                })?);
+            env_layer::EnvKey::CopyStrategy => {
+                layer.copy_strategy = Some(CopyStrategy::parse(&v).map_err(invalid)?);
             }
-            _ => {}
         }
     }
 
     Ok(layer)
 }
 
+/// Read a boolean environment value. The verified kernel decides on the
+/// value trimmed of Unicode whitespace and ASCII-lowercased; the error
+/// echoes that same normalized value.
 fn parse_env_bool(s: &str) -> std::result::Result<bool, String> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" | "" => Ok(false),
-        other => Err(format!("expected boolean (1|0|true|false), got {other:?}")),
-    }
+    env_layer::parse_env_bool(s).ok_or_else(|| {
+        let normalized = s.trim().to_ascii_lowercase();
+        format!("expected boolean (1|0|true|false), got {normalized:?}")
+    })
 }
 
 // --- File discovery ---
 
 /// User config file location: `$XDG_CONFIG_HOME/waft/config.toml` or
 /// `~/.config/waft/config.toml`.
+///
+/// The verified kernel `policy::user_source::select_config_home` queries
+/// `XDG_CONFIG_HOME`, `HOME` and `USERPROFILE` in that order, stopping at the
+/// first one that is set.
 pub fn user_config_path() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        let p = PathBuf::from(xdg).join("waft").join("config.toml");
-        return Some(p);
+    let mut lookup = ProcessConfigHome { value: None };
+    let var = user_source::select_config_home(&mut lookup)?;
+    // The kernel proves its last query was `var` and found it set, so
+    // `value` holds that variable's value.
+    let base = PathBuf::from(lookup.value?);
+    Some(match var {
+        user_source::ConfigHomeVar::XdgConfigHome => base.join("waft").join("config.toml"),
+        user_source::ConfigHomeVar::Home | user_source::ConfigHomeVar::UserProfile => {
+            base.join(".config").join("waft").join("config.toml")
+        }
+    })
+}
+
+/// Process-environment oracle for [`user_config_path`]: remembers the value
+/// of the most recently queried variable.
+struct ProcessConfigHome {
+    value: Option<std::ffi::OsString>,
+}
+
+impl user_source::EnvLookup for ProcessConfigHome {
+    fn is_set(&mut self, var: user_source::ConfigHomeVar) -> bool {
+        self.value = std::env::var_os(var.as_str());
+        self.value.is_some()
     }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(
-        PathBuf::from(home)
-            .join(".config")
-            .join("waft")
-            .join("config.toml"),
-    )
 }
 
 /// Read and parse the user config layer if the file exists.
@@ -693,44 +826,26 @@ pub fn discover_project_configs_in_repo(
     gitlinks: &HashSet<String>,
     case_insensitive: bool,
 ) -> Vec<PathBuf> {
-    let mut directories = vec![repo_root.to_path_buf()];
+    let mut walk = ConfigSearchWalk {
+        repo_root,
+        gitlinks,
+        case_insensitive,
+        components: Vec::new(),
+        current: repo_root.to_path_buf(),
+        directories: vec![repo_root.to_path_buf()],
+    };
 
     if let Ok(relative) = cwd.strip_prefix(repo_root) {
-        let mut current = repo_root.to_path_buf();
-        for component in relative.components() {
-            use std::path::Component;
-
-            match component {
-                Component::CurDir => continue,
-                Component::Normal(part) => current.push(part),
-                // Callers pass an absolute, normalized source-view path. If
-                // that invariant is violated, keep the safe root-only result.
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => break,
-            }
-
-            // Do not let a nested checkout's branch-local config influence
-            // selection in the outer source repository.
-            if current != repo_root {
-                let is_gitlink = crate::path::RepoRelPath::normalize(&current, repo_root)
-                    .ok()
-                    .is_some_and(|relative| {
-                        gitlinks.iter().any(|gitlink| {
-                            crate::git::repo_paths_equivalent(
-                                relative.as_str(),
-                                gitlink,
-                                crate::walk::boundary_case_folds(case_insensitive),
-                            )
-                        })
-                    });
-                if current.join(".git").exists() || is_gitlink {
-                    break;
-                }
-            }
-            directories.push(current.clone());
-        }
+        walk.components = relative.components().collect();
+        let kinds: Vec<discovery::ComponentKind> =
+            walk.components.iter().map(component_kind).collect();
+        // The verified kernel decides which components are descended into
+        // and searched: names only, in order, up to the first `..`/root/
+        // prefix component or nested boundary, whichever comes first.
+        discovery::walk_toward_invocation(&kinds, &mut walk);
     }
 
-    directories
+    walk.directories
         .into_iter()
         .map(|dir| dir.join(".waft.toml"))
         // Keep symlinks in the discovered set so loading can reject them
@@ -742,6 +857,57 @@ pub fn discover_project_configs_in_repo(
             })
         })
         .collect()
+}
+
+/// Classify a relative path component for the discovery kernel.
+fn component_kind(component: &Component<'_>) -> discovery::ComponentKind {
+    match component {
+        Component::CurDir => discovery::ComponentKind::CurDir,
+        Component::Normal(_) => discovery::ComponentKind::Normal,
+        // Callers pass an absolute, normalized source-view path. If that
+        // invariant is violated, the search stops here.
+        Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+            discovery::ComponentKind::Stop
+        }
+    }
+}
+
+/// Production side of [`discovery::walk_toward_invocation`]: tracks the
+/// directory reached so far and probes it for nested-checkout boundaries.
+struct ConfigSearchWalk<'a> {
+    repo_root: &'a Path,
+    gitlinks: &'a HashSet<String>,
+    case_insensitive: bool,
+    components: Vec<Component<'a>>,
+    current: PathBuf,
+    directories: Vec<PathBuf>,
+}
+
+impl discovery::DiscoveryWalk for ConfigSearchWalk<'_> {
+    fn enter(&mut self, i: usize) -> bool {
+        // The kernel proves it only enters in-bounds `Normal` components.
+        if let Some(Component::Normal(part)) = self.components.get(i) {
+            self.current.push(part);
+        }
+        // Do not let a nested checkout's branch-local config influence
+        // selection in the outer source repository.
+        let is_gitlink = crate::path::RepoRelPath::normalize(&self.current, self.repo_root)
+            .ok()
+            .is_some_and(|relative| {
+                self.gitlinks.iter().any(|gitlink| {
+                    crate::git::repo_paths_equivalent(
+                        relative.as_str(),
+                        gitlink,
+                        crate::walk::boundary_case_folds(self.case_insensitive),
+                    )
+                })
+            });
+        self.current.join(".git").exists() || is_gitlink
+    }
+
+    fn search(&mut self, _i: usize) {
+        self.directories.push(self.current.clone());
+    }
 }
 
 /// Read and parse a list of project config files into layers, in order.
@@ -794,19 +960,28 @@ pub struct PolicyResolutionInputs {
 }
 
 impl PolicyResolutionInputs {
-    /// Resolve to a final [`ResolvedPolicy`] honoring layer precedence.
+    /// Resolve to a final [`ResolvedPolicy`] honoring layer precedence:
+    /// defaults, user, project layers (outermost first), environment, CLI.
+    ///
+    /// The ordering and the merge are the verified kernel
+    /// `waft_verified::policy::merge::resolve_inputs`.
     pub fn resolve(&self) -> ResolvedPolicy {
-        let mut layers: Vec<&ConfigLayer> = Vec::new();
-        layers.push(&self.defaults);
-        if let Some(u) = &self.user {
-            layers.push(u);
-        }
-        for p in &self.project {
-            layers.push(p);
-        }
-        layers.push(&self.env);
-        layers.push(&self.cli);
-        ResolvedPolicy::from_layers(layers)
+        let Self {
+            defaults,
+            user,
+            project,
+            env,
+            cli,
+        } = self;
+        let project: Vec<merge::LayerView<'_>> =
+            project.iter().map(ConfigLayer::kernel_view).collect();
+        ResolvedPolicy::from_kernel(merge::resolve_inputs(
+            defaults.kernel_view(),
+            user.as_ref().map(ConfigLayer::kernel_view),
+            &project,
+            env.kernel_view(),
+            cli.kernel_view(),
+        ))
     }
 }
 
@@ -899,6 +1074,28 @@ profile = "rainbow"
     fn parse_rejects_unsupported_version() {
         let err = parse_toml("inline", "version = 2\n").unwrap_err();
         assert!(err.to_string().contains("version"));
+    }
+
+    /// Exact messages for the kernel's error precedence: a bad version wins
+    /// over bad fields, and with a valid version the first bad field is
+    /// named (never reported as a version error).
+    #[test]
+    fn parse_error_precedence_messages_are_exact() {
+        let message = |content: &str| parse_toml("inline", content).unwrap_err().to_string();
+        let bad_profile_and_copy =
+            "[compat]\nprofile = \"rainbow\"\n[copy]\nstrategy = \"bogus\"\n";
+        assert_eq!(
+            message(&format!("version = 2\n{bad_profile_and_copy}")),
+            "config: inline: unsupported config version 2; expected 1"
+        );
+        assert_eq!(
+            message(&format!("version = 1\n{bad_profile_and_copy}")),
+            "config: inline: unknown compat profile \"rainbow\"; expected claude|git|wt"
+        );
+        assert_eq!(
+            message("version = 1\n[copy]\nstrategy = \"bogus\"\n"),
+            "config: inline: unknown copy strategy \"bogus\"; expected auto|simple-copy|cow-copy"
+        );
     }
 
     #[test]
@@ -1094,5 +1291,376 @@ profile = "rainbow"
         assert_eq!(configs, vec![config.clone()]);
         let error = load_project_layers(&configs).unwrap_err();
         assert!(error.to_string().contains("is a symlink"));
+    }
+
+    // --- Glue between production types and the verified policy kernel ---
+
+    #[test]
+    fn enum_conversions_round_trip_and_match_clap_names() {
+        use clap::ValueEnum;
+
+        for &v in CompatProfile::value_variants() {
+            assert_eq!(CompatProfile::from(vocab::CompatProfile::from(v)), v);
+            assert_eq!(v.to_possible_value().unwrap().get_name(), v.as_str());
+            assert_eq!(CompatProfile::parse(v.as_str()), Ok(v));
+        }
+        for &v in WhenMissingWorktreeinclude::value_variants() {
+            assert_eq!(
+                WhenMissingWorktreeinclude::from(vocab::WhenMissingWorktreeinclude::from(v)),
+                v
+            );
+            assert_eq!(v.to_possible_value().unwrap().get_name(), v.as_str());
+            assert_eq!(WhenMissingWorktreeinclude::parse(v.as_str()), Ok(v));
+        }
+        for &v in WorktreeincludeSemantics::value_variants() {
+            assert_eq!(
+                WorktreeincludeSemantics::from(vocab::WorktreeincludeSemantics::from(v)),
+                v
+            );
+            assert_eq!(v.to_possible_value().unwrap().get_name(), v.as_str());
+            assert_eq!(WorktreeincludeSemantics::parse(v.as_str()), Ok(v));
+        }
+        for &v in SymlinkPolicy::value_variants() {
+            assert_eq!(SymlinkPolicy::from(vocab::SymlinkPolicy::from(v)), v);
+            assert_eq!(v.to_possible_value().unwrap().get_name(), v.as_str());
+            assert_eq!(SymlinkPolicy::parse(v.as_str()), Ok(v));
+        }
+        for &v in BuiltinExcludeSet::value_variants() {
+            assert_eq!(
+                BuiltinExcludeSet::from(vocab::BuiltinExcludeSet::from(v)),
+                v
+            );
+            assert_eq!(v.to_possible_value().unwrap().get_name(), v.as_str());
+            assert_eq!(BuiltinExcludeSet::parse(v.as_str()), Ok(v));
+        }
+        for &v in CopyStrategy::value_variants() {
+            assert_eq!(CopyStrategy::from(vocab::CopyStrategy::from(v)), v);
+            assert_eq!(v.to_possible_value().unwrap().get_name(), v.as_str());
+            assert_eq!(CopyStrategy::parse(v.as_str()), Ok(v));
+        }
+    }
+
+    #[test]
+    fn unknown_value_messages_are_unchanged() {
+        assert_eq!(
+            CompatProfile::parse("Git").unwrap_err(),
+            "unknown compat profile \"Git\"; expected claude|git|wt"
+        );
+        assert_eq!(
+            WhenMissingWorktreeinclude::parse(" blank").unwrap_err(),
+            "unknown when_missing_worktreeinclude \" blank\"; expected blank|all-ignored"
+        );
+        assert_eq!(
+            WorktreeincludeSemantics::parse("wt").unwrap_err(),
+            "unknown worktreeinclude semantics \"wt\"; expected claude-2026-04|git|wt-0.39"
+        );
+        assert_eq!(
+            SymlinkPolicy::parse("").unwrap_err(),
+            "unknown symlink policy \"\"; expected follow|ignore|error"
+        );
+        assert_eq!(
+            BuiltinExcludeSet::parse("tooling").unwrap_err(),
+            "unknown builtin exclude set \"tooling\"; expected none|tooling-v1"
+        );
+        assert_eq!(
+            CopyStrategy::parse("Reflink").unwrap_err(),
+            "unknown copy strategy \"Reflink\"; expected auto|simple-copy|cow-copy"
+        );
+        for (alias, strategy) in [
+            ("default", CopyStrategy::Auto),
+            ("simple", CopyStrategy::SimpleCopy),
+            ("cow", CopyStrategy::CowCopy),
+            ("reflink", CopyStrategy::CowCopy),
+        ] {
+            assert_eq!(CopyStrategy::parse(alias), Ok(strategy));
+        }
+    }
+
+    #[test]
+    fn config_layer_round_trips_through_kernel_view() {
+        let layer = ConfigLayer {
+            profile: Some(CompatProfile::Wt),
+            when_missing: Some(WhenMissingWorktreeinclude::Blank),
+            semantics: None,
+            symlink_policy: Some(SymlinkPolicy::Error),
+            builtin_exclude_set: Some(BuiltinExcludeSet::None),
+            extra_excludes: vec!["a".into(), "b/".into()],
+            replace_extra_excludes: Some(false),
+            copy_strategy: Some(CopyStrategy::CowCopy),
+        };
+        let view = layer.kernel_view();
+        assert_eq!(view.extras, layer.extra_excludes.as_slice());
+        assert_eq!(
+            ConfigLayer::from_kernel(view.knobs, view.extras.to_vec()),
+            layer
+        );
+    }
+
+    #[test]
+    fn env_key_table_matches_variable_names() {
+        for name in [
+            "WAFT_COMPAT_PROFILE",
+            "WAFT_WHEN_MISSING_WORKTREEINCLUDE",
+            "WAFT_WORKTREEINCLUDE_SEMANTICS",
+            "WAFT_WORKTREEINCLUDE_SYMLINK_POLICY",
+            "WAFT_BUILTIN_EXCLUDE_SET",
+            "WAFT_EXTRA_EXCLUDE",
+            "WAFT_REPLACE_EXTRA_EXCLUDES",
+            "WAFT_COPY_STRATEGY",
+        ] {
+            let key = env_layer::EnvKey::classify(name).expect(name);
+            assert_eq!(key.as_str(), name);
+        }
+        for name in ["waft_compat_profile", "WAFT_COMPAT_PROFILE_", "WAFT_", ""] {
+            assert_eq!(env_layer::EnvKey::classify(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn env_bool_matches_previous_normalization() {
+        for v in [
+            "",
+            " ",
+            "1",
+            "0",
+            "TRUE",
+            " yes\t",
+            "On",
+            "oFF",
+            "no",
+            "\u{3000}false\u{85}",
+            "2",
+            "tru",
+            "yes!",
+            "\u{200b}on",
+            "İ",
+            "nO ",
+        ] {
+            let expected = match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => Some(true),
+                "0" | "false" | "no" | "off" | "" => Some(false),
+                _ => None,
+            };
+            assert_eq!(env_layer::parse_env_bool(v), expected, "{v:?}");
+        }
+    }
+
+    #[test]
+    fn env_bool_error_echoes_trimmed_lowercased_value() {
+        assert_eq!(parse_env_bool(" YES "), Ok(true));
+        assert_eq!(parse_env_bool("\tOff\n"), Ok(false));
+        assert_eq!(
+            parse_env_bool("  Maybe "),
+            Err("expected boolean (1|0|true|false), got \"maybe\"".to_string())
+        );
+    }
+
+    #[test]
+    fn in_repo_discovery_stops_at_parent_dir_component() {
+        // Pins current behavior for a non-normalized invocation path: the
+        // directories before the `..` are still searched.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path();
+        std::fs::create_dir_all(source.join("a")).unwrap();
+        std::fs::create_dir_all(source.join("b")).unwrap();
+        std::fs::write(source.join(".waft.toml"), "version = 1\n").unwrap();
+        std::fs::write(source.join("a/.waft.toml"), "version = 1\n").unwrap();
+        std::fs::write(source.join("b/.waft.toml"), "version = 1\n").unwrap();
+
+        assert_eq!(
+            discover_project_configs_in_repo(
+                source,
+                &source.join("a/../b"),
+                &HashSet::new(),
+                false
+            ),
+            vec![source.join(".waft.toml"), source.join("a/.waft.toml")]
+        );
+    }
+
+    /// The pre-kernel `ResolvedPolicy::from_layers`, kept as a differential
+    /// oracle for the verified merge.
+    fn reference_from_layers(layers: &[ConfigLayer]) -> ResolvedPolicy {
+        let mut resolved = ResolvedPolicy {
+            profile: CompatProfile::Claude,
+            when_missing: WhenMissingWorktreeinclude::Blank,
+            semantics: WorktreeincludeSemantics::Claude202604,
+            symlink_policy: SymlinkPolicy::Follow,
+            builtin_exclude_set: BuiltinExcludeSet::None,
+            extra_excludes: Vec::new(),
+            copy_strategy: CopyStrategy::Auto,
+        };
+        for layer in layers {
+            if let Some(v) = layer.profile {
+                let (when_missing, semantics, symlink_policy, builtin_exclude_set) = match v {
+                    CompatProfile::Claude => (
+                        WhenMissingWorktreeinclude::Blank,
+                        WorktreeincludeSemantics::Claude202604,
+                        SymlinkPolicy::Follow,
+                        BuiltinExcludeSet::None,
+                    ),
+                    CompatProfile::Git => (
+                        WhenMissingWorktreeinclude::Blank,
+                        WorktreeincludeSemantics::Git,
+                        SymlinkPolicy::Ignore,
+                        BuiltinExcludeSet::None,
+                    ),
+                    CompatProfile::Wt => (
+                        WhenMissingWorktreeinclude::AllIgnored,
+                        WorktreeincludeSemantics::Wt039,
+                        SymlinkPolicy::Follow,
+                        BuiltinExcludeSet::ToolingV1,
+                    ),
+                };
+                resolved.profile = v;
+                resolved.when_missing = when_missing;
+                resolved.semantics = semantics;
+                resolved.symlink_policy = symlink_policy;
+                resolved.builtin_exclude_set = builtin_exclude_set;
+            }
+            if let Some(v) = layer.when_missing {
+                resolved.when_missing = v;
+            }
+            if let Some(v) = layer.semantics {
+                resolved.semantics = v;
+            }
+            if let Some(v) = layer.symlink_policy {
+                resolved.symlink_policy = v;
+            }
+            if let Some(v) = layer.builtin_exclude_set {
+                resolved.builtin_exclude_set = v;
+            }
+            if let Some(v) = layer.copy_strategy {
+                resolved.copy_strategy = v;
+            }
+            if layer.replace_extra_excludes == Some(true) {
+                resolved.extra_excludes.clear();
+            }
+            resolved
+                .extra_excludes
+                .extend(layer.extra_excludes.iter().cloned());
+        }
+        resolved
+    }
+
+    fn pick<T: Copy + std::fmt::Debug + 'static>(
+        values: &'static [T],
+    ) -> impl proptest::strategy::Strategy<Value = Option<T>> {
+        proptest::option::of(proptest::sample::select(values))
+    }
+
+    fn arb_layer() -> impl proptest::strategy::Strategy<Value = ConfigLayer> {
+        use proptest::prelude::*;
+
+        (
+            pick(&[CompatProfile::Claude, CompatProfile::Git, CompatProfile::Wt]),
+            pick(&[
+                WhenMissingWorktreeinclude::Blank,
+                WhenMissingWorktreeinclude::AllIgnored,
+            ]),
+            pick(&[
+                WorktreeincludeSemantics::Claude202604,
+                WorktreeincludeSemantics::Git,
+                WorktreeincludeSemantics::Wt039,
+            ]),
+            pick(&[
+                SymlinkPolicy::Follow,
+                SymlinkPolicy::Ignore,
+                SymlinkPolicy::Error,
+            ]),
+            pick(&[BuiltinExcludeSet::None, BuiltinExcludeSet::ToolingV1]),
+            proptest::collection::vec("[a-c]{0,2}", 0..3),
+            proptest::option::of(any::<bool>()),
+            pick(&[
+                CopyStrategy::Auto,
+                CopyStrategy::SimpleCopy,
+                CopyStrategy::CowCopy,
+            ]),
+        )
+            .prop_map(
+                |(
+                    profile,
+                    when_missing,
+                    semantics,
+                    symlink_policy,
+                    builtin_exclude_set,
+                    extra_excludes,
+                    replace_extra_excludes,
+                    copy_strategy,
+                )| ConfigLayer {
+                    profile,
+                    when_missing,
+                    semantics,
+                    symlink_policy,
+                    builtin_exclude_set,
+                    extra_excludes,
+                    replace_extra_excludes,
+                    copy_strategy,
+                },
+            )
+    }
+
+    #[test]
+    fn exclude_list_matches_std_split_trim_filter_examples() {
+        for v in [
+            "",
+            ",",
+            "a",
+            "a, b ,c",
+            " ,a,, b ,",
+            "\u{3000}x\u{85},\u{a0}",
+            "*.{log,tmp}",
+            "é ,\tß\n",
+        ] {
+            let expected: Vec<String> = v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            assert_eq!(env_layer::parse_exclude_list(v), expected, "{v:?}");
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn exclude_list_matches_std_split_trim_filter(
+            v in "[a ,\t\u{a0}\u{2003}\u{3000}é\u{200b}]{0,12}",
+        ) {
+            let expected: Vec<String> = v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            proptest::prop_assert_eq!(env_layer::parse_exclude_list(&v), expected);
+        }
+
+        #[test]
+        fn verified_merge_matches_reference(
+            layers in proptest::collection::vec(arb_layer(), 0..7),
+        ) {
+            proptest::prop_assert_eq!(
+                ResolvedPolicy::from_layers(&layers),
+                reference_from_layers(&layers)
+            );
+        }
+
+        #[test]
+        fn verified_resolve_matches_reference_order(
+            defaults in arb_layer(),
+            user in proptest::option::of(arb_layer()),
+            project in proptest::collection::vec(arb_layer(), 0..3),
+            env in arb_layer(),
+            cli in arb_layer(),
+        ) {
+            let mut ordered = vec![defaults.clone()];
+            ordered.extend(user.clone());
+            ordered.extend(project.iter().cloned());
+            ordered.push(env.clone());
+            ordered.push(cli.clone());
+            let inputs = PolicyResolutionInputs { defaults, user, project, env, cli };
+            proptest::prop_assert_eq!(inputs.resolve(), reference_from_layers(&ordered));
+        }
     }
 }

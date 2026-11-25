@@ -4,6 +4,25 @@ All notable changes to waft will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- Verus-verified decision kernels in a new workspace crate, `waft-verified`.
+  Path normalization, context resolution, configuration policy, validation,
+  the Git backend, the rule engine, planning, execution and the index lock,
+  file checks, and the Unix publication protocols now make their main
+  decisions through machine-checked code. CI verifies the crate with a pinned
+  Verus release (`just check-verus`). [VERIFICATION.md](VERIFICATION.md)
+  records what is proved, what is assumed, and what remains unverified, and
+  release archives include it.
+
+### Fixed
+
+- Normalizing a path against a repository root that has no name (for example
+  `../x` against `/`) returns the "outside the repository root" error instead
+  of panicking.
+
 ## [0.1.0](https://github.com/plx/waft/releases/tag/v0.1.0) - 2026-09-07
 
 First supported release, from commit

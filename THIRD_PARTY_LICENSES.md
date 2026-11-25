@@ -12,7 +12,7 @@ date relative to `Cargo.lock`.
 
 ## Overview
 
-- [MIT License](#MIT) — 147
+- [MIT License](#MIT) — 157
 - [Unicode License v3](#Unicode-3.0) — 2
 - [zlib License](#Zlib) — 2
 - [Apache License 2.0](#Apache-2.0) — 1
@@ -527,6 +527,41 @@ Used by:
 
 ```text
 Copyright (c) 2016 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+### <a id="MIT"></a>MIT License
+
+Used by:
+
+- [`indexmap 2.14.0`](https://github.com/indexmap-rs/indexmap)
+
+```text
+Copyright (c) 2016--2017
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -1085,6 +1120,23 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
+- [`synstructure 0.13.2`](https://github.com/mystor/synstructure)
+
+```text
+Copyright 2016 Nika Layzell
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+```
+
+### <a id="MIT"></a>MIT License
+
+Used by:
+
 - [`faster-hex 0.10.1`](https://github.com/NervosFoundation/faster-hex)
 
 ```text
@@ -1209,7 +1261,13 @@ SOFTWARE.
 
 Used by:
 
+- [`waft-verified 0.1.0`](https://github.com/plx/waft)
+- [`convert_case 0.4.0`](https://github.com/rutrum/convert-case)
 - [`unicode-casefold 0.2.0`](https://github.com/lfairy/unicode-casefold)
+- [`verus_builtin 0.0.0-2026-11-22-0344`](https://github.com/verus-lang/verus)
+- [`verus_builtin_macros 0.0.0-2026-11-22-0344`](https://github.com/verus-lang/verus)
+- [`verus_state_machines_macros 0.0.0-2026-11-22-0344`](https://github.com/verus-lang/verus)
+- [`vstd 0.0.0-2026-11-22-0344`](https://github.com/verus-lang/verus)
 - [`windows-collections 0.3.2`](https://github.com/microsoft/windows-rs)
 - [`windows-core 0.62.2`](https://github.com/microsoft/windows-rs)
 - [`windows-future 0.3.2`](https://github.com/microsoft/windows-rs)
@@ -1266,6 +1324,8 @@ Used by:
 - [`thiserror-impl 2.0.21`](https://github.com/dtolnay/thiserror)
 - [`thiserror 2.0.21`](https://github.com/dtolnay/thiserror)
 - [`unicode-ident 1.0.24`](https://github.com/dtolnay/unicode-ident)
+- [`verus_prettyplease 0.0.0-2026-11-01-0251`](https://github.com/dtolnay/prettyplease)
+- [`verus_syn 0.0.0-2026-11-01-0251`](https://github.com/dtolnay/syn)
 
 ```text
 Permission is hereby granted, free of charge, to any

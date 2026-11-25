@@ -59,18 +59,33 @@ pub struct ValidationReport {
 
 impl ValidationReport {
     /// Returns `true` if any error-severity issues were found.
+    ///
+    /// Decided by the verified `waft_verified::validation::has_errors`, which
+    /// is proven to hold exactly when [`Self::error_count`] is positive.
+    /// No command decides through this method: `copy`, `list`, `info` and
+    /// `validate` stop through `waft_verified::validation::validation_view`,
+    /// which computes the same answer with the same kernel functions.
     pub fn has_errors(&self) -> bool {
-        self.issues
-            .iter()
-            .any(|i| matches!(i.severity, ValidationSeverity::Error))
+        waft_verified::validation::has_errors(&self.severities())
     }
 
     /// Count of error-severity issues.
+    ///
+    /// Computed by the verified `waft_verified::validation::error_count`.
     pub fn error_count(&self) -> usize {
+        waft_verified::validation::error_count(&self.severities())
+    }
+
+    /// The issues' severities, in report order, as the verified validation
+    /// kernel sees them.
+    pub(crate) fn severities(&self) -> Vec<waft_verified::validation::Severity> {
         self.issues
             .iter()
-            .filter(|i| matches!(i.severity, ValidationSeverity::Error))
-            .count()
+            .map(|issue| match issue.severity {
+                ValidationSeverity::Warning => waft_verified::validation::Severity::Warning,
+                ValidationSeverity::Error => waft_verified::validation::Severity::Error,
+            })
+            .collect()
     }
 }
 
@@ -209,16 +224,13 @@ impl FileSnapshot {
         }
     }
 
-    /// Whether two snapshots describe the same bytes, ignoring permissions and
-    /// identity.
-    ///
-    /// This is what makes "content equal, permissions differ" checkable at
-    /// publication time: planning proves byte equality with a full comparison,
-    /// but the source and destination snapshots are separate reads. Carrying
-    /// the equality forward as comparable data lets the publication path
-    /// re-establish it instead of trusting a classification made earlier.
-    pub(crate) fn content_matches(&self, other: &FileSnapshot) -> bool {
-        self.len == other.len && self.content_fingerprint == other.content_fingerprint
+    /// What identifies this snapshot's content for the verified planning
+    /// kernel: `(len, content_fingerprint)`.
+    pub(crate) fn content_key(&self) -> waft_verified::planner::entry::ContentKey {
+        waft_verified::planner::entry::ContentKey {
+            len: self.len,
+            fingerprint: self.content_fingerprint,
+        }
     }
 }
 

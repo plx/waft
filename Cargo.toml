@@ -33,9 +33,15 @@ include = [
     "/scripts/install-hooks.sh",
     "/scripts/self-test.sh",
     "/scripts/artifact-smoke.sh",
+    "/scripts/verus-verify.sh",
+    "/VERIFICATION.md",
 ]
 
+[workspace]
+members = [".", "verified"]
+
 [dependencies]
+waft-verified = { path = "verified", version = "=0.1.0" }
 clap = { version = "4", features = ["derive"] }
 gix = { version = "0.89", default-features = false, features = ["excludes", "index", "sha1"] }
 ignore = "0.4"

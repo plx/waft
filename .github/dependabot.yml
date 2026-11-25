@@ -8,6 +8,10 @@ updates:
     groups:
       rust-dependencies:
         patterns: ["*"]
+    ignore:
+      # vstd must match the Verus release pinned in scripts/verus-verify.sh.
+      # Update them together by hand.
+      - dependency-name: vstd
 
   - package-ecosystem: github-actions
     directory: /
