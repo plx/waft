@@ -37,6 +37,7 @@ jobs:
           scripts/install-hooks.sh
           scripts/self-test.sh
           scripts/artifact-smoke.sh
+          scripts/verus-verify.sh
           hooks/dispatcher
           hooks/post-checkout
 
@@ -123,6 +124,24 @@ jobs:
       - name: Audit Cargo.lock
         run: cargo audit --deny warnings
 
+  verus:
+    name: formal verification (Verus)
+    runs-on: ubuntu-24.04
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable action, 2026-07-23
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          key: verus
+      # The script downloads the pinned Verus release, checks its SHA-256,
+      # installs the Rust toolchain that release requires, and verifies
+      # waft-verified with --no-cheating.
+      - name: just check-verus
+        run: bash scripts/verus-verify.sh
+
   coverage:
     name: external-test coverage
     runs-on: ubuntu-24.04
@@ -185,7 +204,7 @@ jobs:
   core-checks:
     name: core checks
     if: always()
-    needs: [automation-lint, fmt, clippy, doc-build, licenses, security, coverage, tests, self-test]
+    needs: [automation-lint, fmt, clippy, doc-build, licenses, security, coverage, verus, tests, self-test]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every core job to succeed
