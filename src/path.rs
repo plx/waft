@@ -1,7 +1,18 @@
 //! Repo-relative path type and normalization.
+//!
+//! The decisions in [`RepoRelPath::normalize`] (lexical normalization,
+//! component-wise containment under the repository root, rejection of the
+//! root itself and of anything but plain names remaining) and the text check
+//! shared with `RepoRelPath::from_git_bytes` are made by the Verus-verified
+//! kernel `waft_verified::path`. This module lowers `std::path` components to
+//! the kernel's model and turns its decisions into values and errors.
 
 use std::fmt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
+
+use waft_verified::path::containment::{Containment, classify_containment};
+use waft_verified::path::model::{Comp, PrefixKey};
+use waft_verified::path::text::has_forbidden_text_char;
 
 use crate::error::{Error, Result};
 
@@ -54,36 +65,47 @@ impl RepoRelPath {
         // Logical normalization (resolve `.` and `..` without touching the filesystem)
         let normalized = logical_normalize(&without_windows_verbatim_prefix(&abs));
 
-        // Must be under repo_root
+        // Must be strictly under repo_root. The verified kernel compares the
+        // components of both normalized paths (what `Path::strip_prefix`
+        // compares) and accepts only a non-empty remainder of plain names.
         let repo_normalized = logical_normalize(&without_windows_verbatim_prefix(repo_root));
-        let rel = normalized
-            .strip_prefix(&repo_normalized)
-            .map_err(|_| Error::InvalidPath {
-                message: format!(
-                    "path {} is outside the repository root {}",
-                    path.display(),
-                    repo_root.display()
-                ),
-            })?;
+        let abs_components: Vec<Component<'_>> = normalized.components().collect();
+        let root_components: Vec<Component<'_>> = repo_normalized.components().collect();
+        let start = match classify_containment(
+            &kernel_components(&abs_components),
+            &kernel_components(&root_components),
+        ) {
+            Containment::Outside => {
+                return Err(Error::InvalidPath {
+                    message: format!(
+                        "path {} is outside the repository root {}",
+                        path.display(),
+                        repo_root.display()
+                    ),
+                });
+            }
+            Containment::RepoRoot => {
+                return Err(Error::InvalidPath {
+                    message: "path resolves to the repository root".to_string(),
+                });
+            }
+            Containment::Inside(start) => start,
+        };
 
-        if rel.as_os_str().is_empty() {
-            return Err(Error::InvalidPath {
-                message: "path resolves to the repository root".to_string(),
-            });
-        }
-
-        // Convert to forward-slash string
+        // Convert to forward-slash string. The kernel proved that `start` is
+        // in bounds and that every component from it on is a `Normal` name,
+        // so `as_os_str` is that name.
         let mut parts = Vec::new();
-        for component in rel.components() {
-            let Component::Normal(os) = component else {
-                unreachable!("normalized path should only have Normal components");
-            };
-            let value = os.to_str().ok_or_else(|| Error::InvalidPath {
-                message: format!(
-                    "path {} is not valid UTF-8 and is unsupported",
-                    path.display()
-                ),
-            })?;
+        for component in &abs_components[start..] {
+            let value = component
+                .as_os_str()
+                .to_str()
+                .ok_or_else(|| Error::InvalidPath {
+                    message: format!(
+                        "path {} is not valid UTF-8 and is unsupported",
+                        path.display()
+                    ),
+                })?;
             parts.push(value.to_string());
         }
         let s = parts.join("/");
@@ -114,12 +136,21 @@ pub(crate) fn without_windows_verbatim_prefix(path: &Path) -> PathBuf {
     let Some(path) = path.to_str() else {
         return path.to_path_buf();
     };
-    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
-        PathBuf::from(format!(r"\\{unc}"))
-    } else if let Some(ordinary) = path.strip_prefix(r"\\?\") {
-        PathBuf::from(ordinary)
-    } else {
-        PathBuf::from(path)
+    without_verbatim_prefix_text(path)
+}
+
+/// Apply the verified verbatim-prefix rule to a UTF-8 path: `\\?\UNC\rest`
+/// becomes `\\rest`, any other `\\?\rest` becomes `rest`, and everything else
+/// is unchanged. The kernel's offsets skip an ASCII marker, so they are
+/// character boundaries.
+#[cfg(any(windows, test))]
+fn without_verbatim_prefix_text(path: &str) -> PathBuf {
+    use waft_verified::path::text::{VerbatimPrefix, classify_verbatim_prefix};
+
+    match classify_verbatim_prefix(path.as_bytes()) {
+        VerbatimPrefix::Unc(rest) => PathBuf::from(format!(r"\\{}", &path[rest..])),
+        VerbatimPrefix::Plain(rest) => PathBuf::from(&path[rest..]),
+        VerbatimPrefix::NotVerbatim => PathBuf::from(path),
     }
 }
 
@@ -129,7 +160,8 @@ pub(crate) fn without_windows_verbatim_prefix(path: &Path) -> PathBuf {
 }
 
 fn validate_text_path(value: &str) -> Result<()> {
-    if value.contains(['\n', '\r', '\0']) {
+    // Verified to equal `value.contains(['\n', '\r', '\0'])`.
+    if has_forbidden_text_char(value) {
         return Err(Error::InvalidPath {
             message: "repository paths containing NUL or newlines are unsupported".to_string(),
         });
@@ -150,31 +182,48 @@ impl AsRef<str> for RepoRelPath {
 }
 
 /// Logically normalize a path by resolving `.` and `..` without filesystem access.
+///
+/// The verified kernel chooses which components survive (a `..` directly
+/// after the root is kept); collecting them through `PathBuf` is unchanged.
 fn logical_normalize(path: &Path) -> PathBuf {
-    let mut components = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(p) => components.push(Component::Prefix(p)),
-            Component::RootDir => {
-                components.retain(|c| matches!(c, Component::Prefix(_)));
-                components.push(Component::RootDir);
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if let Some(last) = components.last() {
-                    if matches!(last, Component::Normal(_)) {
-                        components.pop();
-                    } else {
-                        components.push(Component::ParentDir);
-                    }
-                } else {
-                    components.push(Component::ParentDir);
-                }
-            }
-            Component::Normal(_) => components.push(component),
-        }
+    let components: Vec<Component<'_>> = path.components().collect();
+    let keep = waft_verified::path::normalize::logical_normalize(&kernel_components(&components));
+    keep.into_iter().map(|index| components[index]).collect()
+}
+
+/// Lower `std` path components to the verified kernel's model.
+fn kernel_components<'a>(components: &[Component<'a>]) -> Vec<Comp<'a>> {
+    components.iter().map(kernel_component).collect()
+}
+
+/// Lower one `std` path component. Byte payloads are the components' encoded
+/// bytes, so kernel equality is `Component` equality.
+fn kernel_component<'a>(component: &Component<'a>) -> Comp<'a> {
+    match *component {
+        Component::Prefix(prefix) => Comp::Prefix(kernel_prefix(prefix.kind())),
+        Component::RootDir => Comp::RootDir,
+        Component::CurDir => Comp::CurDir,
+        Component::ParentDir => Comp::ParentDir,
+        Component::Normal(name) => Comp::Normal(name.as_encoded_bytes()),
     }
-    components.iter().collect()
+}
+
+/// Lower a parsed Windows prefix. `PrefixComponent` equality compares only
+/// this parsed value (not the raw prefix text), so the kernel key mirrors it
+/// variant for variant.
+fn kernel_prefix(prefix: Prefix<'_>) -> PrefixKey<'_> {
+    match prefix {
+        Prefix::Verbatim(name) => PrefixKey::Verbatim(name.as_encoded_bytes()),
+        Prefix::VerbatimUNC(server, share) => {
+            PrefixKey::VerbatimUnc(server.as_encoded_bytes(), share.as_encoded_bytes())
+        }
+        Prefix::VerbatimDisk(drive) => PrefixKey::VerbatimDisk(drive),
+        Prefix::DeviceNS(device) => PrefixKey::DeviceNs(device.as_encoded_bytes()),
+        Prefix::UNC(server, share) => {
+            PrefixKey::Unc(server.as_encoded_bytes(), share.as_encoded_bytes())
+        }
+        Prefix::Disk(drive) => PrefixKey::Disk(drive),
+    }
 }
 
 #[cfg(test)]
@@ -307,5 +356,337 @@ mod tests {
         let path = Path::new(r"\\?\UNC\server\share\repo\.env");
         let normalized = RepoRelPath::normalize(path, root).unwrap();
         assert_eq!(normalized.as_str(), ".env");
+    }
+
+    #[test]
+    fn reject_escape_above_filesystem_root_instead_of_panicking() {
+        // These used to reach `unreachable!` because a `..` directly after
+        // the root survives normalization and the root `/` has no name.
+        for (input, root) in [
+            ("../x", "/"),
+            ("/../x", "/"),
+            ("../x", ""),
+            ("..", ""),
+            ("/", ""),
+            ("/x", "."),
+        ] {
+            let err = RepoRelPath::normalize(Path::new(input), Path::new(root)).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                Error::InvalidPath {
+                    message: format!("path {input} is outside the repository root {root}"),
+                }
+                .to_string(),
+                "{input:?} under {root:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_under_filesystem_root() {
+        let root = Path::new("/");
+        let p = RepoRelPath::normalize(Path::new("x/./y"), root).unwrap();
+        assert_eq!(p.as_str(), "x/y");
+        let p = RepoRelPath::normalize(Path::new("/x/../y"), root).unwrap();
+        assert_eq!(p.as_str(), "y");
+        let err = RepoRelPath::normalize(Path::new("/"), root).unwrap_err();
+        assert!(err.to_string().contains("resolves to the repository root"));
+    }
+
+    #[test]
+    fn kernel_component_equality_matches_std() {
+        let paths = [
+            "/",
+            "a",
+            "./a",
+            "../a",
+            "/a/./b/../c",
+            "a/b",
+            "b/a",
+            "x/..",
+            "./",
+            "é/ü",
+        ];
+        let components: Vec<Component<'_>> = paths
+            .iter()
+            .flat_map(|p| Path::new(p).components())
+            .collect();
+        let lowered = kernel_components(&components);
+        assert_eq!(lowered.len(), components.len());
+        for (a, ka) in components.iter().zip(&lowered) {
+            for (b, kb) in components.iter().zip(&lowered) {
+                assert_eq!(
+                    waft_verified::path::model::comp_eq(ka, kb),
+                    a == b,
+                    "{a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    fn sample_prefixes() -> Vec<Prefix<'static>> {
+        use std::ffi::OsStr;
+
+        vec![
+            Prefix::Verbatim(OsStr::new("a")),
+            Prefix::Verbatim(OsStr::new("b")),
+            Prefix::VerbatimUNC(OsStr::new("a"), OsStr::new("b")),
+            Prefix::VerbatimUNC(OsStr::new("a"), OsStr::new("c")),
+            Prefix::VerbatimUNC(OsStr::new("ab"), OsStr::new("")),
+            Prefix::VerbatimDisk(b'C'),
+            Prefix::VerbatimDisk(b'D'),
+            Prefix::DeviceNS(OsStr::new("a")),
+            Prefix::DeviceNS(OsStr::new("COM1")),
+            Prefix::UNC(OsStr::new("a"), OsStr::new("b")),
+            Prefix::UNC(OsStr::new("a"), OsStr::new("bc")),
+            Prefix::UNC(OsStr::new("ab"), OsStr::new("c")),
+            Prefix::Disk(b'C'),
+            Prefix::Disk(b'D'),
+        ]
+    }
+
+    #[test]
+    fn kernel_prefix_equality_matches_std() {
+        let prefixes = sample_prefixes();
+        for a in &prefixes {
+            for b in &prefixes {
+                assert_eq!(
+                    waft_verified::path::model::prefix_eq(&kernel_prefix(*a), &kernel_prefix(*b)),
+                    a == b,
+                    "{a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kernel_prefix_round_trips() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        fn back(key: PrefixKey<'_>) -> Prefix<'_> {
+            match key {
+                PrefixKey::Verbatim(name) => Prefix::Verbatim(OsStr::from_bytes(name)),
+                PrefixKey::VerbatimUnc(server, share) => {
+                    Prefix::VerbatimUNC(OsStr::from_bytes(server), OsStr::from_bytes(share))
+                }
+                PrefixKey::VerbatimDisk(drive) => Prefix::VerbatimDisk(drive),
+                PrefixKey::DeviceNs(device) => Prefix::DeviceNS(OsStr::from_bytes(device)),
+                PrefixKey::Unc(server, share) => {
+                    Prefix::UNC(OsStr::from_bytes(server), OsStr::from_bytes(share))
+                }
+                PrefixKey::Disk(drive) => Prefix::Disk(drive),
+            }
+        }
+
+        for prefix in sample_prefixes() {
+            assert_eq!(back(kernel_prefix(prefix)), prefix);
+        }
+    }
+
+    #[test]
+    fn text_check_matches_str_contains() {
+        for value in [
+            "",
+            "a",
+            "a/b",
+            "line\nbreak",
+            "cr\rhere",
+            "nul\0",
+            "\u{85}",
+            "\u{2028}",
+            "é\n",
+            "日本",
+            "\u{10FFFF}\r",
+            "tab\there",
+        ] {
+            assert_eq!(
+                has_forbidden_text_char(value),
+                value.contains(['\n', '\r', '\0']),
+                "{value:?}"
+            );
+        }
+    }
+
+    /// The pre-kernel `without_windows_verbatim_prefix` text rule.
+    fn legacy_without_verbatim_prefix_text(path: &str) -> PathBuf {
+        if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+            PathBuf::from(format!(r"\\{unc}"))
+        } else if let Some(ordinary) = path.strip_prefix(r"\\?\") {
+            PathBuf::from(ordinary)
+        } else {
+            PathBuf::from(path)
+        }
+    }
+
+    #[test]
+    fn verbatim_prefix_rule_matches_legacy() {
+        for path in [
+            r"\\?\C:\repo",
+            r"\\?\UNC\server\share\repo",
+            r"\\?\UNC\",
+            r"\\?\UNC",
+            r"\\?\",
+            r"\\?",
+            r"\\server\share",
+            r"C:\repo",
+            r"\\?\Volume{x}\a",
+            r"\\?\é",
+            r"\\.\COM1",
+            "",
+            "é",
+        ] {
+            assert_eq!(
+                without_verbatim_prefix_text(path),
+                legacy_without_verbatim_prefix_text(path),
+                "{path:?}"
+            );
+        }
+    }
+
+    /// A copy of the pre-kernel `RepoRelPath::normalize` (Unix, so no
+    /// verbatim stripping). `None` marks inputs that reached `unreachable!`.
+    #[cfg(unix)]
+    fn legacy_normalize(path: &Path, repo_root: &Path) -> Option<Result<String>> {
+        fn legacy_logical_normalize(path: &Path) -> PathBuf {
+            let mut components = Vec::new();
+            for component in path.components() {
+                match component {
+                    Component::Prefix(p) => components.push(Component::Prefix(p)),
+                    Component::RootDir => {
+                        components.retain(|c| matches!(c, Component::Prefix(_)));
+                        components.push(Component::RootDir);
+                    }
+                    Component::CurDir => {}
+                    Component::ParentDir => {
+                        if let Some(last) = components.last() {
+                            if matches!(last, Component::Normal(_)) {
+                                components.pop();
+                            } else {
+                                components.push(Component::ParentDir);
+                            }
+                        } else {
+                            components.push(Component::ParentDir);
+                        }
+                    }
+                    Component::Normal(_) => components.push(component),
+                }
+            }
+            components.iter().collect()
+        }
+
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            repo_root.join(path)
+        };
+        let normalized = legacy_logical_normalize(&abs);
+        let repo_normalized = legacy_logical_normalize(repo_root);
+        let Ok(rel) = normalized.strip_prefix(&repo_normalized) else {
+            return Some(Err(Error::InvalidPath {
+                message: format!(
+                    "path {} is outside the repository root {}",
+                    path.display(),
+                    repo_root.display()
+                ),
+            }));
+        };
+        if rel.as_os_str().is_empty() {
+            return Some(Err(Error::InvalidPath {
+                message: "path resolves to the repository root".to_string(),
+            }));
+        }
+        let mut parts = Vec::new();
+        for component in rel.components() {
+            let Component::Normal(os) = component else {
+                return None;
+            };
+            let Some(value) = os.to_str() else {
+                return Some(Err(Error::InvalidPath {
+                    message: format!(
+                        "path {} is not valid UTF-8 and is unsupported",
+                        path.display()
+                    ),
+                }));
+            };
+            parts.push(value.to_string());
+        }
+        let s = parts.join("/");
+        if s.contains(['\n', '\r', '\0']) {
+            return Some(Err(Error::InvalidPath {
+                message: "repository paths containing NUL or newlines are unsupported".to_string(),
+            }));
+        }
+        Some(Ok(s))
+    }
+
+    #[cfg(unix)]
+    fn path_from_segments(absolute: bool, segments: &[&[u8]]) -> PathBuf {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut bytes = Vec::new();
+        if absolute {
+            bytes.push(b'/');
+        }
+        for (i, segment) in segments.iter().enumerate() {
+            if i > 0 {
+                bytes.push(b'/');
+            }
+            bytes.extend_from_slice(segment);
+        }
+        PathBuf::from(OsStr::from_bytes(&bytes))
+    }
+
+    /// Path segments for the differential test. Roots draw from the first
+    /// four (plain names, `.`), paths from all of them.
+    #[cfg(unix)]
+    const SEGMENTS: &[&[u8]] = &[
+        b"repo",
+        b"sub",
+        b".",
+        b"..",
+        b"a",
+        b"",
+        b"\xc3\xa9",
+        b"bad\xff",
+        b"x\ny",
+        b"x\ry",
+        b"x\0y",
+        b"\\x",
+    ];
+
+    #[cfg(unix)]
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(2048))]
+
+        #[test]
+        fn normalize_matches_legacy_except_former_panics(
+            path_absolute in proptest::prelude::any::<bool>(),
+            path_segments in proptest::collection::vec(0..SEGMENTS.len(), 0..7),
+            root_absolute in proptest::prelude::any::<bool>(),
+            root_segments in proptest::collection::vec(0..4usize, 0..4),
+        ) {
+            let path_parts: Vec<&[u8]> = path_segments.iter().map(|&i| SEGMENTS[i]).collect();
+            let root_parts: Vec<&[u8]> = root_segments.iter().map(|&i| SEGMENTS[i]).collect();
+            let path = path_from_segments(path_absolute, &path_parts);
+            let root = path_from_segments(root_absolute, &root_parts);
+            let new = RepoRelPath::normalize(&path, &root)
+                .map(|p| p.as_str().to_string())
+                .map_err(|e| e.to_string());
+            let outside = Error::InvalidPath {
+                message: format!(
+                    "path {} is outside the repository root {}",
+                    path.display(),
+                    root.display()
+                ),
+            };
+            match legacy_normalize(&path, &root) {
+                Some(Ok(s)) => proptest::prop_assert_eq!(new, Ok(s)),
+                Some(Err(e)) => proptest::prop_assert_eq!(new, Err(e.to_string())),
+                None => proptest::prop_assert_eq!(new, Err(outside.to_string())),
+            }
+        }
     }
 }
