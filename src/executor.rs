@@ -10,155 +10,194 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use waft_verified::execute as plan_kernel;
+use waft_verified::index_lock as lock_protocol;
+
 use crate::config::CopyStrategy;
 use crate::fs::{CopyFileRequest, FileSystem};
 use crate::git::GitBackend;
 use crate::model::{
-    CopyOutcome, CopyPlan, CopyReport, CopyResult, CopyResultKind, DestinationExpectation,
-    PlannedEntry, PublishOutcome,
+    CopyOp, CopyOutcome, CopyPlan, CopyReport, CopyResult, CopyResultKind, DestinationExpectation,
+    FailureEntry, PlannedEntry, PublishOutcome, SkipEntry,
 };
 
 /// Execute a copy plan, returning a report of outcomes.
 ///
 /// If `dry_run` is set on the plan, no filesystem mutations are performed
 /// and all copies are reported as successful.
+///
+/// The per-entry loop — which entries are published, which counter each one
+/// lands in, and which produce a result row — is the verified
+/// [`plan_kernel::run_plan`]; `PlanRunner` supplies its effects.
 pub fn execute(
     plan: &CopyPlan,
     fs: &dyn FileSystem,
     git: &dyn GitBackend,
     strategy: CopyStrategy,
 ) -> CopyReport {
-    let mut results = Vec::new();
-    let mut copied = 0usize;
-    let mut replaced = 0usize;
-    let mut permissions_repaired = 0usize;
-    let mut failed = 0usize;
-    let mut skipped = 0usize;
-    let mut up_to_date = 0usize;
-
-    for entry in &plan.entries {
-        match entry {
-            PlannedEntry::Copy(op) => {
-                if plan.dry_run {
-                    let outcome = match &op.expected_destination {
-                        DestinationExpectation::Missing => {
-                            copied += 1;
-                            CopyOutcome::Copied
-                        }
-                        DestinationExpectation::ReplaceExisting(_) => {
-                            replaced += 1;
-                            CopyOutcome::Replaced
-                        }
-                        DestinationExpectation::RepairPermissions(_) => {
-                            permissions_repaired += 1;
-                            CopyOutcome::PermissionsRepaired
-                        }
-                    };
-                    results.push(CopyResult {
-                        rel_path: op.rel_path.clone(),
-                        kind: CopyResultKind::File,
-                        outcome,
-                    });
-                    continue;
-                }
-
-                let Some(destination_root) = plan.context.dest_root.as_deref() else {
-                    failed += 1;
-                    results.push(CopyResult {
-                        rel_path: op.rel_path.clone(),
-                        kind: CopyResultKind::File,
-                        outcome: CopyOutcome::Failed {
-                            message: format!("{}: copy plan has no destination root", op.rel_path),
-                        },
-                    });
-                    continue;
-                };
-                let mut index_lock = None;
-                let result = {
-                    let mut before_publish = || {
-                        let index_path =
-                            git.index_path(destination_root).map_err(io::Error::other)?;
-                        index_lock = index_path
-                            .as_deref()
-                            .map(GitIndexLock::acquire)
-                            .transpose()?;
-                        ensure_destination_untracked(plan, git, std::slice::from_ref(&op.rel_path))
-                            .map_err(io::Error::other)
-                    };
-                    execute_copy(
-                        op,
-                        &plan.context.source_root,
-                        destination_root,
-                        fs,
-                        strategy,
-                        &mut before_publish,
-                    )
-                };
-                // Release only after the filesystem primitive has returned.
-                drop(index_lock);
-                match result {
-                    Ok(outcome) => {
-                        match outcome {
-                            PublishOutcome::Created => copied += 1,
-                            PublishOutcome::Replaced => replaced += 1,
-                            PublishOutcome::PermissionsRepaired => permissions_repaired += 1,
-                        }
-                        results.push(CopyResult {
-                            rel_path: op.rel_path.clone(),
-                            kind: CopyResultKind::File,
-                            outcome: outcome.into(),
-                        });
-                    }
-                    Err(msg) => {
-                        failed += 1;
-                        results.push(CopyResult {
-                            rel_path: op.rel_path.clone(),
-                            kind: CopyResultKind::File,
-                            outcome: CopyOutcome::Failed { message: msg },
-                        });
-                    }
-                }
-            }
-            PlannedEntry::NoOp(_) => {
-                up_to_date += 1;
-            }
-            PlannedEntry::Skip(entry) => {
-                // A skip is the outcome a user is least likely to expect, so
-                // it travels with the rest of the results instead of only
-                // moving a counter.
-                skipped += 1;
-                results.push(CopyResult {
-                    rel_path: entry.rel_path.clone(),
-                    kind: CopyResultKind::File,
-                    outcome: CopyOutcome::Skipped {
-                        reason: entry.reason.clone(),
-                    },
-                });
-            }
-            PlannedEntry::Failure(entry) => {
-                // Planning could not describe this file. Report it like any
-                // other per-file failure so the run's exit status reflects it
-                // while every other entry still executes.
-                failed += 1;
-                results.push(CopyResult {
-                    rel_path: entry.rel_path.clone(),
-                    kind: CopyResultKind::File,
-                    outcome: CopyOutcome::Failed {
-                        message: format!("{}: {}", entry.rel_path, entry.message),
-                    },
-                });
-            }
-        }
-    }
-
-    CopyReport {
-        results,
+    let entries: Vec<_> = plan.entries.iter().map(kernel_entry).collect();
+    let mut runner = PlanRunner {
+        plan,
+        fs,
+        git,
+        strategy,
+        results: Vec::new(),
+    };
+    let plan_kernel::Tally {
         copied,
         replaced,
         permissions_repaired,
         failed,
         skipped,
         up_to_date,
+    } = plan_kernel::run_plan(
+        &mut runner,
+        &entries,
+        plan.dry_run,
+        plan.context.dest_root.as_ref(),
+    );
+
+    CopyReport {
+        results: runner.results,
+        copied,
+        replaced,
+        permissions_repaired,
+        failed,
+        skipped,
+        up_to_date,
+    }
+}
+
+/// A plan entry as the verified kernel sees it: its shape, plus references to
+/// the production payloads it hands back to [`PlanRunner`].
+type KernelEntry<'a> = plan_kernel::PlanEntry<&'a CopyOp, &'a SkipEntry, &'a FailureEntry>;
+
+fn kernel_entry(entry: &PlannedEntry) -> KernelEntry<'_> {
+    match entry {
+        PlannedEntry::Copy(op) => {
+            plan_kernel::PlanEntry::Copy(op, kernel_expectation(&op.expected_destination))
+        }
+        PlannedEntry::NoOp(_) => plan_kernel::PlanEntry::NoOp,
+        PlannedEntry::Skip(skip) => plan_kernel::PlanEntry::Skip(skip),
+        PlannedEntry::Failure(failure) => plan_kernel::PlanEntry::Failure(failure),
+    }
+}
+
+fn kernel_expectation(expectation: &DestinationExpectation) -> plan_kernel::DestExpectation {
+    match expectation {
+        DestinationExpectation::Missing => plan_kernel::DestExpectation::Missing,
+        DestinationExpectation::ReplaceExisting(_) => plan_kernel::DestExpectation::ReplaceExisting,
+        DestinationExpectation::RepairPermissions(_) => {
+            plan_kernel::DestExpectation::RepairPermissions
+        }
+    }
+}
+
+fn kernel_publish_kind(outcome: PublishOutcome) -> plan_kernel::PublishKind {
+    match outcome {
+        PublishOutcome::Created => plan_kernel::PublishKind::Created,
+        PublishOutcome::Replaced => plan_kernel::PublishKind::Replaced,
+        PublishOutcome::PermissionsRepaired => plan_kernel::PublishKind::PermissionsRepaired,
+    }
+}
+
+/// The report counter a result row belongs to.
+fn row_counter(outcome: &CopyOutcome) -> plan_kernel::Counter {
+    match outcome {
+        CopyOutcome::Copied => plan_kernel::Counter::Copied,
+        CopyOutcome::Replaced => plan_kernel::Counter::Replaced,
+        CopyOutcome::PermissionsRepaired => plan_kernel::Counter::PermissionsRepaired,
+        CopyOutcome::Skipped { .. } => plan_kernel::Counter::Skipped,
+        CopyOutcome::Failed { .. } => plan_kernel::Counter::Failed,
+    }
+}
+
+/// The effects of [`execute`]: publishing one copy entry, and turning each
+/// verified decision into a `CopyResult` row.
+struct PlanRunner<'a> {
+    plan: &'a CopyPlan,
+    fs: &'a dyn FileSystem,
+    git: &'a dyn GitBackend,
+    strategy: CopyStrategy,
+    results: Vec<CopyResult>,
+}
+
+impl<'a> plan_kernel::EntryRunner<&'a CopyOp, &'a SkipEntry, &'a FailureEntry, PathBuf, String>
+    for PlanRunner<'a>
+{
+    fn publish(
+        &mut self,
+        op: &&'a CopyOp,
+        destination_root: &PathBuf,
+    ) -> Result<plan_kernel::PublishKind, String> {
+        let (plan, git, op) = (self.plan, self.git, *op);
+        let destination_root = destination_root.as_path();
+        let mut index_lock = None;
+        let result = {
+            let mut before_publish = || {
+                let index_path = git.index_path(destination_root).map_err(io::Error::other)?;
+                index_lock = index_path
+                    .as_deref()
+                    .map(GitIndexLock::acquire)
+                    .transpose()?;
+                ensure_destination_untracked(plan, git, std::slice::from_ref(&op.rel_path))
+                    .map_err(io::Error::other)
+            };
+            execute_copy(
+                op,
+                &plan.context.source_root,
+                destination_root,
+                self.fs,
+                self.strategy,
+                &mut before_publish,
+            )
+        };
+        // Release only after the filesystem primitive has returned.
+        drop(index_lock);
+        result.map(kernel_publish_kind)
+    }
+
+    fn report_copy(&mut self, op: &&'a CopyOp, row: plan_kernel::CopyRow<String>) {
+        let outcome = match row {
+            plan_kernel::CopyRow::Copied => CopyOutcome::Copied,
+            plan_kernel::CopyRow::Replaced => CopyOutcome::Replaced,
+            plan_kernel::CopyRow::PermissionsRepaired => CopyOutcome::PermissionsRepaired,
+            plan_kernel::CopyRow::MissingDestinationRoot => CopyOutcome::Failed {
+                message: format!("{}: copy plan has no destination root", op.rel_path),
+            },
+            plan_kernel::CopyRow::PublishFailed(message) => CopyOutcome::Failed { message },
+        };
+        self.results.push(CopyResult {
+            rel_path: op.rel_path.clone(),
+            kind: CopyResultKind::File,
+            outcome,
+        });
+    }
+
+    fn report_skip(&mut self, entry: &&'a SkipEntry) {
+        // A skip is the outcome a user is least likely to expect, so it
+        // travels with the rest of the results instead of only moving a
+        // counter.
+        self.results.push(CopyResult {
+            rel_path: entry.rel_path.clone(),
+            kind: CopyResultKind::File,
+            outcome: CopyOutcome::Skipped {
+                reason: entry.reason.clone(),
+            },
+        });
+    }
+
+    fn report_failure(&mut self, entry: &&'a FailureEntry) {
+        // Planning could not describe this file. Report it like any other
+        // per-file failure so the run's exit status reflects it while every
+        // other entry still executes.
+        self.results.push(CopyResult {
+            rel_path: entry.rel_path.clone(),
+            kind: CopyResultKind::File,
+            outcome: CopyOutcome::Failed {
+                message: format!("{}: {}", entry.rel_path, entry.message),
+            },
+        });
     }
 }
 
@@ -185,88 +224,106 @@ struct GitIndexLock {
 }
 
 impl GitIndexLock {
+    /// Take the lock at `<index_path>.lock`.
+    ///
+    /// The sequence is the verified [`lock_protocol::acquire`]: stage the path
+    /// *before* the file exists (installing the handlers), so arming afterwards
+    /// is a single atomic store; try `create_new` at most
+    /// `INDEX_LOCK_RETRY_DELAYS.len() + 1` times; after every attempt, act on
+    /// any signal the handler deferred while the file's existence was
+    /// undecided; and finally either arm the lock and check once more, or
+    /// close the staged window (disarm) *before* the last check, so a signal
+    /// deferred at the last instant is seen by that check instead of being
+    /// stranded for the next acquisition.
     fn acquire(index_path: &Path) -> io::Result<Self> {
         let mut lock_name = index_path.as_os_str().to_os_string();
         lock_name.push(".lock");
         let path = PathBuf::from(lock_name);
 
-        // Install the handlers and stage the path *before* the file exists, so
-        // arming afterwards is a single atomic store. A signal arriving between
-        // creating the lock and arming would once have terminated the process
-        // with the lock still on disk; from `stage` onwards such a signal is
-        // deferred to `resume_deferred_signal` below instead.
-        interrupt_cleanup::stage(&path);
-
-        let mut attempt = 0usize;
-        let file = loop {
-            let created = OpenOptions::new().write(true).create_new(true).open(&path);
-            if let Ok(file) = &created {
-                interrupt_cleanup::record_file(file);
-            }
-            // A signal arriving while the path is merely staged cannot be acted
-            // on by the handler: it cannot tell whether the call above has
-            // already produced a file, so it records the signal and returns
-            // rather than terminating the process with a lock on disk that
-            // nothing will remove. Here the answer is known.
-            resume_deferred_signal(&path, created.is_ok())?;
-            match created {
-                Ok(file) => break Ok(file),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let Some(delay) = INDEX_LOCK_RETRY_DELAYS.get(attempt) else {
-                        break Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
-                            format!(
-                                "destination Git index is locked at {} after {} attempt(s); refusing to publish",
-                                path.display(),
-                                INDEX_LOCK_RETRY_DELAYS.len() + 1
-                            ),
-                        ));
-                    };
-                    attempt += 1;
-                    std::thread::sleep(*delay);
-                }
-                Err(error) => {
-                    break Err(io::Error::new(
-                        error.kind(),
-                        format!(
-                            "failed to lock destination Git index at {}: {error}",
-                            path.display()
-                        ),
-                    ));
-                }
-            }
-        };
-
-        let file = match file {
-            Ok(file) => file,
-            Err(error) => {
-                // No lock was created and none will be, so the staged window
-                // closes here rather than staying open for the rest of the run.
-                // Leaving it *before* the check that follows is what makes a
-                // signal deferred at the last instant visible to that check
-                // instead of stranded for the next acquisition.
-                interrupt_cleanup::disarm();
-                resume_deferred_signal(&path, false)?;
-                return Err(error);
-            }
-        };
-
-        after_lock_created();
-
-        // The lock now exists and is ours, so the staged path becomes live: an
-        // interrupt during the publish window will not leave a stale lock
-        // behind for the next Git command.
-        interrupt_cleanup::arm();
-        // A signal delivered between the check above and `arm` is deferred too,
-        // and the handler only defers while the state is still staged — so a
-        // deferral that raced this `arm` is guaranteed to be visible here. Every
-        // path that records a signal ends at one of these two checks.
-        resume_deferred_signal(&path, true)?;
+        let file = lock_protocol::acquire(
+            &mut LockAttempts { path: &path },
+            INDEX_LOCK_RETRY_DELAYS.len(),
+        )?;
         Ok(Self {
             #[cfg(not(unix))]
             path,
             file: Some(file),
         })
+    }
+}
+
+/// The effects of [`GitIndexLock::acquire`], one per step the verified
+/// [`lock_protocol::acquire`] asks for.
+struct LockAttempts<'a> {
+    path: &'a Path,
+}
+
+impl lock_protocol::AcquireOps<fs::File, io::Error> for LockAttempts<'_> {
+    fn stage(&mut self) {
+        interrupt_cleanup::stage(self.path);
+    }
+
+    fn try_create(&mut self) -> lock_protocol::CreateOutcome<fs::File, io::Error> {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.path)
+        {
+            Ok(file) => {
+                interrupt_cleanup::record_file(&file);
+                lock_protocol::CreateOutcome::Created(file)
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                lock_protocol::CreateOutcome::Contended(error)
+            }
+            Err(error) => lock_protocol::CreateOutcome::Failed(error),
+        }
+    }
+
+    // A signal arriving while the path is merely staged cannot be acted on by
+    // the handler: it cannot tell whether the attempt has already produced a
+    // file, so it records the signal and returns rather than terminating the
+    // process with a lock on disk that nothing will remove. Here the answer
+    // is known.
+    fn check_deferred(&mut self, holds_lock: bool) -> io::Result<()> {
+        resume_deferred_signal(self.path, holds_lock)
+    }
+
+    fn wait(&mut self, delay_index: usize) {
+        std::thread::sleep(INDEX_LOCK_RETRY_DELAYS[delay_index]);
+    }
+
+    fn locked_error(&mut self, attempts: usize) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!(
+                "destination Git index is locked at {} after {} attempt(s); refusing to publish",
+                self.path.display(),
+                attempts
+            ),
+        )
+    }
+
+    fn create_error(&mut self, error: io::Error) -> io::Error {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "failed to lock destination Git index at {}: {error}",
+                self.path.display()
+            ),
+        )
+    }
+
+    // The lock now exists and is ours, so the staged path becomes live: an
+    // interrupt during the publish window will not leave a stale lock behind
+    // for the next Git command.
+    fn arm(&mut self) {
+        after_lock_created();
+        interrupt_cleanup::arm();
+    }
+
+    fn disarm(&mut self) {
+        interrupt_cleanup::disarm();
     }
 }
 
@@ -299,12 +356,7 @@ impl Drop for GitIndexLock {
             // Defer signals across removal just as during creation. After
             // unlink another Git writer can immediately create its own lock;
             // no handler may interpret that new file as ours.
-            if interrupt_cleanup::begin_release() {
-                interrupt_cleanup::remove_recorded_lock();
-                after_lock_removed();
-                interrupt_cleanup::disarm();
-                interrupt_cleanup::resume_pending_signal(false);
-            }
+            interrupt_cleanup::release();
             drop(self.file.take());
         }
         #[cfg(not(unix))]
@@ -336,22 +388,15 @@ mod interrupt_cleanup {
     use std::sync::Once;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 
-    /// Longer than `PATH_MAX` on every platform waft supports.
-    const PATH_CAPACITY: usize = 4096;
-
-    const EMPTY: u8 = 0;
-    const WRITING: u8 = 1;
-    const STAGED: u8 = 2;
-    const ARMED: u8 = 3;
-
-    /// No signal is deferred. Zero is not a valid signal number.
-    const NO_SIGNAL: i32 = 0;
+    use waft_verified::index_lock::{self as protocol, EMPTY, NO_SIGNAL, PATH_CAPACITY};
 
     struct SignalCell<T>(UnsafeCell<T>);
     // Access is confined to the single-threaded acquire/release path and to a
     // signal handler that only reads once `STATE` says the value is complete.
     unsafe impl<T> Sync for SignalCell<T> {}
 
+    /// The protocol state: `EMPTY`, `WRITING`, `STAGED`, or `ARMED`; see
+    /// [`protocol`].
     static STATE: AtomicU8 = AtomicU8::new(EMPTY);
     // Kept open until release has finished; used by signal-safe fstat/lstat
     // to avoid removing a lock whose pathname was replaced by another writer.
@@ -369,6 +414,91 @@ mod interrupt_cleanup {
     static PREVIOUS_TERMINATE: SignalCell<MaybeUninit<libc::sigaction>> =
         SignalCell(UnsafeCell::new(MaybeUninit::uninit()));
 
+    /// The process-global cells, as the verified protocol drivers see them.
+    /// Every method is one async-signal-safe operation.
+    struct Cells;
+
+    impl protocol::SignalCells for Cells {
+        fn load_state(&mut self) -> u8 {
+            STATE.load(Ordering::SeqCst)
+        }
+
+        fn store_state(&mut self, value: u8) {
+            STATE.store(value, Ordering::SeqCst);
+        }
+
+        fn cas_state(&mut self, t: protocol::Transition) -> bool {
+            STATE
+                .compare_exchange(t.from, t.to, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        }
+
+        fn take_pending(&mut self) -> i32 {
+            PENDING_SIGNAL.swap(NO_SIGNAL, Ordering::SeqCst)
+        }
+
+        fn defer(&mut self, signal: i32) {
+            let _ = PENDING_SIGNAL.compare_exchange(
+                NO_SIGNAL,
+                signal,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
+
+        fn withdraw(&mut self, signal: i32) {
+            let _ = PENDING_SIGNAL.compare_exchange(
+                signal,
+                NO_SIGNAL,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
+
+        fn remove_recorded_lock(&mut self) {
+            remove_recorded_lock();
+        }
+
+        fn after_lock_removed(&mut self) {
+            super::after_lock_removed();
+        }
+
+        fn restore_previous_and_raise(&mut self, signal: i32) {
+            restore_previous_and_raise(signal);
+        }
+    }
+
+    /// The staging effects for one lock path.
+    struct Stager<'a> {
+        bytes: &'a [u8],
+    }
+
+    impl protocol::StageOps for Stager<'_> {
+        fn store_state(&mut self, value: u8) {
+            STATE.store(value, Ordering::SeqCst);
+        }
+
+        fn install_handlers(&mut self) {
+            install_handlers();
+        }
+
+        fn reset_fd(&mut self) {
+            LOCK_FD.store(-1, Ordering::SeqCst);
+        }
+
+        fn write_path(&mut self) {
+            // SAFETY: the verified `protocol::stage` calls this only while
+            // `STATE` is `WRITING` (not `ARMED`), so no handler reads the
+            // buffer while it is being written, only one lock is live at a
+            // time, and only when the path and its NUL fit the buffer.
+            unsafe {
+                let buffer = &mut *PATH.0.get();
+                buffer[..self.bytes.len()].copy_from_slice(self.bytes);
+                buffer[self.bytes.len()] = 0;
+            }
+        }
+    }
+
     /// Record `path` as the lock this process is about to create.
     ///
     /// Staging is separate from arming so that the caller can write the path
@@ -377,36 +507,24 @@ mod interrupt_cleanup {
     /// clean it up". A signal landing in that store's shadow is deferred rather
     /// than acted on, because only the caller can say which side of it the
     /// signal arrived on.
+    ///
+    /// A path too long for the buffer is not recorded: the state is left
+    /// `EMPTY`, which keeps `arm` from publishing a stale path from an earlier
+    /// lock.
     pub(super) fn stage(path: &Path) {
         let bytes = path.as_os_str().as_bytes();
-        if bytes.len() >= PATH_CAPACITY {
-            // Nothing safe to record; normal `Drop` cleanup still applies, and
-            // leaving the state `EMPTY` keeps `arm` from publishing a stale
-            // path from an earlier lock.
-            STATE.store(EMPTY, Ordering::SeqCst);
-            return;
-        }
-        install_handlers();
-        STATE.store(WRITING, Ordering::SeqCst);
-        LOCK_FD.store(-1, Ordering::SeqCst);
-        // SAFETY: `STATE` is not `ARMED`, so no handler will read the buffer
-        // while it is being written, and only one lock is live at a time.
-        unsafe {
-            let buffer = &mut *PATH.0.get();
-            buffer[..bytes.len()].copy_from_slice(bytes);
-            buffer[bytes.len()] = 0;
-        }
-        STATE.store(STAGED, Ordering::SeqCst);
+        protocol::stage(&mut Stager { bytes }, bytes.len());
     }
 
     pub(super) fn record_file(file: &std::fs::File) {
         LOCK_FD.store(file.as_raw_fd(), Ordering::SeqCst);
     }
 
-    pub(super) fn begin_release() -> bool {
-        STATE
-            .compare_exchange(ARMED, STAGED, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
+    /// Release the armed lock: claim it back to staged so signals defer
+    /// during removal, remove it, disarm, and only then act on a signal
+    /// deferred meanwhile. Does nothing unless the lock is armed.
+    pub(super) fn release() {
+        protocol::release(&mut Cells);
     }
 
     /// Promote the staged path to the live lock.
@@ -414,31 +532,27 @@ mod interrupt_cleanup {
     /// Does nothing unless a path was successfully staged, so a lock whose path
     /// could not be recorded never adopts a previous lock's path.
     pub(super) fn arm() {
-        let _ = STATE.compare_exchange(STAGED, ARMED, Ordering::SeqCst, Ordering::SeqCst);
+        protocol::arm(&mut Cells);
     }
 
     /// Stop treating any path as the live lock.
     pub(super) fn disarm() {
-        STATE.store(EMPTY, Ordering::SeqCst);
+        protocol::disarm(&mut Cells);
     }
 
     /// Unlink the recorded lock path, if one is armed.
     ///
     /// Consume ownership once, then verify and remove the recorded lock.
+    #[cfg(test)]
     pub(super) fn remove_armed_lock() {
-        if STATE
-            .compare_exchange(ARMED, EMPTY, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            remove_recorded_lock();
-        }
+        protocol::claim_armed(&mut Cells);
     }
 
     /// Remove only the entry matching the open lock descriptor. fstat/lstat
     /// and unlink are async-signal-safe; failure to prove ownership leaves the
     /// name alone. As with staging cleanup, POSIX cannot combine the identity
     /// check and unlink into one conditional syscall.
-    pub(super) fn remove_recorded_lock() {
+    fn remove_recorded_lock() {
         unsafe {
             let mut held: MaybeUninit<libc::stat> = MaybeUninit::uninit();
             let mut named: MaybeUninit<libc::stat> = MaybeUninit::uninit();
@@ -456,46 +570,28 @@ mod interrupt_cleanup {
         }
     }
 
+    /// The `SIGINT`/`SIGTERM` handler: the verified [`protocol::on_signal`].
+    ///
     /// Async-signal-safe throughout: atomic accesses, `fstat`, `lstat`,
     /// `unlink`, `sigaction`, and `raise`.
+    ///
+    /// One window cannot be resolved from inside a handler: between
+    /// `create_new` returning and the cleanup being armed, the lock file may
+    /// or may not exist, and it may or may not be waft's. Re-raising there
+    /// would terminate the process with a stale `index.lock` that blocks every
+    /// later Git and waft operation, and unlinking there could delete a lock
+    /// another process holds. So while the state is staged the signal is
+    /// recorded and the handler returns; the acquire path has a check
+    /// immediately after both ends of that window and acts on it as soon as
+    /// it knows the answer. A second load confirms that a check is still
+    /// ahead; otherwise the record is taken back and the signal handled here.
+    ///
+    /// Outside that window the handler claims an armed lock, removes it, and
+    /// re-raises. It is only installed for signals whose previous disposition
+    /// was not `SIG_IGN`, so reaching the re-raise means the process is going
+    /// to act on the signal rather than sail past it.
     pub(super) extern "C" fn handle_interrupt(signal: libc::c_int) {
-        // One window cannot be resolved from inside a handler: between
-        // `create_new` returning and the cleanup being armed, the lock file may
-        // or may not exist, and it may or may not be waft's. Re-raising there
-        // would terminate the process with a stale `index.lock` that blocks
-        // every later Git and waft operation, and unlinking there could delete
-        // a lock another process holds. So the signal is recorded and the
-        // handler returns; the acquire path has a check immediately after both
-        // ends of that window and acts on it as soon as it knows the answer.
-        if STATE.load(Ordering::SeqCst) == STAGED {
-            let _ = PENDING_SIGNAL.compare_exchange(
-                NO_SIGNAL,
-                signal,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            );
-            // Deferring is only safe while the acquire path still has a check
-            // ahead of it. Under a single total order this load decides that:
-            // if it still sees `STAGED`, the store above precedes the store
-            // that arms, which precedes the check that follows arming, so the
-            // record cannot be missed. Otherwise the window is over — take the
-            // record back and handle the signal here, the ordinary way.
-            if STATE.load(Ordering::SeqCst) == STAGED {
-                return;
-            }
-            let _ = PENDING_SIGNAL.compare_exchange(
-                signal,
-                NO_SIGNAL,
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-            );
-        }
-        // This handler is only installed for signals whose previous
-        // disposition was not `SIG_IGN`, so reaching here means the process is
-        // going to act on the signal rather than sail past it. Removing the
-        // lock first is therefore safe: nothing resumes publishing afterwards.
-        remove_armed_lock();
-        restore_previous_and_raise(signal);
+        protocol::on_signal(&mut Cells, signal);
     }
 
     /// Act on a signal the handler deferred, if there is one.
@@ -504,24 +600,13 @@ mod interrupt_cleanup {
     /// created. Returns the signal number if the process survived the re-raise,
     /// which happens only when the previous disposition was a handler that
     /// returns; the caller must then abandon the acquisition.
+    ///
+    /// The verified [`protocol::resume_pending`] keeps later signals deferred
+    /// until cleanup is finished, and disarms before re-raising: leaving the
+    /// state staged would make a later signal defer with no check ahead of it
+    /// to redeem the deferral.
     pub(super) fn resume_pending_signal(holds_lock: bool) -> Option<i32> {
-        let signal = PENDING_SIGNAL.swap(NO_SIGNAL, Ordering::SeqCst);
-        if signal == NO_SIGNAL {
-            return None;
-        }
-        // Keep later signals deferred until cleanup is finished. In
-        // particular, never unlink the same name twice after another writer
-        // has had a chance to acquire it.
-        if holds_lock && STATE.load(Ordering::SeqCst) != EMPTY {
-            STATE.store(STAGED, Ordering::SeqCst);
-            remove_recorded_lock();
-        }
-        // Whether or not a lock was created, nothing is live now. Leaving the
-        // state `STAGED` would make a later signal defer with no check ahead of
-        // it to redeem the deferral.
-        disarm();
-        restore_previous_and_raise(signal);
-        Some(signal)
+        protocol::resume_pending(&mut Cells, holds_lock)
     }
 
     /// Put back the disposition waft replaced, then re-raise, so the process
@@ -773,14 +858,18 @@ fn execute_copy(
 }
 
 /// Render a copy report to stderr.
+///
+/// Which rows print under `--quiet`, and which clauses the summary carries,
+/// are decided by the verified [`plan_kernel::prints_row`] and
+/// [`plan_kernel::summary_plan`].
 pub fn render_report(report: &CopyReport, quiet: bool) {
     for result in &report.results {
+        // Quiet suppresses routine progress, never actionable errors.
+        if !plan_kernel::prints_row(row_counter(&result.outcome), quiet) {
+            continue;
+        }
         match &result.outcome {
-            CopyOutcome::Failed { message } => {
-                // Quiet suppresses routine progress, never actionable errors.
-                eprintln!("FAILED: {message}");
-            }
-            _ if quiet => {}
+            CopyOutcome::Failed { message } => eprintln!("FAILED: {message}"),
             CopyOutcome::Copied => match &result.kind {
                 CopyResultKind::File => eprintln!("copied: {}", result.rel_path),
             },
@@ -801,34 +890,50 @@ pub fn render_report(report: &CopyReport, quiet: bool) {
         }
     }
 
-    if !quiet {
+    let summary = plan_kernel::summary_plan(quiet, report.replaced, report.permissions_repaired);
+    if summary.print {
         // The replace/repair clauses only appear when they happened, so the
         // common run keeps its familiar one-line summary.
-        let mut summary = format!("{} copied", report.copied);
-        if report.replaced > 0 {
-            summary.push_str(&format!(", {} replaced", report.replaced));
+        let mut line = format!("{} copied", report.copied);
+        if summary.replaced_clause {
+            line.push_str(&format!(", {} replaced", report.replaced));
         }
-        if report.permissions_repaired > 0 {
-            summary.push_str(&format!(
+        if summary.repaired_clause {
+            line.push_str(&format!(
                 ", {} permissions repaired",
                 report.permissions_repaired
             ));
         }
-        summary.push_str(&format!(
+        line.push_str(&format!(
             ", {} failed, {} skipped, {} up-to-date",
             report.failed, report.skipped, report.up_to_date
         ));
-        eprintln!("{summary}");
+        eprintln!("{line}");
     }
 }
 
 /// Check if the copy report has any failures, returning an appropriate exit status.
+///
+/// The decision is the verified [`plan_kernel::failure_summary`]: `Some`
+/// exactly when something failed, with `(failed, succeeded + failed)`.
 pub fn report_has_failures(report: &CopyReport) -> Option<(usize, usize)> {
-    if report.failed > 0 {
-        Some((report.failed, report.succeeded() + report.failed))
-    } else {
-        None
-    }
+    let CopyReport {
+        results: _,
+        copied,
+        replaced,
+        permissions_repaired,
+        failed,
+        skipped,
+        up_to_date,
+    } = *report;
+    plan_kernel::failure_summary(&plan_kernel::Tally {
+        copied,
+        replaced,
+        permissions_repaired,
+        failed,
+        skipped,
+        up_to_date,
+    })
 }
 
 #[cfg(test)]
@@ -1793,5 +1898,128 @@ mod tests {
             !lock.exists(),
             "index lock should be released after publish"
         );
+    }
+
+    /// The glue that hands plan entries and publication results to the
+    /// verified kernel maps every production variant to its namesake, and
+    /// every row lands in the counter the kernel counted it in.
+    #[test]
+    fn kernel_conversions_are_one_to_one() {
+        use plan_kernel::{Counter, DestExpectation, PublishKind};
+
+        let snapshot = FileSnapshot::new(0, 0, 0, None);
+        assert_eq!(
+            kernel_expectation(&DestinationExpectation::Missing),
+            DestExpectation::Missing
+        );
+        assert_eq!(
+            kernel_expectation(&DestinationExpectation::ReplaceExisting(snapshot.clone())),
+            DestExpectation::ReplaceExisting
+        );
+        assert_eq!(
+            kernel_expectation(&DestinationExpectation::RepairPermissions(snapshot)),
+            DestExpectation::RepairPermissions
+        );
+        for (outcome, kind, counter) in [
+            (
+                PublishOutcome::Created,
+                PublishKind::Created,
+                Counter::Copied,
+            ),
+            (
+                PublishOutcome::Replaced,
+                PublishKind::Replaced,
+                Counter::Replaced,
+            ),
+            (
+                PublishOutcome::PermissionsRepaired,
+                PublishKind::PermissionsRepaired,
+                Counter::PermissionsRepaired,
+            ),
+        ] {
+            assert_eq!(kernel_publish_kind(outcome), kind);
+            assert_eq!(row_counter(&CopyOutcome::from(outcome)), counter);
+        }
+        assert_eq!(
+            row_counter(&CopyOutcome::Skipped {
+                reason: crate::model::SkipReason::UntrackedConflict,
+            }),
+            Counter::Skipped
+        );
+        assert_eq!(
+            row_counter(&CopyOutcome::Failed {
+                message: String::new(),
+            }),
+            Counter::Failed
+        );
+    }
+
+    fn mixed_entries() -> Vec<PlannedEntry> {
+        vec![
+            copy_entry(),
+            PlannedEntry::NoOp(crate::model::NoOpEntry {
+                rel_path: rel("same"),
+                reason: crate::model::NoOpReason::UpToDate,
+            }),
+            PlannedEntry::Skip(crate::model::SkipEntry {
+                rel_path: rel("kept"),
+                reason: crate::model::SkipReason::UntrackedConflict,
+            }),
+            PlannedEntry::Failure(FailureEntry {
+                rel_path: rel("broken"),
+                message: "unreadable".to_string(),
+            }),
+        ]
+    }
+
+    fn counters(report: &CopyReport) -> [usize; 6] {
+        [
+            report.copied,
+            report.replaced,
+            report.permissions_repaired,
+            report.failed,
+            report.skipped,
+            report.up_to_date,
+        ]
+    }
+
+    /// Every entry lands in exactly one counter, every entry but an up-to-date
+    /// one is reported in plan order, and a dry run or a plan without a
+    /// destination root never reaches the filesystem's copy primitive.
+    #[test]
+    fn execute_counts_each_entry_once_and_reports_all_but_up_to_date() {
+        let mut dry = plan(copy_entry(), true);
+        dry.entries = mixed_entries();
+        let report = execute(
+            &dry,
+            &MockFs::default(),
+            &MockGit::default(),
+            CopyStrategy::SimpleCopy,
+        );
+        assert_eq!(counters(&report), [1, 0, 0, 1, 1, 1]);
+        let paths: Vec<_> = report.results.iter().map(|r| r.rel_path.clone()).collect();
+        assert_eq!(paths, vec![rel(".env"), rel("kept"), rel("broken")]);
+        assert!(matches!(report.results[0].outcome, CopyOutcome::Copied));
+        assert_eq!(report_has_failures(&report), Some((1, 2)));
+
+        let mut rootless = plan(copy_entry(), false);
+        rootless.context.dest_root = None;
+        rootless.entries = mixed_entries();
+        let report = execute(
+            &rootless,
+            &MockFs::default(),
+            &MockGit::default(),
+            CopyStrategy::SimpleCopy,
+        );
+        assert_eq!(counters(&report), [0, 0, 0, 2, 1, 1]);
+        let CopyOutcome::Failed { message } = &report.results[0].outcome else {
+            panic!("a copy without a destination root must fail");
+        };
+        assert_eq!(message, ".env: copy plan has no destination root");
+        let CopyOutcome::Failed { message } = &report.results[2].outcome else {
+            panic!("a planning failure must be reported as a failure");
+        };
+        assert_eq!(message, "broken: unreadable");
+        assert_eq!(report_has_failures(&report), Some((2, 2)));
     }
 }
