@@ -6,7 +6,9 @@ rust-version = "1.90"
 description = "Verus-verified decision kernels used by waft"
 license = "MIT"
 repository = "https://github.com/plx/waft"
-publish = false
+# Not published. `publish` is left unset because `cargo package --workspace`
+# (the release workflow's source-package check) cannot package waft against a
+# dependency marked `publish = false`.
 
 [dependencies]
 # Pinned to the exact Verus release in scripts/verus-verify.sh. Ordinary

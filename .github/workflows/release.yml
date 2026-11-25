@@ -54,8 +54,8 @@ jobs:
           just check-coverage
           just check-self-test
 
-      - name: Verify source package
-        run: cargo package --locked
+      - name: Verify source packages
+        run: cargo package --locked --workspace
 
   macos-safety:
     name: macOS safety and hook checks
