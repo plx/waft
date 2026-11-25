@@ -67,4 +67,4 @@ fi
 
 export PATH="${VERUS_HOME}:${PATH}"
 cd "${repo_root}"
-exec cargo verus verify --locked -p waft-verified -- --no-cheating "$@"
+exec cargo verus verify --locked -p waft-verified --fwd-verus-args-to roots -- --no-cheating "$@"
