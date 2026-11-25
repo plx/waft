@@ -16,3 +16,7 @@ vstd = { version = "=0.0.0-2026-11-22-0344", default-features = false, features 
 
 [package.metadata.verus]
 verify = true
+
+[lints.rust]
+# `verus_keep_ghost` and friends are set only when Verus drives rustc.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_keep_ghost)', 'cfg(verus_keep_ghost_body)', 'cfg(verus_verify_core)'] }

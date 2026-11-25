@@ -17,3 +17,27 @@
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
+
+pub mod boundary;
+pub mod components;
+pub mod context;
+pub mod exclusion;
+pub mod execute;
+pub mod fingerprint;
+pub mod fs_checks;
+pub mod git_parse;
+pub mod git_policy;
+pub mod groups;
+pub mod index_lock;
+pub mod lint;
+pub mod path;
+pub mod planner;
+pub mod policy;
+pub mod publish;
+pub mod report_view;
+pub mod rules;
+pub mod selection;
+pub mod tally;
+pub mod tracked;
+pub mod validation;
+pub mod worktree_map;
