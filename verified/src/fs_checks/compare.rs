@@ -19,11 +19,12 @@
 //! - `compare_chunks` reports `Differ` exactly when the two chunks differ (in
 //!   length or in any byte), `End` exactly when both are empty and equal, and
 //!   otherwise `More`, having appended each chunk to its side's consumed
-//!   bytes. Its type invariant keeps the two consumed streams equal, so
-//!   `MatchedContents::left` and `MatchedContents::right` are the same bytes:
-//!   an `Equal` or `PermissionsDiffer` verdict is only reachable when the
-//!   lengths agreed and every pair of chunks read was identical, i.e. both
-//!   streams delivered exactly the same bytes.
+//!   bytes. The type invariants of [`StreamComparison`] and
+//!   [`MatchedContents`] keep the two recorded lengths equal and the two
+//!   consumed streams equal, and only `begin` and `compare_chunks` create
+//!   these values (private fields, no `Clone` or `Copy`). So an `Equal` or
+//!   `PermissionsDiffer` verdict is only reachable when the recorded lengths
+//!   agreed and every pair of chunks passed in was identical.
 //! - `MatchedContents::verdict` is `spec_verdict(true, permissions_equal)`:
 //!   `Equal` iff the permission signatures are equal, else
 //!   `PermissionsDiffer`. With `spec_verdict` this gives the precedence
@@ -43,9 +44,18 @@
 //!
 //! # Trust assumptions
 //!
-//! - `read()` returns successive bytes of the file and `0` only at end of
-//!   file; production passes exactly `&buffer[..count]` for each read, left
-//!   then right, until the kernel says `Differ` or `End`.
+//! - The consumed streams are ghost state: the kernel knows only the chunks
+//!   it is given. That they are the files' real bytes, so that `Equal` means
+//!   both files delivered exactly the same bytes, rests on production's
+//!   driver: `read()` returns successive bytes of the file and `0` only at
+//!   end of file, and production passes exactly `&buffer[..count]` for each
+//!   read, left then right, from one `begin` until the kernel says `Differ`
+//!   or `End`.
+//! - The recorded lengths are not compared with the number of bytes
+//!   consumed (current behaviour, kept). A file that changes while it is
+//!   read is left to production's stability re-check
+//!   (`ensure_open_file_unchanged`, run before `verdict`), which relies on
+//!   the change showing in the file's length, timestamps or mode.
 //! - The lengths and permission signatures passed to `begin` come from the
 //!   metadata of the opened handles, and production converts the verdict to
 //!   `FileComparison` variant for variant.
@@ -103,6 +113,8 @@ pub proof fn theorem_precedence(contents_equal: bool, permissions_equal: bool)
 pub struct StreamComparison {
     permissions_equal: bool,
     #[allow(dead_code)]
+    lengths: Ghost<(u64, u64)>,
+    #[allow(dead_code)]
     left: Ghost<Seq<u8>>,
     #[allow(dead_code)]
     right: Ghost<Seq<u8>>,
@@ -111,6 +123,8 @@ pub struct StreamComparison {
 /// Both streams ended after delivering identical bytes.
 pub struct MatchedContents {
     permissions_equal: bool,
+    #[allow(dead_code)]
+    lengths: Ghost<(u64, u64)>,
     #[allow(dead_code)]
     left: Ghost<Seq<u8>>,
     #[allow(dead_code)]
@@ -131,7 +145,13 @@ pub enum ChunkStep {
 impl StreamComparison {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        self.left@ == self.right@
+        &&& self.lengths@.0 == self.lengths@.1
+        &&& self.left@ == self.right@
+    }
+
+    /// The (left, right) lengths recorded by `begin`.
+    pub closed spec fn recorded_lengths(&self) -> (u64, u64) {
+        self.lengths@
     }
 
     /// The bytes the left stream has delivered so far.
@@ -156,6 +176,7 @@ impl StreamComparison {
         ensures
             r is None <==> left_len != right_len,
             r matches Some(c) ==> {
+                &&& c.recorded_lengths() == (left_len, right_len)
                 &&& c.left() == Seq::<u8>::empty()
                 &&& c.right() == Seq::<u8>::empty()
                 &&& c.permissions_equal() == (left_permissions == right_permissions)
@@ -168,6 +189,7 @@ impl StreamComparison {
             Some(
                 StreamComparison {
                     permissions_equal,
+                    lengths: Ghost((left_len, right_len)),
                     left: Ghost(Seq::empty()),
                     right: Ghost(Seq::empty()),
                 },
@@ -183,6 +205,7 @@ impl StreamComparison {
             r matches ChunkStep::More(next) ==> {
                 &&& left@ == right@
                 &&& left@.len() > 0
+                &&& next.recorded_lengths() == self.recorded_lengths()
                 &&& next.left() == self.left() + left@
                 &&& next.right() == self.right() + right@
                 &&& next.permissions_equal() == self.permissions_equal()
@@ -190,6 +213,7 @@ impl StreamComparison {
             r matches ChunkStep::End(matched) ==> {
                 &&& left@ == right@
                 &&& left@.len() == 0
+                &&& matched.recorded_lengths() == self.recorded_lengths()
                 &&& matched.left() == self.left()
                 &&& matched.right() == self.right()
                 &&& matched.permissions_equal() == self.permissions_equal()
@@ -210,6 +234,7 @@ impl StreamComparison {
             ChunkStep::End(
                 MatchedContents {
                     permissions_equal: self.permissions_equal,
+                    lengths: self.lengths,
                     left: self.left,
                     right: self.right,
                 },
@@ -220,6 +245,7 @@ impl StreamComparison {
             ChunkStep::More(
                 StreamComparison {
                     permissions_equal: self.permissions_equal,
+                    lengths: self.lengths,
                     left: Ghost(left_seen),
                     right: Ghost(right_seen),
                 },
@@ -231,7 +257,13 @@ impl StreamComparison {
 impl MatchedContents {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        self.left@ == self.right@
+        &&& self.lengths@.0 == self.lengths@.1
+        &&& self.left@ == self.right@
+    }
+
+    /// The (left, right) lengths recorded by `begin`.
+    pub closed spec fn recorded_lengths(&self) -> (u64, u64) {
+        self.lengths@
     }
 
     /// Everything the left stream delivered.
@@ -252,6 +284,7 @@ impl MatchedContents {
     /// The verdict for files whose contents matched.
     pub fn verdict(&self) -> (r: Comparison)
         ensures
+            self.recorded_lengths().0 == self.recorded_lengths().1,
             self.left() == self.right(),
             r == spec_verdict(self.left() == self.right(), self.permissions_equal()),
             r != Comparison::ContentDiffers,

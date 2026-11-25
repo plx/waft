@@ -42,9 +42,10 @@
 //!   non-empty and neither `.` nor `..`) the names are exactly its segments,
 //!   and joining them with `/` gives back the input byte for byte.
 //! - `theorem_absolute_walk`: a path that does not start with `/` is refused
-//!   before any traversal; otherwise the walk opens the segments that are
-//!   neither empty nor `.` up to the first `..`, every one of them a safe
-//!   name, and is refused iff some segment is `..`.
+//!   before any traversal; otherwise the walk is refused iff some segment is
+//!   `..`, and it opens exactly the segments that are neither empty nor `.`
+//!   before the first `..` (all of them when there is none), every one of
+//!   them a safe name.
 //! - `example_normalisation_quirks`: `a//b`, `a/./b`, `a/b/` and `a/b/.` are
 //!   all accepted as `[a, b]` — the silent normalisation `Path::components`
 //!   performs. This is current behaviour, kept on purpose and documented
@@ -800,18 +801,55 @@ pub proof fn lemma_split_first(path: Seq<u8>, k: int)
     }
 }
 
-/// The absolute walk restated on bytes and segments.
+/// When the scan finds a `..`, its names are the kept pieces before the
+/// first `..`.
+pub proof fn lemma_scan_first_dot_dot(segments: Seq<Seq<u8>>)
+    ensures
+        segment_scan(segments).1 ==> exists|k: int|
+            0 <= k < segments.len() && #[trigger] segments[k] == dot_dot_name() && !has_dot_dot(
+                segments.take(k),
+            ) && segment_scan(segments).0 == kept_segments(segments.take(k)),
+    decreases segments.len(),
+{
+    if segments.len() > 0 {
+        let prior = segments.drop_last();
+        lemma_scan_first_dot_dot(prior);
+        lemma_segment_scan(prior);
+        if segment_scan(prior).1 {
+            let k = choose|k: int|
+                0 <= k < prior.len() && #[trigger] prior[k] == dot_dot_name() && !has_dot_dot(
+                    prior.take(k),
+                ) && segment_scan(prior).0 == kept_segments(prior.take(k));
+            assert(prior.take(k) =~= segments.take(k));
+            assert(segments[k] == prior[k]);
+        } else if segments.last() == dot_dot_name() {
+            let k = prior.len() as int;
+            assert(segments.take(k) =~= prior);
+            assert(segments[k] == dot_dot_name());
+        }
+    }
+}
+
+/// The absolute walk restated on bytes and segments: refused before any
+/// traversal without a leading `/`; otherwise it opens the pieces that are
+/// neither empty nor `.` before the first `..` (all of them when there is
+/// none), each a safe name, and is refused iff some piece is `..`.
 pub proof fn theorem_absolute_walk(path: Seq<u8>)
     ensures
         spec_absolute_walk(path) is None <==> !has_root(path),
         spec_absolute_walk(path) matches Some((names, refused)) ==> {
             &&& refused == has_dot_dot(split_segments(path))
             &&& !refused ==> names == kept_segments(split_segments(path))
+            &&& refused ==> exists|k: int|
+                0 <= k < split_segments(path).len() && #[trigger] split_segments(path)[k]
+                    == dot_dot_name() && !has_dot_dot(split_segments(path).take(k)) && names
+                    == kept_segments(split_segments(path).take(k))
             &&& forall|i: int| 0 <= i < names.len() ==> is_safe_name(#[trigger] names[i])
         },
 {
     let segments = split_segments(path);
     lemma_segment_scan(segments);
+    lemma_scan_first_dot_dot(segments);
     lemma_split_shape(path);
     if has_root(path) {
         assert(std_components(path) == seq![StdComponent::RootDir] + body_components(segments));
