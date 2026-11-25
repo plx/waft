@@ -1,9 +1,9 @@
 //! CLI argument parsing and command dispatch.
 
 use clap::Parser;
-use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf, Prefix};
+use std::path::{Path, PathBuf};
 use waft_verified::context::cli_policy;
+use waft_verified::path::model::Comp;
 use waft_verified::worktree_map;
 
 use crate::config::{
@@ -16,7 +16,7 @@ use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
 use crate::git::{GitBackend, default_git_backend};
 use crate::model::RepoContext;
-use crate::path::RepoRelPath;
+use crate::path::{RepoRelPath, kernel_path_components};
 use crate::subcommands::{
     CopyArgs, InfoArgs, ListArgs, ValidateArgs, run_copy_with_context, run_info_with_context,
     run_list_with_context, run_validate_with_context,
@@ -303,85 +303,27 @@ impl Cli {
             .iter()
             .map(|worktree| crate::path::without_windows_verbatim_prefix(worktree))
             .collect();
-        let worktree_keys: Vec<Vec<Vec<u8>>> = worktrees
+        // Both sides are lowered with the conversion `RepoRelPath::normalize`
+        // uses, so the kernel compares components with the path model's
+        // verified `comp_eq` (`Component` equality, which `strip_prefix`
+        // compares).
+        let worktree_components: Vec<Vec<Comp<'_>>> = worktrees
             .iter()
-            .map(|worktree| component_keys(worktree))
+            .map(|worktree| kernel_path_components(worktree))
             .collect();
         // Worktrees should not overlap, but choosing the deepest match makes
         // the mapping deterministic if they do. The verified kernel picks it
         // (the last of equally deep matches, as `max_by_key` did) and proves
         // the stripped components do not depend on the worktree order.
-        let chosen = worktree_map::deepest_worktree_prefix(&component_keys(&path), &worktree_keys)?;
+        let chosen = worktree_map::deepest_worktree_prefix(
+            &kernel_path_components(&path),
+            &worktree_components,
+        )?;
         // The kernel proved `worktrees[chosen]`'s components prefix `path`'s,
         // so `strip_prefix` succeeds; it yields the remainder as std spells it.
         let relative = path.strip_prefix(&worktrees[chosen]).ok()?;
         Some(ctx.source_root.join(relative))
     }
-}
-
-/// Lower a path to one byte key per component for the verified
-/// worktree-mapping kernel.
-///
-/// The encoding is injective and mirrors `Component` equality: a tag byte
-/// per variant, the parsed prefix (which is what `PrefixComponent` equality
-/// compares) with length-prefixed parts, and the encoded bytes of a normal
-/// component (`OsStr` equality). Two keys are therefore equal exactly when
-/// the components are equal, which is what `Path::strip_prefix` compares.
-fn component_keys(path: &Path) -> Vec<Vec<u8>> {
-    path.components().map(component_key).collect()
-}
-
-fn component_key(component: Component<'_>) -> Vec<u8> {
-    match component {
-        Component::Prefix(prefix) => prefix_key(prefix.kind()),
-        Component::RootDir => vec![1],
-        Component::CurDir => vec![2],
-        Component::ParentDir => vec![3],
-        Component::Normal(name) => {
-            let mut key = vec![4];
-            key.extend_from_slice(name.as_encoded_bytes());
-            key
-        }
-    }
-}
-
-/// The key of a Windows path prefix (tag 0), from its parsed value: a tag
-/// per `Prefix` variant, then its parts, length-prefixed. `PrefixComponent`
-/// equality compares exactly this parsed value (std uppercases the drive
-/// letter of `Disk` and `VerbatimDisk` while parsing), so two prefix keys are
-/// equal exactly when the prefix components are. Kept separate so the
-/// encoding is tested on every platform, not only where paths have prefixes.
-fn prefix_key(prefix: Prefix<'_>) -> Vec<u8> {
-    let mut key = vec![0];
-    match prefix {
-        Prefix::Verbatim(name) => {
-            key.push(0);
-            push_length_prefixed(&mut key, name);
-        }
-        Prefix::VerbatimUNC(server, share) => {
-            key.push(1);
-            push_length_prefixed(&mut key, server);
-            push_length_prefixed(&mut key, share);
-        }
-        Prefix::VerbatimDisk(drive) => key.extend_from_slice(&[2, drive]),
-        Prefix::DeviceNS(device) => {
-            key.push(3);
-            push_length_prefixed(&mut key, device);
-        }
-        Prefix::UNC(server, share) => {
-            key.push(4);
-            push_length_prefixed(&mut key, server);
-            push_length_prefixed(&mut key, share);
-        }
-        Prefix::Disk(drive) => key.extend_from_slice(&[5, drive]),
-    }
-    key
-}
-
-fn push_length_prefixed(key: &mut Vec<u8>, part: &OsStr) {
-    let bytes = part.as_encoded_bytes();
-    key.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    key.extend_from_slice(bytes);
 }
 
 /// Process-environment reader of `WAFT_CONFIG_PATH` for the verified
@@ -512,30 +454,73 @@ mod mapping_tests {
         }
     }
 
+    /// The kernel's component prefix over the shared lowering
+    /// (`kernel_path_components`) is exactly `Path::strip_prefix`, which the
+    /// mapping re-runs on the chosen worktree.
     #[test]
-    fn component_keys_agree_with_component_equality() {
+    fn kernel_component_prefix_agrees_with_strip_prefix() {
         let samples = [
             "/a/b", "/a/b/", "/a/./b", "a/b", "./a/b", "../a", "/", "", ".", "..", "/a/b/..",
             "/a/bb", "/ab", "a", "/a//b",
         ];
         for left in samples {
             for right in samples {
-                let left_components: Vec<Component<'_>> = Path::new(left).components().collect();
-                let right_components: Vec<Component<'_>> = Path::new(right).components().collect();
+                let left_components = kernel_path_components(Path::new(left));
+                let right_components = kernel_path_components(Path::new(right));
                 assert_eq!(
-                    component_keys(Path::new(left)) == component_keys(Path::new(right)),
-                    left_components == right_components,
-                    "{left:?} vs {right:?}"
-                );
-                // Component-wise prefix of keys is exactly `strip_prefix`.
-                let left_keys = component_keys(Path::new(left));
-                let right_keys = component_keys(Path::new(right));
-                let key_prefix = right_keys.len() <= left_keys.len()
-                    && left_keys[..right_keys.len()] == right_keys[..];
-                assert_eq!(
-                    key_prefix,
+                    waft_verified::path::containment::component_prefix(
+                        &right_components,
+                        &left_components
+                    ),
                     Path::new(left).strip_prefix(right).is_ok(),
                     "{left:?} strip {right:?}"
+                );
+            }
+        }
+    }
+
+    /// Windows spellings, including prefix components (drive letters in
+    /// either case, UNC and device prefixes, verbatim forms, drive-relative
+    /// paths), map exactly as the pre-kernel `strip_prefix` oracle does. On
+    /// other platforms these are ordinary names with backslashes.
+    #[test]
+    fn mapping_matches_reference_on_windows_spellings() {
+        let cli = Cli::parse_from(["waft"]);
+        let lists: &[&[&str]] = &[
+            &[r"C:\wt\linked", r"C:\src\main"],
+            &[r"c:\wt\linked", r"C:\wt", r"C:\src\main"],
+            &[r"\\server\share\wt", r"\\server\share"],
+            &[r"\\SERVER\share\wt", r"\\server/share\wt\nested"],
+            &[r"\\?\C:\wt\linked", r"\\?\UNC\server\share\wt"],
+            &[r"\\.\COM1", r"C:wt", r"C:"],
+            &[r"\\?\D:\wt", r"D:\wt", r"\\?\D:"],
+        ];
+        let paths = [
+            r"C:\wt\linked\a\b.txt",
+            r"c:\wt\linked",
+            r"C:\wt\linkedx",
+            r"C:/wt/linked/a",
+            r"D:\wt\linked\a",
+            r"\\server\share\wt\a",
+            r"\\server\share",
+            r"\\server/share\wt\nested\x",
+            r"\\SERVER\share\wt\a",
+            r"\\?\C:\wt\linked\nested",
+            r"\\?\UNC\server\share\wt\a",
+            r"\\.\COM1\x",
+            r"C:wt\x",
+            r"C:x",
+            r"\\?\D:\wt\x",
+            r"D:\wt\x",
+        ];
+        for known in lists {
+            let ctx = context(known);
+            for path in paths {
+                let path = Path::new(path);
+                assert_eq!(
+                    cli.map_worktree_path_to_source(path, &ctx),
+                    reference_map(path, &ctx),
+                    "path {path:?} with worktrees {known:?}"
                 );
             }
         }
@@ -552,50 +537,6 @@ mod mapping_tests {
         ];
         for (args, expected) in cases {
             assert_eq!(Cli::parse_from(args).command_kind(), expected, "{args:?}");
-        }
-    }
-
-    /// Windows prefix keys are equal exactly when the parsed prefixes are,
-    /// and never equal a non-prefix component's key. `Prefix` values are
-    /// built directly, so this runs on every platform.
-    #[test]
-    fn prefix_keys_agree_with_prefix_equality() {
-        let prefixes = [
-            Prefix::Verbatim(OsStr::new("")),
-            Prefix::Verbatim(OsStr::new("a")),
-            Prefix::Verbatim(OsStr::new("ab")),
-            Prefix::Verbatim(OsStr::new("\u{2}C")),
-            Prefix::VerbatimUNC(OsStr::new("a"), OsStr::new("b")),
-            Prefix::VerbatimUNC(OsStr::new("ab"), OsStr::new("")),
-            Prefix::VerbatimUNC(OsStr::new(""), OsStr::new("ab")),
-            Prefix::VerbatimUNC(OsStr::new("a\u{1}\0\0\0\0\0\0\0b"), OsStr::new("")),
-            Prefix::VerbatimDisk(b'C'),
-            Prefix::VerbatimDisk(b'D'),
-            Prefix::DeviceNS(OsStr::new("a")),
-            Prefix::DeviceNS(OsStr::new("ab")),
-            Prefix::UNC(OsStr::new("a"), OsStr::new("b")),
-            Prefix::UNC(OsStr::new("ab"), OsStr::new("")),
-            Prefix::UNC(OsStr::new(""), OsStr::new("ab")),
-            Prefix::UNC(OsStr::new("a\u{1}\0\0\0\0\0\0\0b"), OsStr::new("")),
-            Prefix::Disk(b'C'),
-            Prefix::Disk(b'D'),
-        ];
-        for a in prefixes {
-            for b in prefixes {
-                assert_eq!(prefix_key(a) == prefix_key(b), a == b, "{a:?} vs {b:?}");
-            }
-        }
-        let others = [
-            component_key(Component::RootDir),
-            component_key(Component::CurDir),
-            component_key(Component::ParentDir),
-            component_key(Component::Normal(OsStr::new(""))),
-            component_key(Component::Normal(OsStr::new("\0\0C"))),
-        ];
-        for prefix in prefixes {
-            for other in &others {
-                assert_ne!(&prefix_key(prefix), other, "{prefix:?}");
-            }
         }
     }
 
@@ -672,24 +613,6 @@ mod mapping_tests {
                 .replace_extra_excludes,
             Some(true)
         );
-    }
-
-    #[test]
-    fn component_keys_are_injective_across_variants() {
-        // Distinct variants never collide, even with crafted normal names.
-        let keys = [
-            component_key(Component::RootDir),
-            component_key(Component::CurDir),
-            component_key(Component::ParentDir),
-            component_key(Component::Normal(OsStr::new(""))),
-            component_key(Component::Normal(OsStr::new("\u{1}"))),
-            component_key(Component::Normal(OsStr::new("\u{4}"))),
-        ];
-        for (i, a) in keys.iter().enumerate() {
-            for (j, b) in keys.iter().enumerate() {
-                assert_eq!(i == j, a == b);
-            }
-        }
     }
 }
 
