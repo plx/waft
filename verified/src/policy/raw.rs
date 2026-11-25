@@ -13,15 +13,20 @@
 //! # Theorems (postconditions of `layer_from_raw`)
 //!
 //! - Version gate: a present `version` other than 1 is `UnsupportedVersion`
-//!   with that number, whatever else the file contains.
+//!   with that number, whatever else the file contains, and
+//!   `UnsupportedVersion` is returned for nothing else.
 //! - Acceptance: `Ok` exactly when the version is absent or 1 and every
 //!   present field is an accepted spelling (per [`super::vocab`]).
-//! - Error precedence: `UnknownValue(f, s)` means the version is fine, `s`
-//!   is `f`'s raw value and is not accepted, and every field before `f` is
-//!   absent or accepted.
+//! - Error precedence: when the version is fine, the first bad field `f`
+//!   (`first_bad_field`: present, not accepted, every field before it absent
+//!   or accepted) is reported as `UnknownValue(f, s)` with `s` its raw
+//!   value; conversely every `UnknownValue(f, s)` is that report.
 //! - Field independence: an accepted layer holds each field's `spec_parse`
 //!   (`None` when absent) and `replace_extra` unchanged, so a file with no
 //!   recognized fields yields the empty layer.
+//! - Determinism: `theorem_first_bad_field` shows that a file with a bad
+//!   field has exactly one first bad field, so the postconditions above fix
+//!   the result (variant and payload) for every input.
 //!
 //! # Trust
 //!
@@ -142,6 +147,78 @@ pub open spec fn version_bad(raw: RawKnobs) -> bool {
     }
 }
 
+/// Whether `field` is the first bad field: it is present with a spelling
+/// that is not accepted, and every field before it in `RawField::rank`
+/// order is absent or accepted.
+pub open spec fn first_bad_field(raw: RawKnobs, field: RawField) -> bool {
+    &&& !field_ok(raw, field)
+    &&& forall|g: RawField| g.rank() < field.rank() ==> #[trigger] field_ok(raw, g)
+}
+
+/// At most one field is the first bad field.
+pub proof fn lemma_first_bad_field_unique(raw: RawKnobs, f: RawField, g: RawField)
+    requires
+        first_bad_field(raw, f),
+        first_bad_field(raw, g),
+    ensures
+        f == g,
+{
+    // Neither can come before the other, since the earlier one would then be
+    // accepted; equal ranks mean equal fields.
+    assert(!(f.rank() < g.rank()));
+    assert(!(g.rank() < f.rank()));
+    match f {
+        RawField::CompatProfile => {},
+        RawField::WhenMissing => {},
+        RawField::Semantics => {},
+        RawField::SymlinkPolicy => {},
+        RawField::BuiltinExcludeSet => {},
+        RawField::CopyStrategy => {},
+    }
+}
+
+/// Every file has either no bad field or exactly one first bad field. With
+/// the postconditions of [`layer_from_raw`] (a bad version decides the
+/// result; otherwise all fields fine gives the parsed layer and a first bad
+/// field gives `UnknownValue` naming it), this shows those postconditions
+/// determine the result for every input.
+pub proof fn theorem_first_bad_field(raw: RawKnobs)
+    ensures
+        (forall|f: RawField| #[trigger] field_ok(raw, f)) || (exists|f: RawField|
+            #[trigger] first_bad_field(raw, f)),
+        forall|f: RawField, g: RawField|
+            #[trigger] first_bad_field(raw, f) && #[trigger] first_bad_field(raw, g) ==> f == g,
+{
+    assert forall|f: RawField, g: RawField|
+        #[trigger] first_bad_field(raw, f) && #[trigger] first_bad_field(raw, g) implies f == g by {
+        lemma_first_bad_field_unique(raw, f, g);
+    }
+    if !field_ok(raw, RawField::CompatProfile) {
+        assert(first_bad_field(raw, RawField::CompatProfile));
+    } else if !field_ok(raw, RawField::WhenMissing) {
+        assert(first_bad_field(raw, RawField::WhenMissing));
+    } else if !field_ok(raw, RawField::Semantics) {
+        assert(first_bad_field(raw, RawField::Semantics));
+    } else if !field_ok(raw, RawField::SymlinkPolicy) {
+        assert(first_bad_field(raw, RawField::SymlinkPolicy));
+    } else if !field_ok(raw, RawField::BuiltinExcludeSet) {
+        assert(first_bad_field(raw, RawField::BuiltinExcludeSet));
+    } else if !field_ok(raw, RawField::CopyStrategy) {
+        assert(first_bad_field(raw, RawField::CopyStrategy));
+    } else {
+        assert forall|f: RawField| #[trigger] field_ok(raw, f) by {
+            match f {
+                RawField::CompatProfile => {},
+                RawField::WhenMissing => {},
+                RawField::Semantics => {},
+                RawField::SymlinkPolicy => {},
+                RawField::BuiltinExcludeSet => {},
+                RawField::CopyStrategy => {},
+            }
+        }
+    }
+}
+
 /// Parses an optional value with `parse` semantics lifted to `Option`.
 pub open spec fn lift<T>(o: Option<&str>, parse: spec_fn(Seq<char>) -> Option<T>) -> Option<T> {
     match o {
@@ -153,17 +230,29 @@ pub open spec fn lift<T>(o: Option<&str>, parse: spec_fn(Seq<char>) -> Option<T>
 /// Decides a config file's layer from its raw values.
 ///
 /// Proven: the version gate comes first (`version` present and not 1 is
-/// `UnsupportedVersion` whatever else the file contains); otherwise the file
-/// is accepted exactly when every present field has an accepted spelling;
-/// a rejection names the first bad field in `RawField::rank` order
-/// together with its raw value; an accepted layer holds each field's parse
-/// (`None` when absent) and `replace_extra` unchanged.
+/// `UnsupportedVersion` with that number whatever else the file contains,
+/// and `UnsupportedVersion` is returned only then); otherwise the file is
+/// accepted exactly when every present field has an accepted spelling; when
+/// the version is fine, the first bad field in `RawField::rank` order is
+/// always reported as `UnknownValue` together with its raw value, and every
+/// `UnknownValue` is that one; an accepted layer holds each field's parse
+/// (`None` when absent) and `replace_extra` unchanged. With
+/// `theorem_first_bad_field` these postconditions determine the result for
+/// every input.
 pub fn layer_from_raw<'a>(raw: RawKnobs<'a>) -> (r: Result<KnobLayer, RawError<'a>>)
     ensures
         version_bad(raw) ==> r == Err::<KnobLayer, RawError>(
             RawError::UnsupportedVersion(raw.version->0),
         ),
+        r matches Err(RawError::UnsupportedVersion(v)) ==> {
+            &&& version_bad(raw)
+            &&& raw.version == Some(v)
+        },
         r is Ok <==> !version_bad(raw) && forall|f: RawField| #[trigger] field_ok(raw, f),
+        forall|f: RawField|
+            !version_bad(raw) && #[trigger] first_bad_field(raw, f) ==> r == Err::<KnobLayer, RawError>(
+                RawError::UnknownValue(f, field_value(raw, f)->0),
+            ),
         r matches Err(RawError::UnknownValue(f, s)) ==> {
             &&& !version_bad(raw)
             &&& field_value(raw, f) == Some(s)

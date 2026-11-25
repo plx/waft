@@ -1076,6 +1076,28 @@ profile = "rainbow"
         assert!(err.to_string().contains("version"));
     }
 
+    /// Exact messages for the kernel's error precedence: a bad version wins
+    /// over bad fields, and with a valid version the first bad field is
+    /// named (never reported as a version error).
+    #[test]
+    fn parse_error_precedence_messages_are_exact() {
+        let message = |content: &str| parse_toml("inline", content).unwrap_err().to_string();
+        let bad_profile_and_copy =
+            "[compat]\nprofile = \"rainbow\"\n[copy]\nstrategy = \"bogus\"\n";
+        assert_eq!(
+            message(&format!("version = 2\n{bad_profile_and_copy}")),
+            "config: inline: unsupported config version 2; expected 1"
+        );
+        assert_eq!(
+            message(&format!("version = 1\n{bad_profile_and_copy}")),
+            "config: inline: unknown compat profile \"rainbow\"; expected claude|git|wt"
+        );
+        assert_eq!(
+            message("version = 1\n[copy]\nstrategy = \"bogus\"\n"),
+            "config: inline: unknown copy strategy \"bogus\"; expected auto|simple-copy|cow-copy"
+        );
+    }
+
     #[test]
     fn empty_toml_yields_empty_layer() {
         let layer = parse_toml("inline", "").unwrap();
