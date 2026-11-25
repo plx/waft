@@ -3,14 +3,15 @@
 //!
 //! # What it decides
 //!
-//! [`run_plan`] is the per-entry loop of `executor::execute`. It visits the
-//! plan entries in order, exactly once each, and for every entry decides:
+//! [`run_plan`] is the per-entry loop of `executor::execute`. For every plan
+//! entry it decides:
 //!
 //! * whether the entry is published at all (`spec_copy_route`: a dry run never
 //!   publishes, a plan without a destination root never publishes, and only
 //!   `Copy` entries are ever published);
 //! * which of the six report counters it lands in ([`Counter`]);
-//! * whether it produces a result row (every entry except an up-to-date one).
+//! * whether it produces a result row (every entry except an up-to-date one),
+//!   and what that row says.
 //!
 //! The effects — taking the index lock, rechecking trackedness, copying, and
 //! building the `CopyResult` rows — stay in production behind the
@@ -24,28 +25,36 @@
 //! # Theorems
 //!
 //! About the shipped exec code (each is an `ensures` of the function or a
-//! named lemma over the specification that `ensures` refers to):
+//! named lemma over the specification that `ensures` refers to). The
+//! runner's ghost log records every call together with the plan-entry
+//! payload it was given and the values it carried (the publication result,
+//! the row), so these statements are about *which* entry each effect
+//! concerns, not only about how many effects there are:
 //!
-//! * [`run_plan`] — the runner's event log grows by exactly
-//!   `plan_log``(kinds, dry_run, has_root, pubs)` for the publish results
-//!   `pubs` the runner returned, and every counter equals the number of
-//!   entries whose class (`entry_counter`) is that counter.
+//! * [`run_plan`] — there are publication results such that the runner's
+//!   log grows by exactly `plan_log``(entries, dry_run, has_root, results)`:
+//!   the entries' own events, in plan order. Every counter equals the number
+//!   of entries whose class (`entry_counter`) is that counter, and the
+//!   counters that make up the exit status's total fit in `usize`.
+//! * `theorem_publishes_exactly_the_copy_entries` — the payloads published,
+//!   in order, are exactly the `Copy` entries of the plan, each once, in plan
+//!   order; a dry run, or a plan without a destination root, publishes
+//!   nothing.
+//! * `theorem_reports_every_entry_but_up_to_date` — the rows reported, in
+//!   order, name exactly the entries that are not up to date, each once, in
+//!   plan order.
+//! * `theorem_publication_is_reported` — each publication is immediately
+//!   followed by the row of the same copy entry, and that row is the
+//!   publication's result: what it did, or the very error it failed with.
 //! * `theorem_partition` — the six counters sum to the number of plan
 //!   entries: each entry is counted exactly once. With
 //!   `lemma_count_le_len`, no counter can overflow.
 //! * `theorem_reports_match_counters` — for every counter except
 //!   `UpToDate`, the number of rows reported with that class equals the
-//!   counter; up-to-date entries produce no row; so the number of `FAILED`
-//!   rows equals `failed`, and the rows and the summary cannot disagree.
-//! * `theorem_no_publication_without_route` — a dry run, or a plan without
-//!   a destination root, issues no publication at all; otherwise exactly the
-//!   `Copy` entries are published.
-//! * `theorem_publication_is_reported` — each publication is immediately
-//!   followed by the row for the same entry, with the class the publication
-//!   result maps to (a publish failure is always reported as `Failed`).
-//! * `theorem_dry_run_agrees_with_publication` — the class a dry run
-//!   predicts for an expectation is the class a successful publication of the
-//!   matching kind reports.
+//!   counter, and no row is ever reported as up to date.
+//! * `theorem_dry_run_agrees_with_publication` — the row a dry run predicts
+//!   for an expectation is the row a successful publication of the matching
+//!   kind reports.
 //! * [`failure_summary`] — `Some` exactly when `failed > 0`; then the pair is
 //!   `(failed, copied + replaced + permissions_repaired + failed)` and
 //!   `1 <= failed <= total`. `theorem_failure_status_agrees_with_rows`:
@@ -55,21 +64,28 @@
 //!   row; [`summary_plan`] prints the summary exactly when not quiet, with the
 //!   replaced/repaired clauses exactly when those counters are non-zero.
 //!
+//! What is *not* a theorem: that the number of `FAILED:` lines
+//! `render_report` prints equals `CopyReport::failed`. That follows from
+//! `theorem_reports_match_counters` and [`prints_row`] only through trusted
+//! glue in `executor.rs` (the runner turning each reported row into one
+//! `CopyResult`, `row_counter`, and `render_report`'s loop over the results).
+//!
 //! # Trust assumptions
 //!
 //! * The production [`EntryRunner`] does what its method names say: `publish`
 //!   performs one publication of the given copy entry and returns its result
 //!   without emitting a row; each `report_*` call pushes exactly one result
-//!   row describing the given entry with the given class. The runner's
-//!   `EntryRunner::log` is a ghost history of those calls; its `ensures` say
-//!   only that a call happened and returned what it returned.
+//!   row describing the given entry, saying what the given [`CopyRow`] says.
+//!   The runner's `EntryRunner::log` is a ghost history of those calls; its
+//!   `ensures` say only that a call happened, with which arguments, and what
+//!   it returned.
 //! * The glue converting `PlannedEntry`, `DestinationExpectation`, and
 //!   `PublishOutcome` into [`PlanEntry`], [`DestExpectation`], and
 //!   [`PublishKind`] is a faithful one-to-one mapping (exhaustive matches,
 //!   pinned by unit tests in `executor.rs`).
 //! * `failure_summary` is only given counters whose sum fits in `usize`. Every
-//!   `CopyReport` waft builds comes from `execute`, whose counters come from
-//!   [`run_plan`] and sum to the plan length (see `theorem_partition`).
+//!   `CopyReport` waft builds carries the counters of a [`run_plan`] tally
+//!   verbatim, and [`run_plan`] ensures that sum fits.
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
@@ -158,11 +174,6 @@ impl<C, S, F> PlanEntry<C, S, F> {
     }
 }
 
-/// The shapes of a sequence of plan entries.
-pub open spec fn kinds<C, S, F>(entries: Seq<PlanEntry<C, S, F>>) -> Seq<EntryKind> {
-    entries.map_values(|e: PlanEntry<C, S, F>| e.kind())
-}
-
 /// The result row of a copy entry.
 pub enum CopyRow<E> {
     /// Published (or, in a dry run, would publish) a missing destination.
@@ -188,13 +199,27 @@ pub enum CopyRoute {
     Publish,
 }
 
-/// One effect the kernel asks the runner for, as recorded in its ghost log.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Event {
-    /// A publication was attempted; its result maps to this counter.
-    Publish(Counter),
-    /// A result row with this class was reported.
-    Report(Counter),
+/// One effect the kernel asks the runner for, as recorded in its ghost log:
+/// the plan-entry payload the effect concerns and the values it carried.
+pub enum Event<C, S, F, E> {
+    /// Copy entry `C` was published, and the publication returned this.
+    Publish(C, Result<PublishKind, E>),
+    /// The row of copy entry `C` was reported, saying this.
+    ReportCopy(C, CopyRow<E>),
+    /// The row of skipped entry `S` was reported.
+    ReportSkip(S),
+    /// The row of planning failure `F` was reported.
+    ReportFailure(F),
+}
+
+/// The plan entry a result row is about.
+pub enum Subject<C, S, F> {
+    /// A copy entry.
+    Copy(C),
+    /// A skipped entry.
+    Skip(S),
+    /// A planning failure.
+    Failure(F),
 }
 
 // ---------------------------------------------------------------------------
@@ -252,10 +277,34 @@ pub open spec fn copy_row_counter<E>(row: CopyRow<E>) -> Counter {
     }
 }
 
-/// The classes a publication can end in.
-pub open spec fn is_publish_counter(c: Counter) -> bool {
-    c == Counter::Copied || c == Counter::Replaced || c == Counter::PermissionsRepaired || c
-        == Counter::Failed
+/// The row a dry run reports for a destination expectation.
+pub open spec fn simulated_copy_row<E>(e: DestExpectation) -> CopyRow<E> {
+    match e {
+        DestExpectation::Missing => CopyRow::Copied,
+        DestExpectation::ReplaceExisting => CopyRow::Replaced,
+        DestExpectation::RepairPermissions => CopyRow::PermissionsRepaired,
+    }
+}
+
+/// The row a publication result is reported as: what the publication did,
+/// or the very error it failed with.
+pub open spec fn result_row<E>(r: Result<PublishKind, E>) -> CopyRow<E> {
+    match r {
+        Ok(PublishKind::Created) => CopyRow::Copied,
+        Ok(PublishKind::Replaced) => CopyRow::Replaced,
+        Ok(PublishKind::PermissionsRepaired) => CopyRow::PermissionsRepaired,
+        Err(e) => CopyRow::PublishFailed(e),
+    }
+}
+
+/// The row of a copy entry handled by `route`, given its publication result
+/// (consulted only when the entry is published).
+pub open spec fn copy_row<E>(route: CopyRoute, e: DestExpectation, r: Result<PublishKind, E>) -> CopyRow<E> {
+    match route {
+        CopyRoute::Simulate => simulated_copy_row(e),
+        CopyRoute::MissingDestinationRoot => CopyRow::MissingDestinationRoot,
+        CopyRoute::Publish => result_row(r),
+    }
 }
 
 /// The class of one entry. `published` is the class of the entry's
@@ -274,47 +323,70 @@ pub open spec fn entry_counter(kind: EntryKind, dry_run: bool, has_root: bool, p
 }
 
 /// Whether an entry is published.
-pub open spec fn entry_publishes(kind: EntryKind, dry_run: bool, has_root: bool) -> bool {
-    kind is Copy && spec_copy_route(dry_run, has_root) == CopyRoute::Publish
+pub open spec fn entry_publishes<C, S, F>(entry: PlanEntry<C, S, F>, dry_run: bool, has_root: bool) -> bool {
+    entry is Copy && spec_copy_route(dry_run, has_root) == CopyRoute::Publish
 }
 
-/// The events one entry produces, in order: its publication (if it is
-/// published), then its row (unless it is up to date).
-pub open spec fn entry_log(kind: EntryKind, dry_run: bool, has_root: bool, published: Counter) -> Seq<Event> {
-    let c = entry_counter(kind, dry_run, has_root, published);
-    let publication = if entry_publishes(kind, dry_run, has_root) {
-        seq![Event::Publish(published)]
-    } else {
-        Seq::<Event>::empty()
-    };
-    let row = if c != Counter::UpToDate {
-        seq![Event::Report(c)]
-    } else {
-        Seq::<Event>::empty()
-    };
-    publication + row
+/// The events of one entry, given its publication result `r` (consulted
+/// only when the entry is published): a copy entry that is published is
+/// published and then reported with the publication's result; any other copy
+/// entry is reported with the row its route gives; a skip or a planning
+/// failure is reported; an up-to-date entry produces nothing.
+pub open spec fn entry_log<C, S, F, E>(
+    entry: PlanEntry<C, S, F>,
+    dry_run: bool,
+    has_root: bool,
+    r: Result<PublishKind, E>,
+) -> Seq<Event<C, S, F, E>> {
+    match entry {
+        PlanEntry::Copy(op, e) => {
+            let route = spec_copy_route(dry_run, has_root);
+            let row = seq![Event::ReportCopy(op, copy_row(route, e, r))];
+            if route == CopyRoute::Publish {
+                seq![Event::Publish(op, r)] + row
+            } else {
+                row
+            }
+        },
+        PlanEntry::NoOp => Seq::<Event<C, S, F, E>>::empty(),
+        PlanEntry::Skip(s) => seq![Event::ReportSkip(s)],
+        PlanEntry::Failure(f) => seq![Event::ReportFailure(f)],
+    }
 }
 
 /// The events a whole plan produces: each entry's events, in plan order.
-/// `pubs[i]` is the class of entry `i`'s publication result.
-pub open spec fn plan_log(kinds: Seq<EntryKind>, dry_run: bool, has_root: bool, pubs: Seq<Counter>) -> Seq<Event>
-    decreases kinds.len(),
+/// `results[i]` is entry `i`'s publication result.
+pub open spec fn plan_log<C, S, F, E>(
+    entries: Seq<PlanEntry<C, S, F>>,
+    dry_run: bool,
+    has_root: bool,
+    results: Seq<Result<PublishKind, E>>,
+) -> Seq<Event<C, S, F, E>>
+    decreases entries.len(),
 {
-    if kinds.len() == 0 {
-        Seq::<Event>::empty()
+    if entries.len() == 0 {
+        Seq::<Event<C, S, F, E>>::empty()
     } else {
-        plan_log(kinds.drop_last(), dry_run, has_root, pubs.drop_last()) + entry_log(
-            kinds.last(),
+        plan_log(entries.drop_last(), dry_run, has_root, results.drop_last()) + entry_log(
+            entries.last(),
             dry_run,
             has_root,
-            pubs.last(),
+            results.last(),
         )
     }
 }
 
 /// The class of every entry, in plan order.
-pub open spec fn entry_classes(kinds: Seq<EntryKind>, dry_run: bool, has_root: bool, pubs: Seq<Counter>) -> Seq<Counter> {
-    Seq::new(kinds.len(), |i: int| entry_counter(kinds[i], dry_run, has_root, pubs[i]))
+pub open spec fn entry_classes<C, S, F, E>(
+    entries: Seq<PlanEntry<C, S, F>>,
+    dry_run: bool,
+    has_root: bool,
+    results: Seq<Result<PublishKind, E>>,
+) -> Seq<Counter> {
+    Seq::new(
+        entries.len(),
+        |i: int| entry_counter(entries[i].kind(), dry_run, has_root, publish_result_counter(results[i])),
+    )
 }
 
 /// Number of occurrences of `c` in `s`.
@@ -332,47 +404,107 @@ pub open spec fn count(s: Seq<Counter>, c: Counter) -> nat
     }
 }
 
+/// The class of a row event; `None` for a publication.
+pub open spec fn report_class<C, S, F, E>(e: Event<C, S, F, E>) -> Option<Counter> {
+    match e {
+        Event::Publish(_, _) => None,
+        Event::ReportCopy(_, row) => Some(copy_row_counter(row)),
+        Event::ReportSkip(_) => Some(Counter::Skipped),
+        Event::ReportFailure(_) => Some(Counter::Failed),
+    }
+}
+
+/// The classes of a log's rows, in order.
+pub open spec fn report_classes<C, S, F, E>(log: Seq<Event<C, S, F, E>>) -> Seq<Counter>
+    decreases log.len(),
+{
+    if log.len() == 0 {
+        Seq::<Counter>::empty()
+    } else {
+        report_classes(log.drop_last()) + match report_class(log.last()) {
+            Some(c) => seq![c],
+            None => Seq::<Counter>::empty(),
+        }
+    }
+}
+
 /// Number of rows of class `c` in an event log.
-pub open spec fn count_reports(log: Seq<Event>, c: Counter) -> nat
+pub open spec fn count_reports<C, S, F, E>(log: Seq<Event<C, S, F, E>>, c: Counter) -> nat {
+    count(report_classes(log), c)
+}
+
+/// The copy entries a log publishes, in order.
+pub open spec fn published_ops<C, S, F, E>(log: Seq<Event<C, S, F, E>>) -> Seq<C>
     decreases log.len(),
 {
     if log.len() == 0 {
-        0
+        Seq::<C>::empty()
     } else {
-        count_reports(log.drop_last(), c) + if log.last() == Event::Report(c) {
-            1nat
-        } else {
-            0nat
+        published_ops(log.drop_last()) + match log.last() {
+            Event::Publish(op, _) => seq![op],
+            _ => Seq::<C>::empty(),
         }
     }
 }
 
-/// Number of publications in an event log.
-pub open spec fn count_publications(log: Seq<Event>) -> nat
-    decreases log.len(),
+/// The copy entries of a plan, in plan order.
+pub open spec fn copy_ops<C, S, F>(entries: Seq<PlanEntry<C, S, F>>) -> Seq<C>
+    decreases entries.len(),
 {
-    if log.len() == 0 {
-        0
+    if entries.len() == 0 {
+        Seq::<C>::empty()
     } else {
-        count_publications(log.drop_last()) + if log.last() is Publish {
-            1nat
-        } else {
-            0nat
+        copy_ops(entries.drop_last()) + match entries.last() {
+            PlanEntry::Copy(op, _) => seq![op],
+            _ => Seq::<C>::empty(),
         }
     }
 }
 
-/// Number of `Copy` entries.
-pub open spec fn count_copies(kinds: Seq<EntryKind>) -> nat
-    decreases kinds.len(),
+/// The entry a row event is about; `None` for a publication.
+pub open spec fn row_subject<C, S, F, E>(e: Event<C, S, F, E>) -> Option<Subject<C, S, F>> {
+    match e {
+        Event::Publish(_, _) => None,
+        Event::ReportCopy(op, _) => Some(Subject::Copy(op)),
+        Event::ReportSkip(s) => Some(Subject::Skip(s)),
+        Event::ReportFailure(f) => Some(Subject::Failure(f)),
+    }
+}
+
+/// The entries a log's rows are about, in order.
+pub open spec fn row_subjects<C, S, F, E>(log: Seq<Event<C, S, F, E>>) -> Seq<Subject<C, S, F>>
+    decreases log.len(),
 {
-    if kinds.len() == 0 {
-        0
+    if log.len() == 0 {
+        Seq::<Subject<C, S, F>>::empty()
     } else {
-        count_copies(kinds.drop_last()) + if kinds.last() is Copy {
-            1nat
-        } else {
-            0nat
+        row_subjects(log.drop_last()) + match row_subject(log.last()) {
+            Some(s) => seq![s],
+            None => Seq::<Subject<C, S, F>>::empty(),
+        }
+    }
+}
+
+/// An entry as the subject of a row; `None` for an up-to-date entry.
+pub open spec fn entry_subject<C, S, F>(entry: PlanEntry<C, S, F>) -> Option<Subject<C, S, F>> {
+    match entry {
+        PlanEntry::Copy(op, _) => Some(Subject::Copy(op)),
+        PlanEntry::NoOp => None,
+        PlanEntry::Skip(s) => Some(Subject::Skip(s)),
+        PlanEntry::Failure(f) => Some(Subject::Failure(f)),
+    }
+}
+
+/// The entries of a plan that are not up to date, in plan order.
+pub open spec fn reported_entries<C, S, F>(entries: Seq<PlanEntry<C, S, F>>) -> Seq<Subject<C, S, F>>
+    decreases entries.len(),
+{
+    if entries.len() == 0 {
+        Seq::<Subject<C, S, F>>::empty()
+    } else {
+        reported_entries(entries.drop_last()) + match entry_subject(entries.last()) {
+            Some(s) => seq![s],
+            None => Seq::<Subject<C, S, F>>::empty(),
         }
     }
 }
@@ -387,30 +519,30 @@ pub open spec fn count_copies(kinds: Seq<EntryKind>) -> nat
 /// entries; `R` is the destination root; `E` is a publication error.
 pub trait EntryRunner<C, S, F, R, E> {
     /// Ghost history of the calls made on this runner.
-    spec fn log(&self) -> Seq<Event>;
+    spec fn log(&self) -> Seq<Event<C, S, F, E>>;
 
     /// Publish one copy entry under `destination_root` and return the result.
     fn publish(&mut self, op: &C, destination_root: &R) -> (r: Result<PublishKind, E>)
         ensures
-            final(self).log() == old(self).log().push(Event::Publish(publish_result_counter(r))),
+            final(self).log() == old(self).log().push(Event::Publish(*op, r)),
     ;
 
     /// Report the result row of a copy entry.
     fn report_copy(&mut self, op: &C, row: CopyRow<E>)
         ensures
-            final(self).log() == old(self).log().push(Event::Report(copy_row_counter(row))),
+            final(self).log() == old(self).log().push(Event::ReportCopy(*op, row)),
     ;
 
     /// Report the result row of a skipped entry.
     fn report_skip(&mut self, skip: &S)
         ensures
-            final(self).log() == old(self).log().push(Event::Report(Counter::Skipped)),
+            final(self).log() == old(self).log().push(Event::ReportSkip(*skip)),
     ;
 
     /// Report the result row of a planning failure.
     fn report_failure(&mut self, failure: &F)
         ensures
-            final(self).log() == old(self).log().push(Event::Report(Counter::Failed)),
+            final(self).log() == old(self).log().push(Event::ReportFailure(*failure)),
     ;
 }
 
@@ -496,7 +628,7 @@ impl Default for Tally {
 
 fn simulated_row<E>(e: DestExpectation) -> (row: CopyRow<E>)
     ensures
-        copy_row_counter(row) == simulated_counter(e),
+        row == simulated_copy_row::<E>(e),
 {
     match e {
         DestExpectation::Missing => CopyRow::Copied,
@@ -520,7 +652,7 @@ fn simulated_class(e: DestExpectation) -> (c: Counter)
 fn published_row<E>(r: Result<PublishKind, E>) -> (out: (Counter, CopyRow<E>))
     ensures
         out.0 == publish_result_counter(r),
-        copy_row_counter(out.1) == out.0,
+        out.1 == result_row(r),
 {
     match r {
         Ok(PublishKind::Created) => (Counter::Copied, CopyRow::Copied),
@@ -530,9 +662,9 @@ fn published_row<E>(r: Result<PublishKind, E>) -> (out: (Counter, CopyRow<E>))
     }
 }
 
-/// Execute a plan: visit every entry once, in order, publishing exactly the
-/// entries `spec_copy_route` says to publish, reporting a row for every entry
-/// that is not up to date, and counting every entry in its class.
+/// Execute a plan: for each entry in plan order, publish it if
+/// `spec_copy_route` says to, report its row unless it is up to date, and
+/// count it in its class.
 pub fn run_plan<C, S, F, R, E, Run: EntryRunner<C, S, F, R, E>>(
     runner: &mut Run,
     entries: &[PlanEntry<C, S, F>],
@@ -540,72 +672,68 @@ pub fn run_plan<C, S, F, R, E, Run: EntryRunner<C, S, F, R, E>>(
     destination_root: Option<&R>,
 ) -> (t: Tally)
     ensures
-        exists|pubs: Seq<Counter>|
+        exists|results: Seq<Result<PublishKind, E>>|
             {
-                &&& pubs.len() == entries@.len()
-                &&& forall|i: int| 0 <= i < pubs.len() ==> is_publish_counter(#[trigger] pubs[i])
+                &&& results.len() == entries@.len()
                 &&& final(runner).log() == old(runner).log() + #[trigger] plan_log(
-                    kinds(entries@),
+                    entries@,
                     dry_run,
                     destination_root is Some,
-                    pubs,
+                    results,
                 )
                 &&& forall|c: Counter|
                     #[trigger] t.get(c) == count(
-                        entry_classes(kinds(entries@), dry_run, destination_root is Some, pubs),
+                        entry_classes(entries@, dry_run, destination_root is Some, results),
                         c,
                     )
             },
         t.total() == entries@.len(),
+        t.copied + t.replaced + t.permissions_repaired + t.failed <= usize::MAX,
 {
-    let ghost ks = kinds(entries@);
     let ghost has_root = destination_root is Some;
     let ghost log0 = runner.log();
-    let ghost mut pubs: Seq<Counter> = Seq::empty();
+    let ghost mut results: Seq<Result<PublishKind, E>> = Seq::empty();
     let mut tally = Tally::new();
     let mut i: usize = 0;
     proof {
-        assert(ks.take(0) =~= Seq::<EntryKind>::empty());
-        assert(entry_classes(ks.take(0), dry_run, has_root, pubs) =~= Seq::<Counter>::empty());
-        assert(runner.log() =~= log0 + Seq::<Event>::empty());
+        assert(entries@.take(0) =~= Seq::<PlanEntry<C, S, F>>::empty());
+        assert(entry_classes(entries@.take(0), dry_run, has_root, results) =~= Seq::<Counter>::empty());
+        assert(runner.log() =~= log0 + Seq::<Event<C, S, F, E>>::empty());
     }
     while i < entries.len()
         invariant
             i <= entries@.len(),
-            ks == kinds(entries@),
             has_root == (destination_root is Some),
-            pubs.len() == i,
-            forall|j: int| 0 <= j < pubs.len() ==> is_publish_counter(#[trigger] pubs[j]),
-            runner.log() == log0 + plan_log(ks.take(i as int), dry_run, has_root, pubs),
+            results.len() == i,
+            runner.log() == log0 + plan_log(entries@.take(i as int), dry_run, has_root, results),
             forall|c: Counter|
                 #[trigger] tally.get(c) == count(
-                    entry_classes(ks.take(i as int), dry_run, has_root, pubs),
+                    entry_classes(entries@.take(i as int), dry_run, has_root, results),
                     c,
                 ),
         decreases entries.len() - i,
     {
         let ghost prev_log = runner.log();
-        let ghost prev_classes = entry_classes(ks.take(i as int), dry_run, has_root, pubs);
-        let ghost kind = ks[i as int];
-        assert(kind == entries@[i as int].kind());
+        let ghost prev_classes = entry_classes(entries@.take(i as int), dry_run, has_root, results);
+        let ghost entry = entries@[i as int];
         let class: Counter;
-        let ghost published: Counter;
+        let ghost mut published: Result<PublishKind, E> = Ok(PublishKind::Created);
         match &entries[i] {
             PlanEntry::Copy(op, expectation) => {
                 if dry_run {
                     runner.report_copy(op, simulated_row(*expectation));
                     class = simulated_class(*expectation);
-                    proof { published = Counter::Copied; }
                 } else {
                     match destination_root {
                         None => {
                             runner.report_copy(op, CopyRow::MissingDestinationRoot);
                             class = Counter::Failed;
-                            proof { published = Counter::Copied; }
                         },
                         Some(root) => {
                             let result = runner.publish(op, root);
-                            proof { published = publish_result_counter(result); }
+                            proof {
+                                published = result;
+                            }
                             let (c, row) = published_row(result);
                             runner.report_copy(op, row);
                             class = c;
@@ -615,50 +743,46 @@ pub fn run_plan<C, S, F, R, E, Run: EntryRunner<C, S, F, R, E>>(
             },
             PlanEntry::NoOp => {
                 class = Counter::UpToDate;
-                proof { published = Counter::Copied; }
             },
             PlanEntry::Skip(skip) => {
                 runner.report_skip(skip);
                 class = Counter::Skipped;
-                proof { published = Counter::Copied; }
             },
             PlanEntry::Failure(failure) => {
                 runner.report_failure(failure);
                 class = Counter::Failed;
-                proof { published = Counter::Copied; }
             },
         }
         proof {
-            let next_pubs = pubs.push(published);
-            assert(class == entry_counter(kind, dry_run, has_root, published));
-            assert(runner.log() == prev_log + entry_log(kind, dry_run, has_root, published)) by {
-                let el = entry_log(kind, dry_run, has_root, published);
-                assert(runner.log() =~= prev_log + el);
-            }
-            assert(ks.take(i + 1).drop_last() =~= ks.take(i as int));
-            assert(ks.take(i + 1).last() == kind);
-            assert(next_pubs.drop_last() =~= pubs);
-            assert(entry_classes(ks.take(i + 1), dry_run, has_root, next_pubs) =~= prev_classes.push(class));
+            let next = results.push(published);
+            assert(class == entry_counter(entry.kind(), dry_run, has_root, publish_result_counter(published)));
+            assert(runner.log() =~= prev_log + entry_log(entry, dry_run, has_root, published));
+            assert(entries@.take(i + 1).drop_last() =~= entries@.take(i as int));
+            assert(entries@.take(i + 1).last() == entry);
+            assert(next.drop_last() =~= results);
+            assert(next.last() == published);
+            assert(runner.log() =~= log0 + plan_log(entries@.take(i + 1), dry_run, has_root, next));
+            assert(entry_classes(entries@.take(i + 1), dry_run, has_root, next) =~= prev_classes.push(class));
             lemma_count_le_len(prev_classes, class);
-            pubs = next_pubs;
+            results = next;
         }
         tally.record(class);
         proof {
             assert forall|c: Counter|
                 #[trigger] tally.get(c) == count(
-                    entry_classes(ks.take(i + 1), dry_run, has_root, pubs),
+                    entry_classes(entries@.take(i + 1), dry_run, has_root, results),
                     c,
                 ) by {
-                assert(entry_classes(ks.take(i + 1), dry_run, has_root, pubs) =~= prev_classes.push(class));
+                assert(entry_classes(entries@.take(i + 1), dry_run, has_root, results) =~= prev_classes.push(class));
                 assert(prev_classes.push(class).drop_last() =~= prev_classes);
             }
         }
         i += 1;
     }
     proof {
-        assert(ks.take(i as int) =~= ks);
-        let classes = entry_classes(ks, dry_run, has_root, pubs);
-        assert(entry_classes(ks.take(i as int), dry_run, has_root, pubs) == classes);
+        assert(entries@.take(i as int) =~= entries@);
+        let classes = entry_classes(entries@, dry_run, has_root, results);
+        assert(entry_classes(entries@.take(i as int), dry_run, has_root, results) == classes);
         theorem_partition(classes);
         assert(classes.len() == entries@.len());
         assert(tally.get(Counter::Copied) == count(classes, Counter::Copied));
@@ -674,6 +798,10 @@ pub fn run_plan<C, S, F, R, E, Run: EntryRunner<C, S, F, R, E>>(
 /// The `(failed, total)` pair behind waft's exit status, or `None` when
 /// nothing failed. `total` counts every destination the run published or
 /// tried to: successes plus failures, excluding skips and up-to-date files.
+///
+/// The requirement holds for every tally [`run_plan`] returns (it is one of
+/// its postconditions), and so for every `CopyReport` waft builds, which
+/// carries those counters verbatim.
 pub fn failure_summary(t: &Tally) -> (r: Option<(usize, usize)>)
     requires
         t.copied + t.replaced + t.permissions_repaired + t.failed <= usize::MAX,
@@ -773,253 +901,408 @@ pub proof fn theorem_partition(s: Seq<Counter>)
     }
 }
 
-proof fn lemma_count_reports_concat(a: Seq<Event>, b: Seq<Event>, c: Counter)
+proof fn lemma_count_concat(a: Seq<Counter>, b: Seq<Counter>, c: Counter)
     ensures
-        count_reports(a + b, c) == count_reports(a, c) + count_reports(b, c),
+        count(a + b, c) == count(a, c) + count(b, c),
     decreases b.len(),
 {
     if b.len() == 0 {
         assert(a + b =~= a);
     } else {
         assert((a + b).drop_last() =~= a + b.drop_last());
-        lemma_count_reports_concat(a, b.drop_last(), c);
+        lemma_count_concat(a, b.drop_last(), c);
     }
 }
 
-proof fn lemma_count_publications_concat(a: Seq<Event>, b: Seq<Event>)
+proof fn lemma_report_classes_concat<C, S, F, E>(a: Seq<Event<C, S, F, E>>, b: Seq<Event<C, S, F, E>>)
     ensures
-        count_publications(a + b) == count_publications(a) + count_publications(b),
+        report_classes(a + b) == report_classes(a) + report_classes(b),
     decreases b.len(),
 {
     if b.len() == 0 {
         assert(a + b =~= a);
+        assert(report_classes(a) + report_classes(b) =~= report_classes(a));
     } else {
         assert((a + b).drop_last() =~= a + b.drop_last());
-        lemma_count_publications_concat(a, b.drop_last());
+        assert((a + b).last() == b.last());
+        lemma_report_classes_concat(a, b.drop_last());
+        let tail = match report_class(b.last()) {
+            Some(c) => seq![c],
+            None => Seq::<Counter>::empty(),
+        };
+        assert(report_classes(a + b) == report_classes(a + b.drop_last()) + tail);
+        assert(report_classes(b) == report_classes(b.drop_last()) + tail);
+        assert(report_classes(a + b) =~= report_classes(a) + report_classes(b));
     }
 }
 
-proof fn lemma_singleton_counts(e: Event, c: Counter)
+proof fn lemma_published_ops_concat<C, S, F, E>(a: Seq<Event<C, S, F, E>>, b: Seq<Event<C, S, F, E>>)
     ensures
-        count_reports(seq![e], c) == if e == Event::Report(c) {
-            1nat
-        } else {
-            0nat
-        },
-        count_publications(seq![e]) == if e is Publish {
-            1nat
-        } else {
-            0nat
-        },
-        count_reports(Seq::<Event>::empty(), c) == 0,
-        count_publications(Seq::<Event>::empty()) == 0,
+        published_ops(a + b) == published_ops(a) + published_ops(b),
+    decreases b.len(),
 {
-    let s = seq![e];
-    let empty = Seq::<Event>::empty();
-    assert(s.drop_last() =~= empty);
-    assert(s.last() == e);
-    assert(count_reports(empty, c) == 0);
-    assert(count_publications(empty) == 0);
-    assert(count_reports(s, c) == count_reports(s.drop_last(), c) + if s.last() == Event::Report(c) {
-        1nat
+    if b.len() == 0 {
+        assert(a + b =~= a);
+        assert(published_ops(a) + published_ops(b) =~= published_ops(a));
     } else {
-        0nat
-    });
-    assert(count_publications(s) == count_publications(s.drop_last()) + if s.last() is Publish {
-        1nat
-    } else {
-        0nat
-    });
+        assert((a + b).drop_last() =~= a + b.drop_last());
+        assert((a + b).last() == b.last());
+        lemma_published_ops_concat(a, b.drop_last());
+        let tail = match b.last() {
+            Event::Publish(op, _) => seq![op],
+            _ => Seq::<C>::empty(),
+        };
+        assert(published_ops(a + b) == published_ops(a + b.drop_last()) + tail);
+        assert(published_ops(b) == published_ops(b.drop_last()) + tail);
+        assert(published_ops(a + b) =~= published_ops(a) + published_ops(b));
+    }
 }
 
-proof fn lemma_entry_classes_drop_last(kinds: Seq<EntryKind>, dry_run: bool, has_root: bool, pubs: Seq<Counter>)
+proof fn lemma_row_subjects_concat<C, S, F, E>(a: Seq<Event<C, S, F, E>>, b: Seq<Event<C, S, F, E>>)
+    ensures
+        row_subjects(a + b) == row_subjects(a) + row_subjects(b),
+    decreases b.len(),
+{
+    if b.len() == 0 {
+        assert(a + b =~= a);
+        assert(row_subjects(a) + row_subjects(b) =~= row_subjects(a));
+    } else {
+        assert((a + b).drop_last() =~= a + b.drop_last());
+        assert((a + b).last() == b.last());
+        lemma_row_subjects_concat(a, b.drop_last());
+        let tail = match row_subject(b.last()) {
+            Some(s) => seq![s],
+            None => Seq::<Subject<C, S, F>>::empty(),
+        };
+        assert(row_subjects(a + b) == row_subjects(a + b.drop_last()) + tail);
+        assert(row_subjects(b) == row_subjects(b.drop_last()) + tail);
+        assert(row_subjects(a + b) =~= row_subjects(a) + row_subjects(b));
+    }
+}
+
+/// What one entry's events contribute: one row of the entry's class unless
+/// it is up to date, a publication of its own payload exactly when it is
+/// published, and one row about the entry itself unless it is up to date.
+proof fn lemma_entry_log<C, S, F, E>(entry: PlanEntry<C, S, F>, dry_run: bool, has_root: bool, r: Result<PublishKind, E>)
+    ensures
+        ({
+            let class = entry_counter(entry.kind(), dry_run, has_root, publish_result_counter(r));
+            report_classes(entry_log(entry, dry_run, has_root, r)) == if class != Counter::UpToDate {
+                seq![class]
+            } else {
+                Seq::<Counter>::empty()
+            }
+        }),
+        published_ops(entry_log(entry, dry_run, has_root, r)) == if entry_publishes(entry, dry_run, has_root) {
+            seq![entry->Copy_0]
+        } else {
+            Seq::<C>::empty()
+        },
+        row_subjects(entry_log(entry, dry_run, has_root, r)) == match entry_subject(entry) {
+            Some(s) => seq![s],
+            None => Seq::<Subject<C, S, F>>::empty(),
+        },
+{
+    reveal_with_fuel(report_classes, 3);
+    reveal_with_fuel(published_ops, 3);
+    reveal_with_fuel(row_subjects, 3);
+    let el = entry_log(entry, dry_run, has_root, r);
+    let empty = Seq::<Event<C, S, F, E>>::empty();
+    match entry {
+        PlanEntry::Copy(op, e) => {
+            let route = spec_copy_route(dry_run, has_root);
+            let row = Event::ReportCopy(op, copy_row(route, e, r));
+            if route == CopyRoute::Publish {
+                assert(el =~= seq![Event::Publish(op, r), row]);
+                assert(el.drop_last() =~= seq![Event::Publish(op, r)]);
+                assert(el.drop_last().drop_last() =~= empty);
+                assert(copy_row_counter(result_row(r)) == publish_result_counter(r));
+                assert(report_classes(el) =~= seq![publish_result_counter(r)]);
+                assert(published_ops(el) =~= seq![op]);
+                assert(row_subjects(el) =~= seq![Subject::<C, S, F>::Copy(op)]);
+            } else {
+                assert(el =~= seq![row]);
+                assert(el.drop_last() =~= empty);
+                assert(copy_row_counter(simulated_copy_row::<E>(e)) == simulated_counter(e));
+                assert(report_classes(el) =~= seq![copy_row_counter(copy_row(route, e, r))]);
+                assert(published_ops(el) =~= Seq::<C>::empty());
+                assert(row_subjects(el) =~= seq![Subject::<C, S, F>::Copy(op)]);
+            }
+        },
+        PlanEntry::NoOp => {},
+        PlanEntry::Skip(s) => {
+            assert(el.drop_last() =~= empty);
+            assert(report_classes(el) =~= seq![Counter::Skipped]);
+            assert(published_ops(el) =~= Seq::<C>::empty());
+            assert(row_subjects(el) =~= seq![Subject::<C, S, F>::Skip(s)]);
+        },
+        PlanEntry::Failure(f) => {
+            assert(el.drop_last() =~= empty);
+            assert(report_classes(el) =~= seq![Counter::Failed]);
+            assert(published_ops(el) =~= Seq::<C>::empty());
+            assert(row_subjects(el) =~= seq![Subject::<C, S, F>::Failure(f)]);
+        },
+    }
+}
+
+proof fn lemma_entry_classes_drop_last<C, S, F, E>(
+    entries: Seq<PlanEntry<C, S, F>>,
+    dry_run: bool,
+    has_root: bool,
+    results: Seq<Result<PublishKind, E>>,
+)
     requires
-        kinds.len() > 0,
-        pubs.len() == kinds.len(),
+        entries.len() > 0,
+        results.len() == entries.len(),
     ensures
-        entry_classes(kinds, dry_run, has_root, pubs) =~= entry_classes(
-            kinds.drop_last(),
+        entry_classes(entries, dry_run, has_root, results) =~= entry_classes(
+            entries.drop_last(),
             dry_run,
             has_root,
-            pubs.drop_last(),
-        ).push(entry_counter(kinds.last(), dry_run, has_root, pubs.last())),
+            results.drop_last(),
+        ).push(entry_counter(entries.last().kind(), dry_run, has_root, publish_result_counter(results.last()))),
 {
 }
 
 /// Rows agree with counters: for every class except `UpToDate`, the number
 /// of rows reported with that class equals the number of entries in it, and
-/// no row is ever reported as up to date. In particular the number of
-/// `FAILED` lines equals `failed`.
-pub proof fn theorem_reports_match_counters(
-    kinds: Seq<EntryKind>,
+/// no row is ever reported as up to date.
+pub proof fn theorem_reports_match_counters<C, S, F, E>(
+    entries: Seq<PlanEntry<C, S, F>>,
     dry_run: bool,
     has_root: bool,
-    pubs: Seq<Counter>,
+    results: Seq<Result<PublishKind, E>>,
     c: Counter,
 )
     requires
-        pubs.len() == kinds.len(),
+        results.len() == entries.len(),
     ensures
-        c != Counter::UpToDate ==> count_reports(plan_log(kinds, dry_run, has_root, pubs), c)
-            == count(entry_classes(kinds, dry_run, has_root, pubs), c),
-        count_reports(plan_log(kinds, dry_run, has_root, pubs), Counter::UpToDate) == 0,
-    decreases kinds.len(),
+        c != Counter::UpToDate ==> count_reports(plan_log(entries, dry_run, has_root, results), c)
+            == count(entry_classes(entries, dry_run, has_root, results), c),
+        count_reports(plan_log(entries, dry_run, has_root, results), Counter::UpToDate) == 0,
+    decreases entries.len(),
 {
-    if kinds.len() > 0 {
-        let k = kinds.last();
-        let p = pubs.last();
-        theorem_reports_match_counters(kinds.drop_last(), dry_run, has_root, pubs.drop_last(), c);
-        lemma_entry_classes_drop_last(kinds, dry_run, has_root, pubs);
-        let prefix = plan_log(kinds.drop_last(), dry_run, has_root, pubs.drop_last());
-        let el = entry_log(k, dry_run, has_root, p);
-        lemma_count_reports_concat(prefix, el, c);
-        lemma_count_reports_concat(prefix, el, Counter::UpToDate);
-        let ec = entry_counter(k, dry_run, has_root, p);
-        let publication = if entry_publishes(k, dry_run, has_root) {
-            seq![Event::Publish(p)]
+    if entries.len() > 0 {
+        let last = entries.last();
+        let r = results.last();
+        let class = entry_counter(last.kind(), dry_run, has_root, publish_result_counter(r));
+        theorem_reports_match_counters(entries.drop_last(), dry_run, has_root, results.drop_last(), c);
+        lemma_entry_classes_drop_last(entries, dry_run, has_root, results);
+        let prefix = plan_log(entries.drop_last(), dry_run, has_root, results.drop_last());
+        let el = entry_log(last, dry_run, has_root, r);
+        lemma_report_classes_concat(prefix, el);
+        lemma_entry_log(last, dry_run, has_root, r);
+        let tail = if class != Counter::UpToDate {
+            seq![class]
         } else {
-            Seq::<Event>::empty()
+            Seq::<Counter>::empty()
         };
-        let row = if ec != Counter::UpToDate {
-            seq![Event::Report(ec)]
+        assert(report_classes(prefix + el) == report_classes(prefix) + tail);
+        lemma_count_concat(report_classes(prefix), tail, c);
+        lemma_count_concat(report_classes(prefix), tail, Counter::UpToDate);
+        let prev = entry_classes(entries.drop_last(), dry_run, has_root, results.drop_last());
+        assert(prev.push(class).drop_last() =~= prev);
+        assert(prev.push(class).last() == class);
+        assert(entry_classes(entries, dry_run, has_root, results) == prev.push(class));
+        assert(seq![class].drop_last() =~= Seq::<Counter>::empty());
+        assert(seq![class].last() == class);
+        assert(count(Seq::<Counter>::empty(), c) == 0);
+        assert(count(Seq::<Counter>::empty(), Counter::UpToDate) == 0);
+        assert(count(seq![class], c) == count(Seq::<Counter>::empty(), c) + if class == c {
+            1nat
         } else {
-            Seq::<Event>::empty()
-        };
-        assert(el == publication + row);
-        lemma_count_reports_concat(publication, row, c);
-        lemma_count_reports_concat(publication, row, Counter::UpToDate);
-        lemma_singleton_counts(Event::Publish(p), c);
-        lemma_singleton_counts(Event::Publish(p), Counter::UpToDate);
-        lemma_singleton_counts(Event::Report(ec), c);
-        lemma_singleton_counts(Event::Report(ec), Counter::UpToDate);
-        let classes = entry_classes(kinds, dry_run, has_root, pubs);
-        assert(classes.drop_last() =~= entry_classes(kinds.drop_last(), dry_run, has_root, pubs.drop_last()));
+            0nat
+        });
+        assert(count(seq![class], Counter::UpToDate) == count(Seq::<Counter>::empty(), Counter::UpToDate)
+            + if class == Counter::UpToDate {
+            1nat
+        } else {
+            0nat
+        });
+        assert(count(prev.push(class), c) == count(prev, c) + if class == c {
+            1nat
+        } else {
+            0nat
+        });
+    } else {
+        assert(plan_log(entries, dry_run, has_root, results) =~= Seq::<Event<C, S, F, E>>::empty());
+        assert(report_classes(Seq::<Event<C, S, F, E>>::empty()) =~= Seq::<Counter>::empty());
+        assert(entry_classes(entries, dry_run, has_root, results) =~= Seq::<Counter>::empty());
+        assert(count(Seq::<Counter>::empty(), c) == 0);
+        assert(count(Seq::<Counter>::empty(), Counter::UpToDate) == 0);
     }
 }
 
 /// Publication happens exactly where the route says: a dry run, or a real
-/// run without a destination root, publishes nothing; otherwise exactly the
-/// `Copy` entries are published, one publication each.
-pub proof fn theorem_no_publication_without_route(
-    kinds: Seq<EntryKind>,
+/// run without a destination root, publishes nothing; otherwise the
+/// payloads published are exactly the plan's `Copy` entries, each once, in
+/// plan order.
+pub proof fn theorem_publishes_exactly_the_copy_entries<C, S, F, E>(
+    entries: Seq<PlanEntry<C, S, F>>,
     dry_run: bool,
     has_root: bool,
-    pubs: Seq<Counter>,
+    results: Seq<Result<PublishKind, E>>,
 )
     requires
-        pubs.len() == kinds.len(),
+        results.len() == entries.len(),
     ensures
-        count_publications(plan_log(kinds, dry_run, has_root, pubs)) == if !dry_run && has_root {
-            count_copies(kinds)
+        published_ops(plan_log(entries, dry_run, has_root, results)) == if !dry_run && has_root {
+            copy_ops(entries)
         } else {
-            0
+            Seq::<C>::empty()
         },
-    decreases kinds.len(),
+    decreases entries.len(),
 {
-    if kinds.len() > 0 {
-        let k = kinds.last();
-        let p = pubs.last();
-        theorem_no_publication_without_route(kinds.drop_last(), dry_run, has_root, pubs.drop_last());
-        let prefix = plan_log(kinds.drop_last(), dry_run, has_root, pubs.drop_last());
-        let el = entry_log(k, dry_run, has_root, p);
-        lemma_count_publications_concat(prefix, el);
-        let ec = entry_counter(k, dry_run, has_root, p);
-        let publication = if entry_publishes(k, dry_run, has_root) {
-            seq![Event::Publish(p)]
+    if entries.len() > 0 {
+        let last = entries.last();
+        let r = results.last();
+        theorem_publishes_exactly_the_copy_entries(entries.drop_last(), dry_run, has_root, results.drop_last());
+        let prefix = plan_log(entries.drop_last(), dry_run, has_root, results.drop_last());
+        let el = entry_log(last, dry_run, has_root, r);
+        lemma_published_ops_concat(prefix, el);
+        lemma_entry_log(last, dry_run, has_root, r);
+        if !dry_run && has_root {
+            assert(published_ops(prefix + el) =~= copy_ops(entries));
         } else {
-            Seq::<Event>::empty()
-        };
-        let row = if ec != Counter::UpToDate {
-            seq![Event::Report(ec)]
-        } else {
-            Seq::<Event>::empty()
-        };
-        lemma_count_publications_concat(publication, row);
-        lemma_singleton_counts(Event::Publish(p), ec);
-        lemma_singleton_counts(Event::Report(ec), ec);
+            assert(published_ops(prefix + el) =~= Seq::<C>::empty());
+        }
+    } else {
+        assert(published_ops(Seq::<Event<C, S, F, E>>::empty()) =~= Seq::<C>::empty());
     }
 }
 
-/// Every publication is immediately followed by the row of the same entry,
-/// and that row's class is the class of the publication's result.
-pub proof fn theorem_publication_is_reported(
-    kinds: Seq<EntryKind>,
+/// Every entry that is not up to date is reported exactly once, in plan
+/// order: the rows reported name exactly those entries, in that order.
+pub proof fn theorem_reports_every_entry_but_up_to_date<C, S, F, E>(
+    entries: Seq<PlanEntry<C, S, F>>,
     dry_run: bool,
     has_root: bool,
-    pubs: Seq<Counter>,
+    results: Seq<Result<PublishKind, E>>,
+)
+    requires
+        results.len() == entries.len(),
+    ensures
+        row_subjects(plan_log(entries, dry_run, has_root, results)) == reported_entries(entries),
+    decreases entries.len(),
+{
+    if entries.len() > 0 {
+        let last = entries.last();
+        let r = results.last();
+        theorem_reports_every_entry_but_up_to_date(entries.drop_last(), dry_run, has_root, results.drop_last());
+        let prefix = plan_log(entries.drop_last(), dry_run, has_root, results.drop_last());
+        let el = entry_log(last, dry_run, has_root, r);
+        lemma_row_subjects_concat(prefix, el);
+        lemma_entry_log(last, dry_run, has_root, r);
+        assert(row_subjects(prefix + el) =~= reported_entries(entries));
+    } else {
+        assert(row_subjects(Seq::<Event<C, S, F, E>>::empty()) =~= Seq::<Subject<C, S, F>>::empty());
+    }
+}
+
+/// Every publication is immediately followed by the row of the same copy
+/// entry, and that row is the publication's result: what it did, or the
+/// error it failed with.
+pub proof fn theorem_publication_is_reported<C, S, F, E>(
+    entries: Seq<PlanEntry<C, S, F>>,
+    dry_run: bool,
+    has_root: bool,
+    results: Seq<Result<PublishKind, E>>,
     j: int,
 )
     requires
-        pubs.len() == kinds.len(),
-        forall|i: int| 0 <= i < pubs.len() ==> is_publish_counter(#[trigger] pubs[i]),
-        0 <= j < plan_log(kinds, dry_run, has_root, pubs).len(),
-        plan_log(kinds, dry_run, has_root, pubs)[j] is Publish,
+        results.len() == entries.len(),
+        0 <= j < plan_log(entries, dry_run, has_root, results).len(),
+        plan_log(entries, dry_run, has_root, results)[j] is Publish,
     ensures
-        j + 1 < plan_log(kinds, dry_run, has_root, pubs).len(),
-        plan_log(kinds, dry_run, has_root, pubs)[j + 1] == Event::Report(
-            plan_log(kinds, dry_run, has_root, pubs)[j]->Publish_0,
+        j + 1 < plan_log(entries, dry_run, has_root, results).len(),
+        plan_log(entries, dry_run, has_root, results)[j + 1] == Event::<C, S, F, E>::ReportCopy(
+            plan_log(entries, dry_run, has_root, results)[j]->Publish_0,
+            result_row(plan_log(entries, dry_run, has_root, results)[j]->Publish_1),
         ),
-    decreases kinds.len(),
+    decreases entries.len(),
 {
-    if kinds.len() > 0 {
-        let k = kinds.last();
-        let p = pubs.last();
-        let prefix = plan_log(kinds.drop_last(), dry_run, has_root, pubs.drop_last());
-        let el = entry_log(k, dry_run, has_root, p);
-        let log = plan_log(kinds, dry_run, has_root, pubs);
+    if entries.len() > 0 {
+        let last = entries.last();
+        let r = results.last();
+        let prefix = plan_log(entries.drop_last(), dry_run, has_root, results.drop_last());
+        let el = entry_log(last, dry_run, has_root, r);
+        let log = plan_log(entries, dry_run, has_root, results);
         assert(log == prefix + el);
-        assert(is_publish_counter(pubs[pubs.len() - 1]));
         if j < prefix.len() {
             assert(log[j] == prefix[j]);
-            theorem_publication_is_reported(kinds.drop_last(), dry_run, has_root, pubs.drop_last(), j);
+            theorem_publication_is_reported(entries.drop_last(), dry_run, has_root, results.drop_last(), j);
             if j + 1 >= prefix.len() {
                 // The prefix ends with a row, never with a publication.
-                lemma_plan_log_ends_with_row(kinds.drop_last(), dry_run, has_root, pubs.drop_last());
+                lemma_plan_log_ends_with_row(entries.drop_last(), dry_run, has_root, results.drop_last());
                 assert(false);
             }
             assert(log[j + 1] == prefix[j + 1]);
         } else {
-            let ec = entry_counter(k, dry_run, has_root, p);
-            assert(el[j - prefix.len()] is Publish);
-            assert(entry_publishes(k, dry_run, has_root));
-            assert(ec == p);
-            assert(p != Counter::UpToDate);
-            assert(el =~= seq![Event::Publish(p), Event::Report(p)]);
-            assert(j - prefix.len() == 0);
+            assert(log[j] == el[j - prefix.len()]);
+            match last {
+                PlanEntry::Copy(op, e) => {
+                    let route = spec_copy_route(dry_run, has_root);
+                    if route == CopyRoute::Publish {
+                        assert(el =~= seq![
+                            Event::Publish(op, r),
+                            Event::ReportCopy(op, result_row(r)),
+                        ]);
+                        assert(j - prefix.len() == 0);
+                        assert(log[j + 1] == el[1]);
+                    } else {
+                        assert(el =~= seq![Event::<C, S, F, E>::ReportCopy(op, copy_row(route, e, r))]);
+                    }
+                },
+                PlanEntry::NoOp => {},
+                PlanEntry::Skip(s) => {
+                    assert(el =~= seq![Event::<C, S, F, E>::ReportSkip(s)]);
+                },
+                PlanEntry::Failure(f) => {
+                    assert(el =~= seq![Event::<C, S, F, E>::ReportFailure(f)]);
+                },
+            }
         }
     }
 }
 
-proof fn lemma_plan_log_ends_with_row(kinds: Seq<EntryKind>, dry_run: bool, has_root: bool, pubs: Seq<Counter>)
+proof fn lemma_plan_log_ends_with_row<C, S, F, E>(
+    entries: Seq<PlanEntry<C, S, F>>,
+    dry_run: bool,
+    has_root: bool,
+    results: Seq<Result<PublishKind, E>>,
+)
     requires
-        pubs.len() == kinds.len(),
-        forall|i: int| 0 <= i < pubs.len() ==> is_publish_counter(#[trigger] pubs[i]),
+        results.len() == entries.len(),
     ensures
-        plan_log(kinds, dry_run, has_root, pubs).len() > 0 ==> plan_log(
-            kinds,
+        plan_log(entries, dry_run, has_root, results).len() > 0 ==> !(plan_log(
+            entries,
             dry_run,
             has_root,
-            pubs,
-        ).last() is Report,
-    decreases kinds.len(),
+            results,
+        ).last() is Publish),
+    decreases entries.len(),
 {
-    if kinds.len() > 0 {
-        let k = kinds.last();
-        let p = pubs.last();
-        assert(is_publish_counter(pubs[pubs.len() - 1]));
-        let prefix = plan_log(kinds.drop_last(), dry_run, has_root, pubs.drop_last());
-        let el = entry_log(k, dry_run, has_root, p);
-        assert forall|i: int| 0 <= i < pubs.drop_last().len() implies is_publish_counter(
-            #[trigger] pubs.drop_last()[i],
-        ) by {
-            assert(pubs.drop_last()[i] == pubs[i]);
-        }
-        lemma_plan_log_ends_with_row(kinds.drop_last(), dry_run, has_root, pubs.drop_last());
-        let ec = entry_counter(k, dry_run, has_root, p);
+    if entries.len() > 0 {
+        let last = entries.last();
+        let r = results.last();
+        let prefix = plan_log(entries.drop_last(), dry_run, has_root, results.drop_last());
+        let el = entry_log(last, dry_run, has_root, r);
+        lemma_plan_log_ends_with_row(entries.drop_last(), dry_run, has_root, results.drop_last());
         if el.len() > 0 {
             assert((prefix + el).last() == el.last());
-            if entry_publishes(k, dry_run, has_root) {
-                assert(ec == p);
+            match last {
+                PlanEntry::Copy(op, e) => {
+                    let route = spec_copy_route(dry_run, has_root);
+                    if route == CopyRoute::Publish {
+                        assert(el =~= seq![
+                            Event::Publish(op, r),
+                            Event::ReportCopy(op, result_row(r)),
+                        ]);
+                    } else {
+                        assert(el =~= seq![Event::<C, S, F, E>::ReportCopy(op, copy_row(route, e, r))]);
+                    }
+                },
+                _ => {},
             }
         } else {
             assert(prefix + el =~= prefix);
@@ -1027,13 +1310,18 @@ proof fn lemma_plan_log_ends_with_row(kinds: Seq<EntryKind>, dry_run: bool, has_
     }
 }
 
-/// A dry run predicts the class a successful publication of the matching
-/// kind reports: `Missing` and `Created` are both `Copied`,
-/// `ReplaceExisting` and `Replaced` are both `Replaced`, and
-/// `RepairPermissions` and `PermissionsRepaired` are both
-/// `PermissionsRepaired`.
-pub proof fn theorem_dry_run_agrees_with_publication()
+/// A dry run predicts what a successful publication of the matching kind
+/// reports: `Missing` and `Created` are both the `Copied` row,
+/// `ReplaceExisting` and `Replaced` are both the `Replaced` row, and
+/// `RepairPermissions` and `PermissionsRepaired` are both the
+/// `PermissionsRepaired` row (and so the same class).
+pub proof fn theorem_dry_run_agrees_with_publication<E>()
     ensures
+        simulated_copy_row::<E>(DestExpectation::Missing) == result_row::<E>(Ok(PublishKind::Created)),
+        simulated_copy_row::<E>(DestExpectation::ReplaceExisting) == result_row::<E>(Ok(PublishKind::Replaced)),
+        simulated_copy_row::<E>(DestExpectation::RepairPermissions) == result_row::<E>(
+            Ok(PublishKind::PermissionsRepaired),
+        ),
         simulated_counter(DestExpectation::Missing) == published_counter(PublishKind::Created),
         simulated_counter(DestExpectation::ReplaceExisting) == published_counter(PublishKind::Replaced),
         simulated_counter(DestExpectation::RepairPermissions) == published_counter(
@@ -1065,33 +1353,49 @@ proof fn lemma_count_pos_has_witness(s: Seq<Counter>, c: Counter)
 /// For a tally produced by [`run_plan`], the exit status reports failure
 /// exactly when some entry's class is `Failed` — equivalently, when some
 /// reported row is a failure.
-pub proof fn theorem_failure_status_agrees_with_rows(
+pub proof fn theorem_failure_status_agrees_with_rows<C, S, F, E>(
     t: Tally,
-    kinds: Seq<EntryKind>,
+    entries: Seq<PlanEntry<C, S, F>>,
     dry_run: bool,
     has_root: bool,
-    pubs: Seq<Counter>,
+    results: Seq<Result<PublishKind, E>>,
 )
     requires
-        pubs.len() == kinds.len(),
-        forall|c: Counter| #[trigger] t.get(c) == count(entry_classes(kinds, dry_run, has_root, pubs), c),
+        results.len() == entries.len(),
+        forall|c: Counter| #[trigger] t.get(c) == count(entry_classes(entries, dry_run, has_root, results), c),
     ensures
         t.failed > 0 <==> exists|i: int|
-            0 <= i < kinds.len() && #[trigger] entry_counter(kinds[i], dry_run, has_root, pubs[i]) == Counter::Failed,
-        t.failed > 0 <==> count_reports(plan_log(kinds, dry_run, has_root, pubs), Counter::Failed) > 0,
+            0 <= i < entries.len() && #[trigger] entry_counter(
+                entries[i].kind(),
+                dry_run,
+                has_root,
+                publish_result_counter(results[i]),
+            ) == Counter::Failed,
+        t.failed > 0 <==> count_reports(plan_log(entries, dry_run, has_root, results), Counter::Failed) > 0,
 {
-    let classes = entry_classes(kinds, dry_run, has_root, pubs);
+    let classes = entry_classes(entries, dry_run, has_root, results);
     assert(t.get(Counter::Failed) == count(classes, Counter::Failed));
     lemma_count_pos_has_witness(classes, Counter::Failed);
-    theorem_reports_match_counters(kinds, dry_run, has_root, pubs, Counter::Failed);
+    theorem_reports_match_counters(entries, dry_run, has_root, results, Counter::Failed);
     if t.failed > 0 {
         let i = choose|i: int| 0 <= i < classes.len() && classes[i] == Counter::Failed;
-        assert(entry_counter(kinds[i], dry_run, has_root, pubs[i]) == Counter::Failed);
+        assert(entry_counter(entries[i].kind(), dry_run, has_root, publish_result_counter(results[i]))
+            == Counter::Failed);
     }
     if exists|i: int|
-        0 <= i < kinds.len() && #[trigger] entry_counter(kinds[i], dry_run, has_root, pubs[i]) == Counter::Failed {
+        0 <= i < entries.len() && #[trigger] entry_counter(
+            entries[i].kind(),
+            dry_run,
+            has_root,
+            publish_result_counter(results[i]),
+        ) == Counter::Failed {
         let i = choose|i: int|
-            0 <= i < kinds.len() && #[trigger] entry_counter(kinds[i], dry_run, has_root, pubs[i]) == Counter::Failed;
+            0 <= i < entries.len() && #[trigger] entry_counter(
+                entries[i].kind(),
+                dry_run,
+                has_root,
+                publish_result_counter(results[i]),
+            ) == Counter::Failed;
         assert(classes[i] == Counter::Failed);
     }
 }

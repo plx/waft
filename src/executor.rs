@@ -235,6 +235,12 @@ impl GitIndexLock {
     /// close the staged window (disarm) *before* the last check, so a signal
     /// deferred at the last instant is seen by that check instead of being
     /// stranded for the next acquisition.
+    ///
+    /// Which error is returned is verified too
+    /// (`lock_protocol::acquire_outcome`): an interruption reported by the
+    /// last check takes precedence; otherwise the "locked after N attempt(s)"
+    /// error, or the described error of an attempt that failed for another
+    /// reason. A contended attempt's own `AlreadyExists` is never returned.
     fn acquire(index_path: &Path) -> io::Result<Self> {
         let mut lock_name = index_path.as_os_str().to_os_string();
         lock_name.push(".lock");
@@ -276,7 +282,15 @@ impl lock_protocol::AcquireOps<fs::File, io::Error> for LockAttempts<'_> {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 lock_protocol::CreateOutcome::Contended(error)
             }
-            Err(error) => lock_protocol::CreateOutcome::Failed(error),
+            // Any other failure is final, and the verified kernel returns
+            // this error as is unless a deferred signal takes precedence.
+            Err(error) => lock_protocol::CreateOutcome::Failed(io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to lock destination Git index at {}: {error}",
+                    self.path.display()
+                ),
+            )),
         }
     }
 
@@ -300,16 +314,6 @@ impl lock_protocol::AcquireOps<fs::File, io::Error> for LockAttempts<'_> {
                 "destination Git index is locked at {} after {} attempt(s); refusing to publish",
                 self.path.display(),
                 attempts
-            ),
-        )
-    }
-
-    fn create_error(&mut self, error: io::Error) -> io::Error {
-        io::Error::new(
-            error.kind(),
-            format!(
-                "failed to lock destination Git index at {}: {error}",
-                self.path.display()
             ),
         )
     }
@@ -915,7 +919,10 @@ pub fn render_report(report: &CopyReport, quiet: bool) {
 /// Check if the copy report has any failures, returning an appropriate exit status.
 ///
 /// The decision is the verified [`plan_kernel::failure_summary`]: `Some`
-/// exactly when something failed, with `(failed, succeeded + failed)`.
+/// exactly when something failed, with `(failed, succeeded + failed)`. Its
+/// requirement that `succeeded + failed` fits in `usize` is a postcondition
+/// of [`plan_kernel::run_plan`], whose counters [`execute`] copies into the
+/// report verbatim; a hand-built report keeps plain `usize` addition.
 pub fn report_has_failures(report: &CopyReport) -> Option<(usize, usize)> {
     let CopyReport {
         results: _,
@@ -1358,6 +1365,10 @@ mod tests {
                 .to_string()
                 .contains("destination Git index is locked")
         );
+        assert!(error.to_string().contains(&format!(
+            "after {} attempt(s)",
+            INDEX_LOCK_RETRY_DELAYS.len() + 1
+        )));
         assert!(
             started.elapsed() >= std::time::Duration::from_millis(140),
             "acquisition should retry for roughly 150ms"
@@ -1366,6 +1377,32 @@ mod tests {
             lock.exists(),
             "waft must never remove another process's lock"
         );
+    }
+
+    #[test]
+    fn index_lock_reports_a_failure_other_than_contention_with_its_cause() {
+        let _serialized = one_lock_at_a_time();
+        let temp = tempfile::TempDir::new().unwrap();
+        // The lock's directory does not exist, so `create_new` fails with
+        // `NotFound`: an error that is never retried and is returned with
+        // the lock path and the underlying cause.
+        let index = temp.path().join("missing").join("index");
+        let lock = temp.path().join("missing").join("index.lock");
+
+        let Err(error) = GitIndexLock::acquire(&index) else {
+            panic!("a lock in a missing directory cannot be acquired");
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        let message = error.to_string();
+        assert!(
+            message.starts_with(&format!(
+                "failed to lock destination Git index at {}: ",
+                lock.display()
+            )),
+            "unexpected message: {message}"
+        );
+        assert!(!lock.exists());
     }
 
     #[cfg(unix)]
