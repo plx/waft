@@ -703,12 +703,9 @@ where
                 layer.builtin_exclude_set = Some(BuiltinExcludeSet::parse(&v).map_err(invalid)?);
             }
             env_layer::EnvKey::ExtraExclude => {
-                layer.extra_excludes = v
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-                    .collect();
+                // Verified equal to `v.split(',').map(str::trim)
+                // .filter(|s| !s.is_empty())`.
+                layer.extra_excludes = env_layer::parse_exclude_list(&v);
             }
             env_layer::EnvKey::ReplaceExtraExcludes => {
                 layer.replace_extra_excludes = Some(parse_env_bool(&v).map_err(invalid)?);
@@ -722,12 +719,14 @@ where
     Ok(layer)
 }
 
-/// Read a boolean environment value: trimmed and ASCII-lowercased here, then
-/// decided by the verified token table.
+/// Read a boolean environment value. The verified kernel decides on the
+/// value trimmed of Unicode whitespace and ASCII-lowercased; the error
+/// echoes that same normalized value.
 fn parse_env_bool(s: &str) -> std::result::Result<bool, String> {
-    let normalized = s.trim().to_ascii_lowercase();
-    env_layer::parse_bool_token(&normalized)
-        .ok_or_else(|| format!("expected boolean (1|0|true|false), got {normalized:?}"))
+    env_layer::parse_env_bool(s).ok_or_else(|| {
+        let normalized = s.trim().to_ascii_lowercase();
+        format!("expected boolean (1|0|true|false), got {normalized:?}")
+    })
 }
 
 // --- File discovery ---
@@ -1396,6 +1395,35 @@ profile = "rainbow"
     }
 
     #[test]
+    fn env_bool_matches_previous_normalization() {
+        for v in [
+            "",
+            " ",
+            "1",
+            "0",
+            "TRUE",
+            " yes\t",
+            "On",
+            "oFF",
+            "no",
+            "\u{3000}false\u{85}",
+            "2",
+            "tru",
+            "yes!",
+            "\u{200b}on",
+            "İ",
+            "nO ",
+        ] {
+            let expected = match v.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => Some(true),
+                "0" | "false" | "no" | "off" | "" => Some(false),
+                _ => None,
+            };
+            assert_eq!(env_layer::parse_env_bool(v), expected, "{v:?}");
+        }
+    }
+
+    #[test]
     fn env_bool_error_echoes_trimmed_lowercased_value() {
         assert_eq!(parse_env_bool(" YES "), Ok(true));
         assert_eq!(parse_env_bool("\tOff\n"), Ok(false));
@@ -1550,7 +1578,42 @@ profile = "rainbow"
             )
     }
 
+    #[test]
+    fn exclude_list_matches_std_split_trim_filter_examples() {
+        for v in [
+            "",
+            ",",
+            "a",
+            "a, b ,c",
+            " ,a,, b ,",
+            "\u{3000}x\u{85},\u{a0}",
+            "*.{log,tmp}",
+            "é ,\tß\n",
+        ] {
+            let expected: Vec<String> = v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            assert_eq!(env_layer::parse_exclude_list(v), expected, "{v:?}");
+        }
+    }
+
     proptest::proptest! {
+        #[test]
+        fn exclude_list_matches_std_split_trim_filter(
+            v in "[a ,\t\u{a0}\u{2003}\u{3000}é\u{200b}]{0,12}",
+        ) {
+            let expected: Vec<String> = v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            proptest::prop_assert_eq!(env_layer::parse_exclude_list(&v), expected);
+        }
+
         #[test]
         fn verified_merge_matches_reference(
             layers in proptest::collection::vec(arb_layer(), 0..7),

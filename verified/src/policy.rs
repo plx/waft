@@ -44,9 +44,14 @@
 //!   the version gate first, then the first unknown value in a fixed field
 //!   order, otherwise each field's parse.
 //! - [`env_layer`]: `EnvKey::classify` recognizes exactly the eight `WAFT_*`
-//!   policy variables (`theorem_env_key_table`), and `parse_bool_token`
-//!   decides `WAFT_REPLACE_EXTRA_EXCLUDES` on the trimmed, ASCII-lowercased
-//!   value (`theorem_bool_tokens_disjoint`).
+//!   policy variables (`theorem_env_key_table`), `parse_env_bool` decides
+//!   `WAFT_REPLACE_EXTRA_EXCLUDES` on the value trimmed of Unicode whitespace
+//!   and ASCII-lowercased (`theorem_bool_tokens_disjoint`: the true and false
+//!   spellings are disjoint), and `parse_exclude_list` is
+//!   proven equal to splitting `WAFT_EXTRA_EXCLUDE` on commas, trimming
+//!   Unicode whitespace and dropping empty pieces
+//!   (`theorem_exclude_list_globs`: every glob is non-empty, trimmed, and
+//!   comma-free).
 //! - [`user_source`]: `select_config_home` queries `XDG_CONFIG_HOME`, `HOME`,
 //!   `USERPROFILE` in that order, stops at the first one that is set, and
 //!   returns it.
@@ -65,8 +70,9 @@
 //!   exhaustive matches and destructurings, so a new variant or field fails
 //!   to compile; unit tests check the round trips and that clap's value names
 //!   equal `as_str`.
-//! - vstd's specifications of `&str` equality, string literals, slice
-//!   indexing, `Vec` and `String::clone`.
+//! - vstd's specifications of `&str` equality, string literals, `Chars`,
+//!   slice indexing, `Vec`, `String::push`, `String::clone`, and its
+//!   `White_Space` table for `char::is_whitespace`.
 //! - The oracles: `user_source::EnvLookup::is_set` and
 //!   `discovery::DiscoveryWalk::{enter, search}` are assumed to record each
 //!   call in their ghost log (a modelling device: no production state is
@@ -74,9 +80,10 @@
 //!   particular: the theorems hold for every answer. Production's oracles
 //!   read the process environment, and probe `.git` existence and registered
 //!   gitlinks (Unicode case folding in `git::repo_paths_equivalent`).
-//! - Production keeps `str::trim` and `str::to_ascii_lowercase` before
-//!   `parse_bool_token`, the `WAFT_EXTRA_EXCLUDE` comma split, serde/toml
-//!   deserialization, and all error-message text.
+//! - Production keeps serde/toml deserialization, the iteration over the
+//!   process environment, and all error-message text (including the
+//!   `str::trim`/`str::to_ascii_lowercase` echo in the invalid-boolean
+//!   message).
 //!
 //! # Quirks encoded faithfully (current behavior, not fixed here)
 //!
