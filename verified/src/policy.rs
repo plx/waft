@@ -34,15 +34,25 @@
 //!   `theorem_neutral_layers_resolve_to_default` plus
 //!   `theorem_default_resolution` (P5), `theorem_preset_table` (P6: only `wt`
 //!   selects without a rule file; presets are distinct),
-//!   `theorem_precedence` (P7: CLI over environment over project over user
-//!   over defaults, a CLI profile resets lower knobs, CLI replace keeps only
-//!   CLI extras), and `theorem_attribution` (P8: a knob that differs from the
+//!   `theorem_precedence` (P7: an explicit CLI setting wins over every lower
+//!   layer, a CLI profile resets the knobs the CLI leaves unset to its
+//!   preset, an explicit environment knob wins when the CLI sets neither that
+//!   knob nor a profile, and CLI replace keeps only CLI extras. It says
+//!   nothing about project, user and defaults against each other: their
+//!   order comes from `resolve_inputs` resolving the layer sequence
+//!   `precedence_order` (defaults, user, project, environment, CLI), in
+//!   which P1 and P2 make the last explicit setting win as long as no later
+//!   layer selects a profile), and
+//!   `theorem_attribution` (P8: a knob that differs from the
 //!   resolved profile's preset was set explicitly, to that value, at or after
 //!   the last profile selection; this is what lets the empty-selection note
 //!   blame the knob instead of the profile).
 //! - [`raw`]: `layer_from_raw` decides config-file acceptance after serde:
-//!   the version gate first, then the first unknown value in a fixed field
-//!   order, otherwise each field's parse.
+//!   the version gate first (and `UnsupportedVersion` only for a bad
+//!   version), then `UnknownValue` naming the first bad field in a fixed
+//!   field order with its raw value, otherwise each field's parse;
+//!   `theorem_first_bad_field` shows these postconditions fix the result
+//!   for every input.
 //! - [`env_layer`]: `EnvKey::classify` recognizes exactly the eight `WAFT_*`
 //!   policy variables (`theorem_env_key_table`), `parse_env_bool` decides
 //!   `WAFT_REPLACE_EXTRA_EXCLUDES` on the value trimmed of Unicode whitespace
