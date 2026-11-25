@@ -305,3 +305,94 @@ fn print_resolved_policy(policy: &ResolvedPolicy) {
     }
     println!();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_kind_labels_and_precedence() {
+        let lstat = |is_symlink, is_file, is_dir| {
+            Some(LstatType {
+                is_symlink,
+                is_file,
+                is_dir,
+            })
+        };
+        let text = |observed| source_kind_text(report_view::source_kind(observed));
+        assert_eq!(text(None), "missing");
+        assert_eq!(text(lstat(true, false, false)), "symlink");
+        assert_eq!(text(lstat(false, true, false)), "file");
+        assert_eq!(text(lstat(false, false, true)), "directory");
+        assert_eq!(text(lstat(false, false, false)), "other");
+        let file = report_view::source_kind(lstat(false, true, false));
+        assert!(file.is_regular_file() && file.exists() && !file.is_directory());
+        let missing = report_view::source_kind(None);
+        assert!(!missing.exists() && !missing.is_regular_file());
+    }
+
+    #[test]
+    fn destination_and_action_texts_match_the_published_wording() {
+        let all = [
+            (DestLabel::Missing, "missing"),
+            (DestLabel::UpToDate, "up-to-date"),
+            (DestLabel::PermissionsDiffer, "permissions-differ"),
+            (DestLabel::UntrackedConflict, "untracked-conflict"),
+            (DestLabel::TrackedConflict, "tracked-conflict"),
+            (DestLabel::TypeConflict, "type-conflict"),
+            (DestLabel::UnsafePath, "unsafe-path"),
+            (DestLabel::Exists, "exists"),
+        ];
+        for (label, text) in all {
+            assert_eq!(destination_text(label), text);
+        }
+        let skip = |reason, remedy| ActionLabel::Skip { reason, remedy };
+        assert_eq!(info_action_text(ActionLabel::Copy), "copy");
+        assert_eq!(info_action_text(ActionLabel::NoOp), "no-op");
+        assert_eq!(
+            info_action_text(skip(SkipKind::UntrackedConflict, true)),
+            "skip (untracked conflict; --overwrite replaces)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::UntrackedConflict, false)),
+            "skip (untracked conflict)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::PermissionsDiffer, true)),
+            "skip (content equal, permissions differ; --overwrite repairs)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::PermissionsDiffer, false)),
+            "skip (content equal, permissions differ)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::TrackedConflict, false)),
+            "skip (tracked conflict)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::TypeConflict, false)),
+            "skip (type conflict)"
+        );
+        assert_eq!(
+            info_action_text(skip(SkipKind::UnsafePath, false)),
+            "skip (unsafe path)"
+        );
+    }
+
+    #[test]
+    fn info_destination_plans_only_for_eligible_classified_paths() {
+        use report_view::{DestState, info_destination};
+        let classified = InfoDestination::Classified(DestState::Missing);
+        let view = info_destination(classified, true, true);
+        assert_eq!(view.destination, DestLabel::Missing);
+        assert_eq!(view.planned_action, Some(ActionLabel::Copy));
+        assert_eq!(
+            info_destination(classified, false, true).planned_action,
+            None
+        );
+        let present = InfoDestination::Unclassified { present: true };
+        let view = info_destination(present, true, true);
+        assert_eq!(view.destination, DestLabel::Exists);
+        assert_eq!(view.planned_action, None);
+    }
+}
