@@ -46,8 +46,12 @@
 //!   into their files, directory promotion can neither add nor drop a file
 //!   from the copy plan.
 //! * [`sort_unique`]: afterwards the keys are strictly increasing (no path
-//!   appears twice, so each destination is planned at most once), the set of
-//!   keys is unchanged, and every element is one of the originals.
+//!   appears twice, so each repository-relative path is planned at most
+//!   once), the set of keys is unchanged, and every element is one of the
+//!   originals. Distinct keys are distinct byte strings: on a case- or
+//!   Unicode-normalization-insensitive destination filesystem two of them
+//!   can still name the same file, exactly as with the `sort` + `dedup` this
+//!   replaced.
 //! * `lemma_lex_equal`, `lemma_lex_flip`, `lemma_lex_trans`: `lex_cmp` is a
 //!   total order whose only ties are equal strings; [`cmp_bytes`] computes it.
 //!
@@ -59,7 +63,10 @@
 //! * Production passes the copyable directories' keys and the covered and
 //!   eligible paths as the UTF-8 bytes of their repository-relative paths.
 //!   No ordering is assumed: the kernel checks sortedness itself before it
-//!   uses binary search and otherwise falls back to a linear scan.
+//!   uses binary search and otherwise falls back to a linear scan. The check
+//!   is exact ([`is_strictly_sorted`]), so sorted input takes the binary
+//!   search; which search `member` runs affects only running time, which is
+//!   not specified (both return exact membership).
 //! * [`PathKey::key_bytes`] (production: `RepoRelPath`'s UTF-8 bytes) returns
 //!   the same bytes every time it is called on the same value.
 //! * `std`'s `sort_by` meets vstd's specification (a permutation, sorted by
@@ -286,10 +293,11 @@ pub open spec fn sorted_strict(set: Seq<&[u8]>) -> bool {
 }
 
 /// Whether `set` is strictly increasing (checked, so callers need not assume
-/// anything about the order they pass).
+/// anything about the order they pass). Exact: a strictly increasing set is
+/// always recognized, so `member` takes the binary search for it.
 pub fn is_strictly_sorted(set: &[&[u8]]) -> (r: bool)
     ensures
-        r ==> sorted_strict(set@),
+        r == sorted_strict(set@),
 {
     let mut i: usize = 1;
     while i < set.len()
@@ -403,7 +411,8 @@ fn member_linear(set: &[&[u8]], t: &[u8]) -> (r: bool)
 }
 
 /// Membership, by binary search when `sorted` says `set` is strictly
-/// increasing.
+/// increasing. The result does not depend on which search runs; only the
+/// running time does, and that is not part of the specification.
 fn member(set: &[&[u8]], sorted: bool, t: &[u8]) -> (r: bool)
     requires
         sorted ==> sorted_strict(set@),

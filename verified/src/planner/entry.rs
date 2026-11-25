@@ -105,8 +105,11 @@ pub struct ContentKey {
     pub fingerprint: u64,
 }
 
-/// Whether two content keys describe the same bytes (the comparison behind
-/// `FileSnapshot::content_matches`).
+/// Whether two content keys describe the same bytes: the check behind
+/// [`plan_entry_step`]'s permission-repair guard, which keeps a repair only
+/// while the pinned destination snapshot has the source snapshot's key and
+/// otherwise plans a replacement. Production does not call it directly;
+/// `FileSnapshot::content_key` supplies the keys it compares.
 pub fn same_content(a: &ContentKey, b: &ContentKey) -> (r: bool)
     ensures
         r == (a.len == b.len && a.fingerprint == b.fingerprint),
