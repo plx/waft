@@ -44,6 +44,15 @@
 //!   test was dead code and was dropped.
 //! - The exec predicates [`is_blank_or_comment`], [`is_negation`] and
 //!   [`is_dir_exclusion`] equal their specifications.
+//! - `theorem_bytes_agree_with_chars`: on the UTF-8 encoding of any
+//!   character sequence (vstd's `encode_utf8`, the bytes of a `&str`), the
+//!   byte predicates equal the character predicates the pre-kernel code used:
+//!   blank or comment is "empty or `starts_with('#')`", negation is
+//!   `starts_with('!')` and its body (`&line[1..]`) is the encoding of the
+//!   remaining characters, a literal directory exclusion is "not blank, not a
+//!   comment, not a negation, `ends_with('/')`, and no `contains` of `*`,
+//!   `?` or `[`", and byte equality is `str` equality. So moving from `&str`
+//!   to bytes changed no verdict.
 //!
 //! # Trust assumptions
 //!
@@ -54,11 +63,9 @@
 //!   line number `i + 1`. `str::lines` and `str::trim` (Unicode
 //!   `White_Space`) stay in production. A differential property test in
 //!   `src/validate.rs` checks the result against the pre-kernel code.
-//! - Working on bytes is exact for the original `&str` code: every character
-//!   tested (`#`, `!`, `/`, `*`, `?`, `[`) is ASCII, UTF-8 never places an
-//!   ASCII byte inside a multi-byte sequence, `str` equality and
-//!   `str::starts_with(&str)` are byte comparisons, and `&trimmed[1..]` after
-//!   a leading `!` is the byte slice from index 1.
+//! - vstd's model of `&str` bytes as `encode_utf8` of its characters, and
+//!   `str::starts_with(&str)` being a byte-prefix test (it is, in `core`),
+//!   which is the only string test the shadow check made on bytes already.
 //!
 //! # Quirks encoded faithfully (current behavior, not fixed here)
 //!
@@ -550,6 +557,188 @@ pub proof fn theorem_escaped_bang_is_not_negation(line: Seq<u8>)
     ensures
         !spec_negation(line),
 {
+}
+
+// ---------------------------------------------------------------------------
+// Bytes versus characters.
+//
+// Production hands the kernel `line.trim().as_bytes()`, the UTF-8 encoding
+// of the trimmed line's characters. The pre-kernel code tested the `&str`
+// with `starts_with('#')`, `starts_with('!')`, `ends_with('/')`,
+// `contains('*' | '?' | '[')` and `==`. The lemmas below prove that the
+// kernel's byte predicates on the encoding are exactly those character
+// predicates, so moving to bytes changed nothing.
+// ---------------------------------------------------------------------------
+
+/// Setting a high bit leaves a byte at or above `0x80`.
+proof fn lemma_high_bit_bytes(y: u8)
+    ensures
+        (0x80u8 | y) >= 0x80u8,
+        (0xC0u8 | y) >= 0x80u8,
+        (0xE0u8 | y) >= 0x80u8,
+        (0xF0u8 | y) >= 0x80u8,
+{
+    assert((0x80u8 | y) >= 0x80u8) by (bit_vector);
+    assert((0xC0u8 | y) >= 0x80u8) by (bit_vector);
+    assert((0xE0u8 | y) >= 0x80u8) by (bit_vector);
+    assert((0xF0u8 | y) >= 0x80u8) by (bit_vector);
+}
+
+/// The encoding of one character contains an ASCII byte `b`, starts with it,
+/// or ends with it, exactly when the character is `b` itself: an ASCII
+/// character encodes as its own single byte, and every byte of a longer
+/// encoding is at or above `0x80`.
+proof fn lemma_scalar_ascii_byte(c: char, b: u8)
+    requires
+        b < 0x80,
+    ensures
+        vstd::utf8::encode_scalar(c as u32).len() >= 1,
+        vstd::utf8::encode_scalar(c as u32).contains(b) <==> c as u32 == b as u32,
+        vstd::utf8::encode_scalar(c as u32)[0] == b <==> c as u32 == b as u32,
+        vstd::utf8::encode_scalar(c as u32).last() == b <==> c as u32 == b as u32,
+{
+    let v = c as u32;
+    let e = vstd::utf8::encode_scalar(v);
+    if vstd::utf8::has_width_1_encoding(v) {
+        assert((v & 0x7F) as u8 as u32 == v) by (bit_vector)
+            requires
+                v <= 0x7F,
+        ;
+        assert(e[0] as u32 == v);
+        if e.contains(b) {
+            let k = choose|k: int| 0 <= k < e.len() && e[k] == b;
+            assert(k == 0);
+        }
+        if v == b as u32 {
+            assert(e[0] == b);
+        }
+    } else {
+        lemma_high_bit_bytes(((v >> 6) & 0x1F) as u8);
+        lemma_high_bit_bytes(((v >> 12) & 0x0F) as u8);
+        lemma_high_bit_bytes(((v >> 18) & 0x7) as u8);
+        lemma_high_bit_bytes((v & 0x3F) as u8);
+        lemma_high_bit_bytes(((v >> 6) & 0x3F) as u8);
+        lemma_high_bit_bytes(((v >> 12) & 0x3F) as u8);
+        assert forall|k: int| 0 <= k < e.len() implies e[k] >= 0x80 by {}
+        if e.contains(b) {
+            let k = choose|k: int| 0 <= k < e.len() && e[k] == b;
+            assert(e[k] >= 0x80);
+        }
+    }
+}
+
+/// The encoding of a character sequence contains an ASCII byte exactly when
+/// the sequence contains that character.
+proof fn lemma_encoding_contains_ascii(cs: Seq<char>, c: char)
+    requires
+        (c as u32) < 0x80,
+    ensures
+        vstd::utf8::encode_utf8(cs).contains(c as u8) <==> cs.contains(c),
+    decreases cs.len(),
+{
+    if cs.len() > 0 {
+        let rest = cs.drop_first();
+        let head = vstd::utf8::encode_scalar(cs[0] as u32);
+        let tail = vstd::utf8::encode_utf8(rest);
+        let all = vstd::utf8::encode_utf8(cs);
+        assert(all == head + tail);
+        lemma_encoding_contains_ascii(rest, c);
+        lemma_scalar_ascii_byte(cs[0], c as u8);
+        assert((c as u8) as u32 == c as u32);
+        if all.contains(c as u8) {
+            let k = choose|k: int| 0 <= k < all.len() && all[k] == c as u8;
+            if k < head.len() {
+                assert(head[k] == c as u8);
+                assert(head.contains(c as u8));
+                assert(cs[0] == c);
+            } else {
+                assert(tail[k - head.len()] == c as u8);
+                assert(tail.contains(c as u8));
+                let j = choose|j: int| 0 <= j < rest.len() && rest[j] == c;
+                assert(cs[j + 1] == c);
+            }
+        }
+        if cs.contains(c) {
+            let j = choose|j: int| 0 <= j < cs.len() && cs[j] == c;
+            if j == 0 {
+                let k = choose|k: int| 0 <= k < head.len() && head[k] == c as u8;
+                assert(all[k] == c as u8);
+            } else {
+                assert(rest[j - 1] == c);
+                assert(rest.contains(c));
+                let k = choose|k: int| 0 <= k < tail.len() && tail[k] == c as u8;
+                assert(all[head.len() + k] == c as u8);
+            }
+        }
+    }
+}
+
+/// The first and last bytes of an encoding come from the first and last
+/// characters, and only the empty sequence encodes to no bytes.
+proof fn lemma_encoding_ends(cs: Seq<char>)
+    ensures
+        vstd::utf8::encode_utf8(cs).len() == 0 <==> cs.len() == 0,
+        cs.len() > 0 ==> vstd::utf8::encode_utf8(cs)[0] == vstd::utf8::encode_scalar(
+            cs[0] as u32,
+        )[0],
+        cs.len() > 0 ==> vstd::utf8::encode_utf8(cs).last() == vstd::utf8::encode_scalar(
+            cs.last() as u32,
+        ).last(),
+{
+    if cs.len() > 0 {
+        lemma_scalar_ascii_byte(cs[0], 0);
+        lemma_scalar_ascii_byte(cs.last(), 0);
+        let init = cs.drop_last();
+        assert(cs == init.push(cs.last()));
+        vstd::utf8::encode_utf8_push(init, cs.last());
+    }
+}
+
+/// The kernel's byte predicates on a line's UTF-8 encoding are exactly the
+/// pre-kernel `&str` predicates on its characters: blank or comment is
+/// "empty or starts with `#`", negation is "starts with `!`" (whose body
+/// `&line[1..]` is the encoding of the remaining characters), a literal
+/// directory exclusion is "not blank, not a comment, not a negation, ends
+/// with `/`, contains no `*`, `?` or `[`", and byte equality is `str`
+/// equality.
+pub proof fn theorem_bytes_agree_with_chars(cs: Seq<char>, other: Seq<char>)
+    ensures
+        spec_blank_or_comment(vstd::utf8::encode_utf8(cs)) <==> (cs.len() == 0 || cs[0] == '#'),
+        spec_negation(vstd::utf8::encode_utf8(cs)) <==> (cs.len() > 0 && cs[0] == '!'),
+        spec_negation(vstd::utf8::encode_utf8(cs)) ==> vstd::utf8::encode_utf8(cs).drop_first()
+            == vstd::utf8::encode_utf8(cs.drop_first()),
+        spec_dir_exclusion(vstd::utf8::encode_utf8(cs)) <==> {
+            &&& cs.len() > 0
+            &&& cs[0] != '#'
+            &&& cs[0] != '!'
+            &&& cs.last() == '/'
+            &&& !cs.contains('*')
+            &&& !cs.contains('?')
+            &&& !cs.contains('[')
+        },
+        vstd::utf8::encode_utf8(cs) == vstd::utf8::encode_utf8(other) <==> cs == other,
+{
+    let e = vstd::utf8::encode_utf8(cs);
+    lemma_encoding_ends(cs);
+    if cs.len() > 0 {
+        lemma_scalar_ascii_byte(cs[0], HASH);
+        lemma_scalar_ascii_byte(cs[0], BANG);
+        lemma_scalar_ascii_byte(cs.last(), SLASH);
+        if cs[0] == '!' {
+            let head = vstd::utf8::encode_scalar(cs[0] as u32);
+            assert(head =~= seq![BANG]);
+            assert(e =~= head + vstd::utf8::encode_utf8(cs.drop_first()));
+            assert(e.drop_first() =~= vstd::utf8::encode_utf8(cs.drop_first()));
+        }
+    }
+    lemma_encoding_contains_ascii(cs, '*');
+    lemma_encoding_contains_ascii(cs, '?');
+    lemma_encoding_contains_ascii(cs, '[');
+    assert('*' as u8 == STAR && '?' as u8 == QUESTION && '[' as u8 == LBRACKET);
+    if e == vstd::utf8::encode_utf8(other) {
+        vstd::utf8::encode_utf8_decode_utf8(cs);
+        vstd::utf8::encode_utf8_decode_utf8(other);
+    }
 }
 
 } // verus!
