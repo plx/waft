@@ -7,7 +7,7 @@ use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
 use crate::error::{Error, Result};
 use crate::git::{GitBackend, default_git_backend};
-use crate::model::{RepoContext, ValidationSeverity};
+use crate::model::RepoContext;
 use crate::validate;
 
 /// Arguments for the copy command.
@@ -51,25 +51,8 @@ pub(crate) fn run_copy_with_context(
 
     // Validate
     let report = validate::validate(ctx, git, policy.symlink_policy);
-    if report.has_errors() {
-        for issue in &report.issues {
-            if matches!(issue.severity, ValidationSeverity::Error) {
-                eprintln!("error: {}: {}", issue.file.display(), issue.message);
-            }
-        }
-        return Err(Error::Validation {
-            error_count: report.error_count(),
-        });
-    }
-
-    // Print warnings
-    if !cli.quiet {
-        for issue in &report.issues {
-            if matches!(issue.severity, ValidationSeverity::Warning) {
-                eprintln!("warning: {}: {}", issue.file.display(), issue.message);
-            }
-        }
-    }
+    // Errors stop the command; otherwise warnings print unless quiet.
+    validate::report_preflight(&report, cli.quiet)?;
 
     let pass = super::eligible_records(git, &ctx.source_root, policy, ctx.core_ignore_case)?;
     super::note_empty_selection(policy, &pass, cli.quiet);

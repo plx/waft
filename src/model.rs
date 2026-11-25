@@ -59,18 +59,30 @@ pub struct ValidationReport {
 
 impl ValidationReport {
     /// Returns `true` if any error-severity issues were found.
+    ///
+    /// Decided by the verified `waft_verified::validation::has_errors`, which
+    /// is proven to hold exactly when [`Self::error_count`] is positive.
     pub fn has_errors(&self) -> bool {
-        self.issues
-            .iter()
-            .any(|i| matches!(i.severity, ValidationSeverity::Error))
+        waft_verified::validation::has_errors(&self.severities())
     }
 
     /// Count of error-severity issues.
+    ///
+    /// Computed by the verified `waft_verified::validation::error_count`.
     pub fn error_count(&self) -> usize {
+        waft_verified::validation::error_count(&self.severities())
+    }
+
+    /// The issues' severities, in report order, as the verified validation
+    /// kernel sees them.
+    pub(crate) fn severities(&self) -> Vec<waft_verified::validation::Severity> {
         self.issues
             .iter()
-            .filter(|i| matches!(i.severity, ValidationSeverity::Error))
-            .count()
+            .map(|issue| match issue.severity {
+                ValidationSeverity::Warning => waft_verified::validation::Severity::Warning,
+                ValidationSeverity::Error => waft_verified::validation::Severity::Error,
+            })
+            .collect()
     }
 }
 

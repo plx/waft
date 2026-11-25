@@ -5,10 +5,11 @@ use clap::Args;
 use crate::cli::Cli;
 use crate::config::ResolvedPolicy;
 use crate::context::{self, CommandKind};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::git::{GitBackend, default_git_backend};
-use crate::model::{RepoContext, ValidationSeverity};
+use crate::model::{DestinationState, RepoContext};
 use crate::validate;
+use waft_verified::report_view::{self, ActionLabel, DestState, ListSource, SkipKind};
 
 /// Arguments for the list command.
 #[derive(Debug, Args)]
@@ -39,25 +40,8 @@ pub(crate) fn run_list_with_context(
 ) -> Result<()> {
     // Validate
     let report = validate::validate(ctx, git, policy.symlink_policy);
-    if report.has_errors() {
-        for issue in &report.issues {
-            if matches!(issue.severity, ValidationSeverity::Error) {
-                eprintln!("error: {}: {}", issue.file.display(), issue.message);
-            }
-        }
-        return Err(Error::Validation {
-            error_count: report.error_count(),
-        });
-    }
-
-    // Print warnings
-    if !cli.quiet {
-        for issue in &report.issues {
-            if matches!(issue.severity, ValidationSeverity::Warning) {
-                eprintln!("warning: {}: {}", issue.file.display(), issue.message);
-            }
-        }
-    }
+    // Errors stop the command; otherwise warnings print unless quiet.
+    validate::report_preflight(&report, cli.quiet)?;
 
     let pass = super::eligible_records(git, &ctx.source_root, policy, ctx.core_ignore_case)?;
     super::note_empty_selection(policy, &pass, cli.quiet);
@@ -116,12 +100,15 @@ pub(crate) fn run_list_with_context(
                 "{path}\tsize: {size}\tgitignore: {gitignore_str}\tworktreeinclude: {wti_str}"
             );
 
-            // Predicted action (only when --dest is available)
+            // Predicted action (only when --dest is available). The source
+            // checks and the destination classification run in the same
+            // order as the planner's preconditions; the verified kernel picks
+            // the action from what they observed.
             if let Some(ref dest_root) = ctx.dest_root {
-                if abs_path.is_symlink() || !abs_path.is_file() {
+                let source = if abs_path.is_symlink() || !abs_path.is_file() {
                     // Planner skips non-regular-file and symlink sources
-                    if abs_path.exists() {
-                        println!("\taction: skip (unsupported source type)");
+                    ListSource::NonRegular {
+                        exists: abs_path.exists(),
                     }
                 } else {
                     let dest_path = record.path.to_path(dest_root);
@@ -132,28 +119,12 @@ pub(crate) fn run_list_with_context(
                         &dest_tracked_set,
                         &fs,
                     );
-                    let action_str = match state {
-                        crate::model::DestinationState::Missing => "copy",
-                        crate::model::DestinationState::UpToDate => "no-op",
-                        // The remedy clause appears only where `--overwrite`
-                        // can act on an existing destination.
-                        crate::model::DestinationState::PermissionsDiffer => {
-                            if crate::fs::overwrite_supported() {
-                                "skip (content equal, permissions differ; --overwrite repairs)"
-                            } else {
-                                "skip (content equal, permissions differ)"
-                            }
-                        }
-                        crate::model::DestinationState::UntrackedConflict => {
-                            "skip (untracked conflict)"
-                        }
-                        crate::model::DestinationState::TrackedConflict => {
-                            "skip (tracked conflict)"
-                        }
-                        crate::model::DestinationState::TypeConflict => "skip (type conflict)",
-                        crate::model::DestinationState::UnsafePath => "skip (unsafe path)",
-                    };
-                    println!("\taction: {action_str}");
+                    ListSource::Regular(dest_state_view(&state))
+                };
+                if let Some(action) =
+                    report_view::list_action(source, crate::fs::overwrite_supported())
+                {
+                    println!("\taction: {}", list_action_text(action));
                 }
             }
         } else {
@@ -162,4 +133,97 @@ pub(crate) fn run_list_with_context(
     }
 
     Ok(())
+}
+
+/// The kernel's view of a destination classification.
+pub(super) fn dest_state_view(state: &DestinationState) -> DestState {
+    match state {
+        DestinationState::Missing => DestState::Missing,
+        DestinationState::UpToDate => DestState::UpToDate,
+        DestinationState::PermissionsDiffer => DestState::PermissionsDiffer,
+        DestinationState::UntrackedConflict => DestState::UntrackedConflict,
+        DestinationState::TrackedConflict => DestState::TrackedConflict,
+        DestinationState::TypeConflict => DestState::TypeConflict,
+        DestinationState::UnsafePath => DestState::UnsafePath,
+    }
+}
+
+/// The text `list -v` prints for a predicted action.
+///
+/// The remedy clause appears only where `--overwrite` can act on an existing
+/// destination; for an untracked conflict `list -v` never names it.
+fn list_action_text(action: ActionLabel) -> &'static str {
+    match action {
+        ActionLabel::Copy => "copy",
+        ActionLabel::NoOp => "no-op",
+        ActionLabel::Skip { reason, remedy } => match reason {
+            SkipKind::PermissionsDiffer => {
+                if remedy {
+                    "skip (content equal, permissions differ; --overwrite repairs)"
+                } else {
+                    "skip (content equal, permissions differ)"
+                }
+            }
+            SkipKind::UntrackedConflict => "skip (untracked conflict)",
+            SkipKind::TrackedConflict => "skip (tracked conflict)",
+            SkipKind::TypeConflict => "skip (type conflict)",
+            SkipKind::UnsafePath => "skip (unsafe path)",
+            SkipKind::UnsupportedSourceType => "skip (unsupported source type)",
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dest_state_view_maps_each_variant_to_its_namesake() {
+        let cases = [
+            (DestinationState::Missing, DestState::Missing),
+            (DestinationState::UpToDate, DestState::UpToDate),
+            (
+                DestinationState::PermissionsDiffer,
+                DestState::PermissionsDiffer,
+            ),
+            (
+                DestinationState::UntrackedConflict,
+                DestState::UntrackedConflict,
+            ),
+            (
+                DestinationState::TrackedConflict,
+                DestState::TrackedConflict,
+            ),
+            (DestinationState::TypeConflict, DestState::TypeConflict),
+            (DestinationState::UnsafePath, DestState::UnsafePath),
+        ];
+        for (state, expected) in cases {
+            assert_eq!(dest_state_view(&state), expected, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn list_action_text_matches_the_published_wording() {
+        let skip = |reason, remedy| ActionLabel::Skip { reason, remedy };
+        assert_eq!(list_action_text(ActionLabel::Copy), "copy");
+        assert_eq!(list_action_text(ActionLabel::NoOp), "no-op");
+        assert_eq!(
+            list_action_text(skip(SkipKind::PermissionsDiffer, true)),
+            "skip (content equal, permissions differ; --overwrite repairs)"
+        );
+        assert_eq!(
+            list_action_text(skip(SkipKind::PermissionsDiffer, false)),
+            "skip (content equal, permissions differ)"
+        );
+        for remedy in [true, false] {
+            assert_eq!(
+                list_action_text(skip(SkipKind::UntrackedConflict, remedy)),
+                "skip (untracked conflict)"
+            );
+        }
+        assert_eq!(
+            list_action_text(skip(SkipKind::UnsupportedSourceType, false)),
+            "skip (unsupported source type)"
+        );
+    }
 }
