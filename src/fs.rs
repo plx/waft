@@ -586,8 +586,10 @@ fn flag_attempt(result: Result<(), rustix::io::Errno>) -> kernel::noreplace::Att
 ///
 /// Which inode the guard may unlink, whether a removal is still owed, and the
 /// prove-then-unlink sequence itself are decided by the publication kernel
-/// (`kernel::removal`); only kernel steps that have just proved the name holds
-/// a different inode can re-aim the guard.
+/// (`kernel::removal`). A guard's identity is fixed when it is created and
+/// never re-aimed: a kernel step that removes a different inode from the
+/// guarded name hands out its own proven removal for it and disarms the guard.
+/// The state is set once, at construction, and never replaced.
 ///
 /// This narrows the window; it does not close it. POSIX has no conditional
 /// unlink — no `unlinkat` that takes an inode — so between the proof and the
@@ -609,18 +611,29 @@ struct AnchoredTempGuard<'a> {
 #[cfg(unix)]
 impl<'a> AnchoredTempGuard<'a> {
     /// Guard `name` under `parent`, entitled to unlink exactly the inode `file`
-    /// refers to right now.
+    /// refers to right now, and start the kernel's pre-publication check chain
+    /// for that file: the kernel creates the staging guard and the chain
+    /// together, so there is one guard per staging file.
     ///
     /// An identity that cannot be read is not a reason to fail the copy — it is
     /// a reason never to unlink this name, which is what a `None` identity
     /// means. Construction stays infallible so that no error can be returned
     /// between creating the temporary and arming its guard.
-    fn new(parent: &'a OwnedFd, name: OsString, file: &fs::File) -> Self {
-        Self {
-            parent,
-            name,
-            state: kernel::removal::GuardState::staging(rustix::fs::fstat(file).ok().map(Ident)),
-        }
+    fn new(
+        parent: &'a OwnedFd,
+        name: OsString,
+        file: &fs::File,
+    ) -> (Self, kernel::ordering::Staged) {
+        let (staged, state) =
+            kernel::ordering::Staged::created(rustix::fs::fstat(file).ok().map(Ident));
+        (
+            Self {
+                parent,
+                name,
+                state,
+            },
+            staged,
+        )
     }
 
     /// Guard `name` under `parent` with a state the kernel created — the name
@@ -641,18 +654,15 @@ impl<'a> AnchoredTempGuard<'a> {
         &self.name
     }
 
-    /// The inode this guard is entitled to unlink, for callers that publish the
-    /// same file under another name and must prove it there too.
-    fn identity(&self) -> Option<Ident> {
-        self.state.identity()
-    }
-
-    /// Stop tracking the temporary name; the caller has consumed it.
+    /// Stop tracking the temporary name. Production never needs this: every
+    /// decision to stop tracking a name is a kernel step's.
+    #[cfg(test)]
     fn disarm(&mut self) {
         self.state.disarm();
     }
 
-    /// Remove the temporary name now, reporting whether it worked.
+    /// Remove the temporary name now if a removal is still owed, reporting
+    /// whether it worked.
     ///
     /// Tracking stops either way, so `Drop` can never unlink this name twice.
     /// Production removals are issued by the publication kernel's steps, which
@@ -660,7 +670,9 @@ impl<'a> AnchoredTempGuard<'a> {
     /// [`AnchoredTempGuard::run_removal`].
     #[cfg(test)]
     fn remove_now(&mut self) -> io::Result<()> {
-        let removal = self.state.take_removal();
+        let Some(removal) = self.state.drop_removal() else {
+            return Ok(());
+        };
         match self.run_removal(removal).into_outcome() {
             kernel::trace::Removal::Removed => Ok(()),
             kernel::trace::Removal::Left(left) => Err(self.left_error(left)),
@@ -676,10 +688,13 @@ impl<'a> AnchoredTempGuard<'a> {
     /// because only the caller knows what a leftover means at that point. A
     /// name that no longer holds the guarded inode is such a failure: nothing
     /// is deleted and the error names the file that was left alone.
-    fn run_removal(
+    ///
+    /// The removal carries the kernel state waiting for it, so its result can
+    /// only be fed back to that state.
+    fn run_removal<K: kernel::removal::AwaitsRemoval>(
         &self,
-        removal: kernel::removal::ProvenRemoval<Ident>,
-    ) -> kernel::removal::RemovalDone<io::Error> {
+        removal: kernel::removal::ProvenRemoval<Ident, K>,
+    ) -> kernel::removal::RemovalDone<io::Error, K> {
         if temporary_removal_forced_failure() {
             return removal.abandon(rustix::io::Errno::IO.into());
         }
@@ -723,11 +738,11 @@ impl Drop for AnchoredTempGuard<'_> {
 /// identity nothing is attempted; a name the probe cannot prove is left
 /// alone.
 #[cfg(unix)]
-fn remove_proven_name(
+fn remove_proven_name<K: kernel::removal::AwaitsRemoval>(
     parent: &OwnedFd,
     name: &OsStr,
-    removal: kernel::removal::ProvenRemoval<Ident>,
-) -> kernel::removal::RemovalDone<io::Error> {
+    removal: kernel::removal::ProvenRemoval<Ident, K>,
+) -> kernel::removal::RemovalDone<io::Error, K> {
     let probe = match removal.start() {
         kernel::removal::RemovalStart::Done(done) => return done,
         kernel::removal::RemovalStart::Probe(probe) => probe,
@@ -828,10 +843,13 @@ fn copy_file_anchored_unix(
         // pinned data itself. Both snapshots have just been matched against
         // live descriptors, so agreeing with each other means the two files
         // agree right now.
+        //
+        // The mode the kernel will hand out is the planned source snapshot's,
+        // which the open source was matched against above, so it is also the
+        // open source's current `st_mode`.
         let Ok(repair) = kernel::repair::Repair::start(
             repair_snap(expected),
             repair_snap(request.expected_source),
-            permission_signature(&source_metadata),
         ) else {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -958,16 +976,16 @@ fn copy_file_anchored_unix(
     // Everything from here on is guarded: any early return, `?`, or unwinding
     // panic removes the temporary name — as long as it still holds the file
     // just created under it, whose identity the guard pins now.
-    let mut temporary_guard =
+    let (mut temporary_guard, staged) =
         AnchoredTempGuard::new(&destination_parent, temporary_name, &temporary);
     if needs_stream {
         source.seek(SeekFrom::Start(0))?;
         io::copy(&mut source, &mut temporary)?;
     }
 
-    // The kernel's ordering chain: publication of any kind can only start
-    // from the token these checks yield, in this order.
-    let staged = kernel::ordering::Staged::prepared();
+    // The kernel's ordering chain, started together with the guard:
+    // publication of any kind can only start from the token these checks
+    // yield, in this order.
     let staged =
         staged.after_source_check(ensure_open_handle_unchanged(&source, &source_metadata))?;
     let staged =
@@ -991,19 +1009,19 @@ fn copy_file_anchored_unix(
 
     let outcome = match verified_destination.as_mut() {
         None => {
-            let publication =
-                kernel::noreplace::NoReplace::staging(ready, temporary_guard.identity());
+            let publication = kernel::noreplace::NoReplace::staging(ready, &temporary_guard.state);
+            // Once something is published, the staging name is either gone or
+            // holds a file this run has no right to delete, so the kernel
+            // disarms the guard; a publication that failed leaves it armed, to
+            // remove this run's unpublished file on the way out.
             let published = publish_noreplace(
                 &destination_parent,
                 temporary_guard.name(),
                 &destination_name,
                 publication,
             )
-            .into_result()?;
+            .into_result(&mut temporary_guard.state)?;
             let staging_path = destination_directory.join(temporary_guard.name());
-            // The staging name is either gone or holds a file this run has no
-            // right to delete; the guard must not act on it either way.
-            temporary_guard.disarm();
             publication_result(published, &destination_path, &staging_path)?;
             PublishOutcome::Created
         }
@@ -1179,17 +1197,18 @@ fn replace_verified_destination(
                     let matches = ensure_open_snapshot_matches(verified, expected).is_ok();
                     match pinned.after_pinned(&mut temporary_guard.state, matches) {
                         // The temporary name now holds the outgoing inode,
-                        // which is therefore the only inode the guard may
-                        // unlink from it. Removing it is the last step, and
-                        // its failure is not cosmetic: the replacement itself
-                        // stands, but the file it replaced is still on disk
-                        // under a name nobody expects, possibly holding the
-                        // secrets this run was moving around. Report the file
-                        // as failed and say exactly what is left.
-                        kernel::replace::SwapChecked::Remove(remove, removal) => {
+                        // which is therefore the only inode that may be
+                        // unlinked from it: the kernel disarmed the guard and
+                        // handed out a removal for exactly that inode.
+                        // Removing it is the last step, and its failure is
+                        // not cosmetic: the replacement itself stands, but
+                        // the file it replaced is still on disk under a name
+                        // nobody expects, possibly holding the secrets this
+                        // run was moving around. Report the file as failed
+                        // and say exactly what is left.
+                        kernel::replace::SwapChecked::Remove(removal) => {
                             let leftover = parent_directory.join(temporary_guard.name());
-                            let removed =
-                                remove.after_removal(temporary_guard.run_removal(removal));
+                            let removed = temporary_guard.run_removal(removal).after_removal();
                             return removed.into_result().map_err(|left| {
                                 let error = temporary_guard.left_error(left);
                                 io::Error::new(
@@ -1313,73 +1332,58 @@ fn replace_by_displacement(
     // `AT_SYMLINK_NOFOLLOW` rather than by opening it: the question here is
     // which entry was moved, not whether waft may read it.
     let found = identity_at(parent, displaced_guard.name()).map(Ident);
-    let (restore, publication) = match identify.after_lstat(&mut displaced_guard.state, found) {
+    let restore = match identify.after_lstat(&mut displaced_guard.state, found) {
         kernel::replace::Lstated::Done(done) => {
             return displaced.result(done.into_verdict(), temporary_guard, &displaced_guard);
         }
         // What was displaced is not the file this run verified. Waft has no
         // right to delete it and no reason to publish over it, so the only
         // correct move is to put it back exactly where it was found.
-        kernel::replace::Lstated::Restore(restore, publication) => (restore, publication),
+        kernel::replace::Lstated::Restore(restore) => restore,
         kernel::replace::Lstated::Pinned(pinned) => {
             let matches = ensure_open_snapshot_matches(verified, expected).is_ok();
-            match pinned.after_pinned(&temporary_guard.state, &mut displaced_guard.state, matches) {
+            match pinned.after_pinned(&mut displaced_guard.state, matches) {
                 // ... or it is that inode, rewritten in place: the same holds.
-                kernel::replace::DisplacedChecked::Restore(restore, publication) => {
-                    (restore, publication)
-                }
-                kernel::replace::DisplacedChecked::Publish(publish, publication) => {
+                kernel::replace::DisplacedChecked::Restore(restore) => restore,
+                kernel::replace::DisplacedChecked::Publish(publication) => {
                     let published = publish_noreplace(
                         parent,
                         temporary_guard.name(),
                         destination_name,
                         publication,
                     );
-                    let verdict = match publish.after_publish(
-                        &mut temporary_guard.state,
-                        &mut displaced_guard.state,
-                        published,
-                    ) {
+                    let verdict = match published
+                        .after_publish(&mut temporary_guard.state, &mut displaced_guard.state)
+                    {
                         // The replacement is published and the displaced file
                         // is the one that was planned against: this is the
-                        // only unlink on this path, and the guard re-proves the
-                        // inode immediately before it runs.
-                        kernel::replace::PublishedStep::Cleanup(cleanup, removal) => cleanup
-                            .after_removal(displaced_guard.run_removal(removal))
+                        // only unlink on this path, and the removal re-proves
+                        // the inode immediately before it runs.
+                        kernel::replace::PublishedStep::Cleanup(removal) => displaced_guard
+                            .run_removal(removal)
+                            .after_removal()
                             .into_verdict(),
                         // Someone took the vacated name before the no-clobber
                         // publish could use it. The previous destination is not
                         // gone — it is under the displaced name — so put it back
                         // rather than reporting a hole.
-                        kernel::replace::PublishedStep::Restore(restore, publication) => {
-                            let restored = publish_noreplace(
-                                parent,
-                                displaced_guard.name(),
-                                destination_name,
-                                publication,
-                            );
-                            restore
-                                .after_restore(
-                                    &mut temporary_guard.state,
-                                    &mut displaced_guard.state,
-                                    restored,
-                                )
-                                .into_verdict()
-                        }
+                        kernel::replace::PublishedStep::Restore(restore) => publish_noreplace(
+                            parent,
+                            displaced_guard.name(),
+                            destination_name,
+                            restore,
+                        )
+                        .after_restore(&mut temporary_guard.state, &mut displaced_guard.state)
+                        .into_verdict(),
                     };
                     return displaced.result(verdict, temporary_guard, &displaced_guard);
                 }
             }
         }
     };
-    let restored = publish_noreplace(
-        parent,
-        displaced_guard.name(),
-        destination_name,
-        publication,
-    );
+    let restored = publish_noreplace(parent, displaced_guard.name(), destination_name, restore);
     displaced.result(
-        restore.after_restore(restored).into_verdict(),
+        restored.after_restore().into_verdict(),
         temporary_guard,
         &displaced_guard,
     )
@@ -1587,8 +1591,8 @@ fn undo_lost_exchange(
         .unwrap_or(false);
     let done = match prove_staging.after_staging_probe(&mut temporary_guard.state, holds) {
         kernel::replace::UndoStagingProbed::Done(done) => done,
-        kernel::replace::UndoStagingProbed::Remove(remove, removal) => {
-            remove.after_removal(temporary_guard.run_removal(removal))
+        kernel::replace::UndoStagingProbed::Remove(removal) => {
+            temporary_guard.run_removal(removal).after_removal()
         }
     };
     undo_error(done, temporary_guard, destination_name, &temporary_path)
@@ -2308,14 +2312,15 @@ fn publication_result(
 /// the filesystem has no `RENAME_NOREPLACE` and the publication has to be done
 /// as a link followed by an unlink of the extra name. With no identity the
 /// extra name is left alone — and reported as left behind rather than passed
-/// off as a clean publication.
+/// off as a clean publication. The publication carries the kernel state
+/// waiting for it, which the finished record is fed back to.
 #[cfg(unix)]
-fn publish_noreplace(
+fn publish_noreplace<K: kernel::noreplace::AwaitsPublication>(
     parent: &OwnedFd,
     temporary: &OsStr,
     destination: &OsStr,
-    publication: kernel::noreplace::NoReplace<Ident>,
-) -> kernel::noreplace::NoReplaceDone<io::Error> {
+    publication: kernel::noreplace::NoReplace<Ident, K>,
+) -> kernel::noreplace::NoReplaceDone<io::Error, K> {
     let renamed = if publish_forced_failure() {
         Err(rustix::io::Errno::IO)
     } else if noreplace_forced_unsupported() {
@@ -2354,9 +2359,9 @@ fn publish_noreplace(
     .map_err(io::Error::from);
     match link.after_link(linked) {
         kernel::noreplace::NoReplaceLinked::Done(done) => done,
-        kernel::noreplace::NoReplaceLinked::Cleanup(cleanup, removal) => {
+        kernel::noreplace::NoReplaceLinked::Cleanup(removal) => {
             after_link_published();
-            cleanup.after_cleanup(remove_proven_name(parent, temporary, removal))
+            remove_proven_name(parent, temporary, removal).after_cleanup()
         }
     }
 }
@@ -2437,11 +2442,8 @@ mod kernel_glue_tests {
         let directory = fs::canonicalize(tmp.path()).unwrap();
         let parent = open_canonical_directory(&directory).unwrap();
         let (name, _file) = create_anchored_temp(&parent).unwrap();
-        let mut guard = AnchoredTempGuard {
-            parent: &parent,
-            name: name.clone(),
-            state: kernel::removal::GuardState::staging(None),
-        };
+        let (_staged, state) = kernel::ordering::Staged::created::<Ident>(None);
+        let mut guard = AnchoredTempGuard::with_state(&parent, name.clone(), state);
         let error = guard.remove_now().unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert!(
@@ -2462,7 +2464,7 @@ mod kernel_glue_tests {
         let parent = open_canonical_directory(&directory).unwrap();
         let (name, file) = create_anchored_temp(&parent).unwrap();
         {
-            let mut guard = AnchoredTempGuard::new(&parent, name.clone(), &file);
+            let (mut guard, _staged) = AnchoredTempGuard::new(&parent, name.clone(), &file);
             guard.disarm();
         }
         assert!(directory.join(&name).exists());
@@ -3844,7 +3846,7 @@ mod tests {
         let (name, file) = create_anchored_temp(&parent).unwrap();
         let path = directory.join(&name);
 
-        let mut guard = AnchoredTempGuard::new(&parent, name.clone(), &file);
+        let (mut guard, _staged) = AnchoredTempGuard::new(&parent, name.clone(), &file);
         // Another process publishes its own file under the staging name while
         // the guard is armed.
         let interloper = directory.join("interloper");
@@ -3877,7 +3879,7 @@ mod tests {
         let path = directory.join(&name);
 
         {
-            let _guard = AnchoredTempGuard::new(&parent, name.clone(), &file);
+            let (_guard, _staged) = AnchoredTempGuard::new(&parent, name.clone(), &file);
             let interloper = directory.join("interloper");
             write(&interloper, "not waft's file\n");
             fs::rename(&interloper, &path).unwrap();
@@ -3897,7 +3899,7 @@ mod tests {
         let path = directory.join(&name);
 
         {
-            let _guard = AnchoredTempGuard::new(&parent, name, &file);
+            let (_guard, _staged) = AnchoredTempGuard::new(&parent, name, &file);
             assert!(path.exists());
         }
 

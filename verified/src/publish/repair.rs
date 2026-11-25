@@ -8,16 +8,22 @@
 //! recheck) returned `Ok`, the destination parent is revalidated, the
 //! destination name resolves to the pinned descriptor, and that descriptor
 //! still reads back as planned. Only the state reached after all five hands
-//! out the `fchmod` mode, so no other order compiles.
+//! out the `fchmod` mode.
 //!
 //! Proven:
 //!
 //! * **R1** a repair asks for no namespace change at all (`no_namespace_change`
 //!   holds for every state's trace): its only mutations are `fchmod`s on the
 //!   pinned descriptor, so waft never alters the destination's content or
-//!   which file the name holds;
-//! * **R2** the source's mode is applied exactly once, and only after the five
-//!   checks above succeeded in that order;
+//!   which file the name holds. The repair machine has no namespace-changing
+//!   step to begin with, so this holds by construction;
+//! * **R2** the mode applied is exactly the planned source snapshot's mode
+//!   (`source.permissions`), and it is handed out only after the five checks
+//!   above succeeded. The order of the checks is enforced by Rust (each step
+//!   consumes its typestate); Verus proves that each step is `Ok` exactly when
+//!   its check was and records exactly its own check on top of the ones
+//!   before it (`next.trace() == self.trace().push(..)`), so every state's
+//!   trace is the sequence of steps actually taken to reach it;
 //! * **R3** [`repair_verdict`] classifies the read-back with content taking
 //!   precedence: `Repaired` exactly when the content and the source's mode are
 //!   both there, `ContentChanged` whenever the bytes cannot be proved intact
@@ -122,6 +128,11 @@ pub open spec fn repair_checks() -> Seq<Ev> {
     ]
 }
 
+/// The check number `n` (1 to 5) a repair passes.
+pub open spec fn repair_check(n: int) -> Ev {
+    repair_checks()[n - 1]
+}
+
 /// The trace of a reported repair.
 pub open spec fn repaired_trace(source_permissions: u32) -> Seq<Ev> {
     repair_checks() + seq![
@@ -147,10 +158,18 @@ pub struct Repair {
     trace: Ghost<Seq<Ev>>,
 }
 
-/// The shared invariant of the pre-`fchmod` states: the premise holds and the
-/// trace is the first `n` checks.
-pub open spec fn checks_done(expected: Snap, source: Snap, trace: Seq<Ev>, n: int) -> bool {
+/// The shared invariant of the pre-`fchmod` states: the premise holds, the
+/// mode to apply is the planned source's, and the trace is the first `n`
+/// checks.
+pub open spec fn checks_done(
+    expected: Snap,
+    source: Snap,
+    source_permissions: u32,
+    trace: Seq<Ev>,
+    n: int,
+) -> bool {
     &&& same_content(expected, source)
+    &&& source_permissions == source.permissions
     &&& 0 <= n <= 5
     &&& trace == repair_checks().take(n)
 }
@@ -158,7 +177,7 @@ pub open spec fn checks_done(expected: Snap, source: Snap, trace: Seq<Ev>, n: in
 impl Repair {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        checks_done(self.expected, self.source@, self.trace@, 0)
+        checks_done(self.expected, self.source@, self.source_permissions, self.trace@, 0)
     }
 
     /// The planned destination snapshot.
@@ -171,30 +190,43 @@ impl Repair {
         self.source@
     }
 
-    /// The mode the repair will apply: the source's full `st_mode`.
+    /// The mode the repair will apply: the planned source's full `st_mode`.
     pub closed spec fn source_permissions(&self) -> u32 {
         self.source_permissions
     }
 
+    /// The checks that have passed: none yet.
+    pub closed spec fn trace(&self) -> Seq<Ev> {
+        self.trace@
+    }
+
     /// Start a repair of a destination planned as `expected` towards a source
-    /// planned as `source`, whose current mode is `source_permissions`. A
-    /// repair changes only the mode, so it is refused unless the two planned
+    /// planned as `source`, whose mode is the one the repair applies. A repair
+    /// changes only the mode, so it is refused unless the two planned
     /// snapshots describe the same bytes.
-    pub fn start(expected: Snap, source: Snap, source_permissions: u32) -> (r: Result<
-        Repair,
-        PremiseFailed,
-    >)
+    pub fn start(expected: Snap, source: Snap) -> (r: Result<Repair, PremiseFailed>)
         ensures
             r is Ok <==> same_content(expected, source),
             r matches Ok(repair) ==> {
                 &&& repair.expected() == expected
                 &&& repair.source() == source
-                &&& repair.source_permissions() == source_permissions
+                &&& repair.source_permissions() == source.permissions
+                &&& repair.trace() == Seq::<Ev>::empty()
             },
     {
         if expected.len == source.len && expected.fingerprint == source.fingerprint {
             let ghost trace = repair_checks().take(0);
-            Ok(Repair { expected, source_permissions, source: Ghost(source), trace: Ghost(trace) })
+            proof {
+                assert(trace =~= Seq::<Ev>::empty());
+            }
+            Ok(
+                Repair {
+                    expected,
+                    source_permissions: source.permissions,
+                    source: Ghost(source),
+                    trace: Ghost(trace),
+                },
+            )
         } else {
             Err(PremiseFailed)
         }
@@ -207,6 +239,7 @@ impl Repair {
             checked matches Err(e) ==> r == Err::<RepairCheck<2>, E>(e),
             r matches Ok(next) ==> next.expected() == self.expected() && next.source()
                 == self.source() && next.source_permissions() == self.source_permissions(),
+            r matches Ok(next) ==> next.trace() == self.trace().push(Ev::SourceUnchanged),
     {
         proof {
             use_type_invariant(&self);
@@ -214,6 +247,9 @@ impl Repair {
         match checked {
             Ok(()) => {
                 let ghost trace = repair_checks().take(1);
+                proof {
+                    assert(trace =~= self.trace@.push(Ev::SourceUnchanged));
+                }
                 Ok(
                     RepairCheck {
                         expected: self.expected,
@@ -244,7 +280,7 @@ impl<const N: u64> RepairCheck<N> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
         &&& 2 <= N <= 5
-        &&& checks_done(self.expected, self.source@, self.trace@, N - 1)
+        &&& checks_done(self.expected, self.source@, self.source_permissions, self.trace@, N - 1)
     }
 
     /// The planned destination snapshot.
@@ -275,11 +311,15 @@ impl<const N: u64> RepairCheck<N> {
             r.expected() == self.expected(),
             r.source() == self.source(),
             r.source_permissions() == self.source_permissions(),
+            r.trace() == self.trace().push(repair_check(N as int)),
     {
         proof {
             use_type_invariant(&self);
         }
         let ghost trace = repair_checks().take(N as int);
+        proof {
+            assert(trace =~= self.trace@.push(repair_check(N as int)));
+        }
         RepairCheck {
             expected: self.expected,
             source_permissions: self.source_permissions,
@@ -295,10 +335,12 @@ impl<const N: u64> RepairCheck<N> {
             r.mode() == self.source_permissions(),
             r.expected() == self.expected(),
             r.source() == self.source(),
+            r.trace() == self.trace().push(repair_check(5)),
     {
         proof {
             use_type_invariant(&self);
             assert(repair_checks().take(5) =~= repair_checks());
+            assert(repair_checks() =~= self.trace@.push(repair_check(5)));
         }
         RepairChmod {
             expected: self.expected,
@@ -317,6 +359,7 @@ impl RepairCheck<2> {
             called matches Err(e) ==> r == Err::<RepairCheck<3>, E>(e),
             r matches Ok(next) ==> next.expected() == self.expected() && next.source()
                 == self.source() && next.source_permissions() == self.source_permissions(),
+            r matches Ok(next) ==> next.trace() == self.trace().push(Ev::BeforePublish),
     {
         match called {
             Ok(()) => Ok(self.advance()),
@@ -333,6 +376,7 @@ impl RepairCheck<3> {
             checked matches Err(e) ==> r == Err::<RepairCheck<4>, E>(e),
             r matches Ok(next) ==> next.expected() == self.expected() && next.source()
                 == self.source() && next.source_permissions() == self.source_permissions(),
+            r matches Ok(next) ==> next.trace() == self.trace().push(Ev::ParentRevalidated),
     {
         match checked {
             Ok(()) => Ok(self.advance()),
@@ -350,6 +394,9 @@ impl RepairCheck<4> {
             checked matches Err(e) ==> r == Err::<RepairCheck<5>, E>(e),
             r matches Ok(next) ==> next.expected() == self.expected() && next.source()
                 == self.source() && next.source_permissions() == self.source_permissions(),
+            r matches Ok(next) ==> next.trace() == self.trace().push(
+                Ev::DestIsPinned { holds: true },
+            ),
     {
         match checked {
             Ok(()) => Ok(self.advance()),
@@ -367,6 +414,9 @@ impl RepairCheck<5> {
             checked matches Err(e) ==> r == Err::<RepairChmod, E>(e),
             r matches Ok(next) ==> next.expected() == self.expected() && next.source()
                 == self.source() && next.mode() == self.source_permissions(),
+            r matches Ok(next) ==> next.trace() == self.trace().push(
+                Ev::PinnedMatches { holds: true },
+            ),
     {
         match checked {
             Ok(()) => Ok(self.finish()),
@@ -390,10 +440,11 @@ impl RepairChmod {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
         &&& same_content(self.expected, self.source@)
+        &&& self.source_permissions == self.source@.permissions
         &&& self.trace@ == repair_checks()
     }
 
-    /// The mode to apply: the source's full `st_mode`.
+    /// The mode to apply: the planned source's full `st_mode`.
     pub closed spec fn mode(&self) -> u32 {
         self.source_permissions
     }
@@ -408,11 +459,20 @@ impl RepairChmod {
         self.source@
     }
 
+    /// The checks that have passed.
+    pub closed spec fn trace(&self) -> Seq<Ev> {
+        self.trace@
+    }
+
     /// The mode to apply.
     pub fn source_mode(&self) -> (m: u32)
         ensures
             m == self.mode(),
+            m == self.source().permissions,
     {
+        proof {
+            use_type_invariant(self);
+        }
         self.source_permissions
     }
 
@@ -423,6 +483,9 @@ impl RepairChmod {
             applied matches Err(e) ==> r == Err::<RepairReadBack, E>(e),
             r matches Ok(next) ==> next.expected() == self.expected() && next.source_permissions()
                 == self.mode(),
+            r matches Ok(next) ==> next.trace() == self.trace().push(
+                Ev::Fchmod { mode: self.mode(), ok: true },
+            ),
     {
         proof {
             use_type_invariant(&self);
@@ -460,6 +523,7 @@ impl RepairReadBack {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
         &&& same_content(self.expected, self.source@)
+        &&& self.source_permissions == self.source@.permissions
         &&& self.trace@ == repair_checks().push(
             Ev::Fchmod { mode: self.source_permissions, ok: true },
         )
@@ -475,6 +539,11 @@ impl RepairReadBack {
         self.source_permissions
     }
 
+    /// What the repair asked for so far.
+    pub closed spec fn trace(&self) -> Seq<Ev> {
+        self.trace@
+    }
+
     /// Feed the read-back (`None` if the descriptor could not be read back as
     /// a regular file).
     pub fn after_read_back(self, observed: Option<Snap>) -> (r: ReadBackStep)
@@ -485,8 +554,15 @@ impl RepairReadBack {
                 is ModeChanged,
             r is ProveName <==> repair_verdict_spec(observed, self.expected(), self.source_permissions())
                 is Repaired,
-            r matches ReadBackStep::Revert(revert) ==> revert.mode() == self.expected().permissions
-                & 0o7777u32,
+            r matches ReadBackStep::Revert(revert) ==> {
+                &&& revert.mode() == self.expected().permissions & 0o7777u32
+                &&& revert.trace() == self.trace().push(
+                    Ev::ReadBack { content_matches: false, mode_matches: false },
+                )
+            },
+            r matches ReadBackStep::ProveName(next) ==> next.trace() == self.trace().push(
+                Ev::ReadBack { content_matches: true, mode_matches: true },
+            ),
     {
         proof {
             use_type_invariant(&self);
@@ -605,9 +681,15 @@ impl RepairProveName {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
         &&& same_content(self.expected, self.source@)
+        &&& self.source_permissions == self.source@.permissions
         &&& self.trace@ == repair_checks().push(
             Ev::Fchmod { mode: self.source_permissions, ok: true },
         ).push(Ev::ReadBack { content_matches: true, mode_matches: true })
+    }
+
+    /// What the repair asked for so far.
+    pub closed spec fn trace(&self) -> Seq<Ev> {
+        self.trace@
     }
 
     /// Feed whether the destination name still resolves to the pinned
@@ -616,6 +698,9 @@ impl RepairProveName {
     pub fn after_name_check(self, holds: bool) -> (r: Result<RepairSync, NameTaken>)
         ensures
             r is Ok <==> holds,
+            r matches Ok(next) ==> next.trace() == self.trace().push(
+                Ev::DestIsPinned { holds: true },
+            ),
     {
         proof {
             use_type_invariant(&self);
@@ -654,6 +739,7 @@ impl RepairSync {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
         &&& same_content(self.expected, self.source@)
+        &&& self.source_permissions == self.source@.permissions
         &&& self.trace@ == repair_checks().push(
             Ev::Fchmod { mode: self.source_permissions, ok: true },
         ).push(Ev::ReadBack { content_matches: true, mode_matches: true }).push(
@@ -676,6 +762,11 @@ impl RepairSync {
         self.source@
     }
 
+    /// What the repair asked for so far.
+    pub closed spec fn trace(&self) -> Seq<Ev> {
+        self.trace@
+    }
+
     /// Feed the `fsync`'s result. R5: a [`Repaired`] carries exactly the
     /// reported-repair trace, which changes no name.
     pub fn after_sync<E>(self, synced: Result<(), E>) -> (r: Result<Repaired, E>)
@@ -683,9 +774,11 @@ impl RepairSync {
             r is Ok <==> synced is Ok,
             synced matches Err(e) ==> r == Err::<Repaired, E>(e),
             r matches Ok(repaired) ==> {
+                &&& repaired.trace() == self.trace().push(Ev::Sync { ok: true })
                 &&& repaired.trace() == repaired_trace(self.source_permissions())
                 &&& no_namespace_change(repaired.trace())
                 &&& same_content(self.expected(), self.source())
+                &&& self.source_permissions() == self.source().permissions
             },
     {
         proof {
@@ -728,6 +821,7 @@ impl Repaired {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
         &&& same_content(self.expected@, self.source@)
+        &&& self.source_permissions@ == self.source@.permissions
         &&& self.trace@ == repaired_trace(self.source_permissions@)
     }
 

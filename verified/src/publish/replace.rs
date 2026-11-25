@@ -6,11 +6,13 @@
 //! resolves to the pinned destination descriptor (identity `v`) and that the
 //! descriptor still reads back as the planned snapshot
 //! ([`Exchange::after_destination_verified`]). From there every step is a
-//! typestate: production performs exactly the probe or syscall the state
-//! names, feeds back the answer, and receives the next state, so no other
-//! order compiles. The staging guard (and, on the displacement path, the
-//! displaced guard) is passed in by `&mut` and only this machine re-aims or
-//! disarms it at the decision points.
+//! typestate: production feeds back the answer to the probe or syscall the
+//! state names and receives the next state, so the answers can only be fed in
+//! the machine's order. The staging guard (and, on the displacement path, the
+//! displaced guard) is passed in by `&mut`, and this machine only ever
+//! disarms it; a guard's identity never changes. Every proven removal and
+//! no-clobber publication the machine hands out carries the state waiting for
+//! it, so its result can only be fed back to that state.
 //!
 //! Every state carries the ghost trace of what was asked so far, with
 //! `safe` as part of its type invariant, and every finished record
@@ -20,13 +22,16 @@
 //! * **X1** the exchange is issued only right after proving the destination
 //!   holds `v` with its planned bytes (and an exchange back only right after
 //!   proving the destination holds this run's prepared file `p`);
-//! * **X2** `Replaced` on the exchange path means: the exchange succeeded, the
+//! * **X2** `Ok` on the exchange path means: the exchange succeeded, the
 //!   name it swapped out was then proved to hold `v`, the pinned descriptor
-//!   still read back as planned, and only then was `v` removed by a proven
-//!   unlink — the guard is re-aimed at `v` in exactly that branch;
+//!   still read back as planned, and the trace ends with a probe proving the
+//!   staging name still holds `v` immediately followed by its successful
+//!   unlink (`exchanged_and_removed`); the staging guard is disarmed in
+//!   exactly that branch and the removal of `v` is the kernel's own;
 //! * **X3** the undo touches the destination only after proving it still holds
 //!   `p`, and unlinks the staging name only after proving it holds `p` again
-//!   (through the guard's own identity); every failed proof disarms the guard;
+//!   and then proving it holds the staging guard's identity; every failed
+//!   proof disarms the guard;
 //! * **X4** the outgoing inode of a lost race is never the target of an unlink
 //!   (a corollary of `proven_unlinks`: it is neither the run's own file nor
 //!   a verified `v`);
@@ -37,18 +42,29 @@
 //!   further action;
 //! * **D1** the destination is moved aside only after an exchange was reported
 //!   unsupported and the destination was re-proved;
-//! * **D2** the displaced name is unlinked only for `v`, only after the moved
-//!   entry was identified as `v` and the pinned descriptor read back as
-//!   planned, and only after the replacement was published;
+//! * **D2** the planned inode `v` is unlinked from the displaced name only by
+//!   the kernel's proven removal for `v`, only after the moved entry was
+//!   identified as `v` and the pinned descriptor read back as planned, and only
+//!   after the replacement was published; the only other unlink of the
+//!   displaced name is a restore's own link-fallback cleanup (D3/D4);
 //! * **D3/D4** anything else that was displaced is put back with a no-clobber
 //!   restore, never published over and never unlinked except by that
 //!   restore's own link cleanup; a failed publication is followed by exactly
 //!   one restore;
-//! * **D5** `RestoredUntouched` (and a restore after a failed publication that
-//!   left nothing behind) means the displaced name was consumed;
+//! * **D5** every displacement verdict says exactly which of the two names the
+//!   run consumed (`names_left`): `Replaced` means both the staging name and
+//!   the displaced name are gone, `DisplacedLeft`/`StagingLeft`/`BothLeft`
+//!   name exactly the ones that are not, the restore verdicts say whether the
+//!   displaced name was consumed, and no verdict before publication claims a
+//!   publication of the staging name;
+//! * **D6** the verdict after a publication carries exactly the leftover
+//!   reasons the publication and the removal produced, and the verdict after
+//!   a failed publication carries exactly the publication's and the restore's
+//!   errors, each in its own field;
 //! * **D7** `Replaced` on the displacement path means the displaced entry was
-//!   verified as `v`, the replacement was published, and `v` was removed by a
-//!   proven unlink.
+//!   verified as `v`, the replacement was published, and the trace ends with a
+//!   probe proving the displaced name holds `v` immediately followed by its
+//!   successful unlink.
 //!
 //! Trust: production proves the two facts [`Exchange::after_destination_verified`]
 //! and [`Reprove::reproved`] stand for before calling them, runs every probe
@@ -59,17 +75,18 @@
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
-use crate::publish::noreplace::{Attempt, NoReplace, NoReplaceDone};
+use crate::publish::noreplace::{Attempt, AwaitsPublication, NoReplace, NoReplaceDone};
 #[cfg(verus_keep_ghost)]
 use crate::publish::noreplace::{consumed, published, res_of};
 use crate::publish::ordering::Ready;
-use crate::publish::removal::{GuardState, ProvenRemoval, RemovalDone};
+use crate::publish::removal::{AwaitsRemoval, GuardState, ProvenRemoval, RemovalDone};
 #[allow(unused_imports)]
 use crate::publish::trace::{Ev, Identity, Ino, Leftover, Name, Published, Removal, Res, Run};
 #[cfg(verus_keep_ghost)]
 use crate::publish::trace::{
-    entitled, ino_of, lemma_safe_append_noreplace, lemma_safe_append_removal, lemma_safe_push,
-    lemma_safe_push_observation, lemma_verified_at_append, moved_then_verified, safe, verified_at,
+    ino_of, lemma_safe_append_noreplace, lemma_safe_append_removal, lemma_safe_push,
+    lemma_safe_push_observation, lemma_verified_at_append, moved_then_verified, noreplace_trace,
+    removal_trace, safe, verified_at,
 };
 
 verus! {
@@ -87,14 +104,23 @@ pub open spec fn run_of(own: Option<Ino>, v: Ino, p: Ino) -> Run {
 
 /// The bookkeeping every replacement state carries: the run, and a safe
 /// trace.
-pub open spec fn state_ok<I: Identity>(v: I, p: I, trace: Seq<Ev>, run: Run) -> bool {
-    &&& run == run_of(run.own, v.ino(), p.ino())
+pub open spec fn state_ok<I: Identity>(
+    v: I,
+    p: I,
+    own: Option<I>,
+    trace: Seq<Ev>,
+    run: Run,
+) -> bool {
+    &&& run == run_of(ino_of(own), v.ino(), p.ino())
     &&& safe(trace, run)
 }
 
-/// `t` begins with the verified prefix for `v`.
-pub open spec fn starts_verified(t: Seq<Ev>, v: Ino) -> bool {
-    t.len() >= 2 && t.take(2) == verified_prefix(v)
+/// `t` publishes nothing and unlinks nothing: no `RENAME_NOREPLACE`, link or
+/// unlink at all.
+pub open spec fn quiet(t: Seq<Ev>) -> bool {
+    forall|i: int|
+        #![trigger t[i]]
+        0 <= i < t.len() ==> !(t[i] is RenameNoReplace || t[i] is Link || t[i] is Unlink)
 }
 
 proof fn lemma_safe_empty(run: Run)
@@ -103,28 +129,9 @@ proof fn lemma_safe_empty(run: Run)
 {
 }
 
-proof fn lemma_take_push(t: Seq<Ev>, e: Ev, k: int)
-    requires
-        0 <= k <= t.len(),
-    ensures
-        t.push(e).take(k) == t.take(k),
-{
-    assert(t.push(e).take(k) =~= t.take(k));
-}
-
-proof fn lemma_take_append(a: Seq<Ev>, b: Seq<Ev>, k: int)
-    requires
-        0 <= k <= a.len(),
-    ensures
-        (a + b).take(k) == a.take(k),
-{
-    assert((a + b).take(k) =~= a.take(k));
-}
-
 proof fn lemma_contains_append(a: Seq<Ev>, b: Seq<Ev>, e: Ev)
     ensures
-        a.contains(e) ==> (a + b).contains(e),
-        b.contains(e) ==> (a + b).contains(e),
+        (a + b).contains(e) <==> (a.contains(e) || b.contains(e)),
 {
     if a.contains(e) {
         let i = choose|i: int| 0 <= i < a.len() && a[i] == e;
@@ -134,17 +141,161 @@ proof fn lemma_contains_append(a: Seq<Ev>, b: Seq<Ev>, e: Ev)
         let i = choose|i: int| 0 <= i < b.len() && b[i] == e;
         assert((a + b)[a.len() + i] == e);
     }
+    if (a + b).contains(e) {
+        let i = choose|i: int| 0 <= i < (a + b).len() && (a + b)[i] == e;
+        if i < a.len() {
+            assert(a[i] == e);
+        } else {
+            assert(b[i - a.len()] == e);
+        }
+    }
 }
 
-proof fn lemma_published_append(a: Seq<Ev>, b: Seq<Ev>, n: Name)
+/// Publication and consumption of a name in a concatenation.
+proof fn lemma_names_append(a: Seq<Ev>, b: Seq<Ev>, n: Name)
     ensures
-        published(b, n) ==> published(a + b, n),
-        consumed(b, n) ==> consumed(a + b, n),
-        published(a, n) ==> published(a + b, n),
+        published(a + b, n) <==> (published(a, n) || published(b, n)),
+        consumed(a + b, n) <==> (consumed(a, n) || consumed(b, n)),
 {
     lemma_contains_append(a, b, Ev::RenameNoReplace { from: n, res: Res::Ok });
     lemma_contains_append(a, b, Ev::Link { from: n, ok: true });
     lemma_contains_append(a, b, Ev::Unlink { name: n, ok: true });
+}
+
+/// A quiet trace neither publishes nor consumes any name.
+proof fn lemma_quiet_names(t: Seq<Ev>, n: Name)
+    requires
+        quiet(t),
+    ensures
+        !published(t, n),
+        !consumed(t, n),
+{
+    if t.contains(Ev::RenameNoReplace { from: n, res: Res::Ok }) {
+        let i = choose|i: int|
+            0 <= i < t.len() && t[i] == Ev::RenameNoReplace { from: n, res: Res::Ok };
+        assert(!(t[i] is RenameNoReplace));
+    }
+    if t.contains(Ev::Link { from: n, ok: true }) {
+        let i = choose|i: int| 0 <= i < t.len() && t[i] == Ev::Link { from: n, ok: true };
+        assert(!(t[i] is Link));
+    }
+    if t.contains(Ev::Unlink { name: n, ok: true }) {
+        let i = choose|i: int| 0 <= i < t.len() && t[i] == Ev::Unlink { name: n, ok: true };
+        assert(!(t[i] is Unlink));
+    }
+}
+
+/// Appending an event that neither publishes nor unlinks keeps a trace quiet.
+proof fn lemma_quiet_push(t: Seq<Ev>, e: Ev)
+    requires
+        quiet(t),
+        !(e is RenameNoReplace || e is Link || e is Unlink),
+    ensures
+        quiet(t.push(e)),
+{
+    assert forall|i: int| 0 <= i < t.push(e).len() implies !(t.push(e)[i] is RenameNoReplace
+        || t.push(e)[i] is Link || t.push(e)[i] is Unlink) by {
+        if i < t.len() {
+            assert(t.push(e)[i] == t[i]);
+        }
+    }
+}
+
+proof fn lemma_quiet_verified_prefix(v: Ino)
+    ensures
+        quiet(verified_prefix(v)),
+{
+    let t = verified_prefix(v);
+    assert forall|i: int| 0 <= i < t.len() implies !(t[i] is RenameNoReplace || t[i] is Link
+        || t[i] is Unlink) by {
+        if i == 0 {
+        } else {
+            assert(i == 1);
+        }
+    }
+}
+
+/// A proven removal of `n` touches no other name and publishes nothing; it
+/// consumes `n` exactly when it removed it.
+proof fn lemma_removal_names<E>(b: Seq<Ev>, n: Name, x: Option<Ino>, out: Removal<E>, m: Name)
+    requires
+        removal_trace(b, n, x, out),
+    ensures
+        !published(b, m),
+        m != n ==> !consumed(b, m),
+        consumed(b, n) <==> out is Removed,
+{
+    if b.contains(Ev::RenameNoReplace { from: m, res: Res::Ok }) {
+        let i = choose|i: int|
+            0 <= i < b.len() && b[i] == Ev::RenameNoReplace { from: m, res: Res::Ok };
+    }
+    if b.contains(Ev::Link { from: m, ok: true }) {
+        let i = choose|i: int| 0 <= i < b.len() && b[i] == Ev::Link { from: m, ok: true };
+    }
+    if b.contains(Ev::Unlink { name: m, ok: true }) {
+        let i = choose|i: int| 0 <= i < b.len() && b[i] == Ev::Unlink { name: m, ok: true };
+    }
+    if b.contains(Ev::RenameNoReplace { from: n, res: Res::Ok }) {
+        let i = choose|i: int|
+            0 <= i < b.len() && b[i] == Ev::RenameNoReplace { from: n, res: Res::Ok };
+    }
+    if b.contains(Ev::Unlink { name: n, ok: true }) {
+        let i = choose|i: int| 0 <= i < b.len() && b[i] == Ev::Unlink { name: n, ok: true };
+    }
+    if out is Removed {
+        assert(b[1] == Ev::Unlink { name: n, ok: true });
+    }
+}
+
+/// A no-clobber publication of `n` neither publishes nor consumes any other
+/// name.
+proof fn lemma_noreplace_names<E>(
+    b: Seq<Ev>,
+    n: Name,
+    x: Option<Ino>,
+    result: Result<Published<E>, E>,
+    m: Name,
+)
+    requires
+        noreplace_trace(b, n, x, result),
+        m != n,
+    ensures
+        !published(b, m),
+        !consumed(b, m),
+{
+    let rnr = Ev::RenameNoReplace { from: m, res: Res::Ok };
+    let link = Ev::Link { from: m, ok: true };
+    let unlink = Ev::Unlink { name: m, ok: true };
+    if b.len() >= 2 && b[0] == (Ev::RenameNoReplace { from: n, res: Res::Unsupported }) && b[1]
+        == (Ev::Link { from: n, ok: true }) && result is Ok {
+        let c = b.skip(2);
+        lemma_removal_names(c, n, x, crate::publish::trace::removal_of(result->Ok_0), m);
+        if b.contains(rnr) {
+            let i = choose|i: int| 0 <= i < b.len() && b[i] == rnr;
+            assert(c[i - 2] == rnr);
+            assert(c.contains(rnr));
+        }
+        if b.contains(link) {
+            let i = choose|i: int| 0 <= i < b.len() && b[i] == link;
+            assert(c[i - 2] == link);
+            assert(c.contains(link));
+        }
+        if b.contains(unlink) {
+            let i = choose|i: int| 0 <= i < b.len() && b[i] == unlink;
+            assert(c[i - 2] == unlink);
+            assert(c.contains(unlink));
+        }
+    } else {
+        if b.contains(rnr) {
+            let i = choose|i: int| 0 <= i < b.len() && b[i] == rnr;
+        }
+        if b.contains(link) {
+            let i = choose|i: int| 0 <= i < b.len() && b[i] == link;
+        }
+        if b.contains(unlink) {
+            let i = choose|i: int| 0 <= i < b.len() && b[i] == unlink;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +308,7 @@ proof fn lemma_published_append(a: Seq<Ev>, b: Seq<Ev>, n: Name)
 pub struct Exchange<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -164,7 +316,7 @@ pub struct Exchange<I: Identity> {
 impl<I: Identity> Exchange<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        &&& state_ok(self.v, self.p, self.trace@, self.run@)
+        &&& state_ok(self.v, self.p, self.own, self.trace@, self.run@)
         &&& self.trace@ == verified_prefix(self.v.ino())
     }
 }
@@ -182,17 +334,19 @@ impl<I: Identity> Exchange<I> {
     /// destination name resolves to the pinned destination descriptor whose
     /// identity is `verified`, and that the descriptor still reads back as
     /// exactly the planned snapshot. `prepared` is the identity of this run's
-    /// staging file and `guard` is its staging guard.
+    /// staging file and `guard` is its staging guard, whose identity is the
+    /// run's own file for the rest of the replacement.
     pub fn after_destination_verified(
         _ready: Ready,
-        _guard: &GuardState<I>,
+        guard: &GuardState<I>,
         verified: I,
         prepared: I,
     ) -> (r: Self)
         ensures
-            r.run() == run_of(_guard.ident(), verified.ino(), prepared.ino()),
+            r.run() == run_of(guard.ident(), verified.ino(), prepared.ino()),
     {
-        let ghost run = run_of(_guard.ident(), verified.ino(), prepared.ino());
+        let own = guard.identity();
+        let ghost run = run_of(ino_of(own), verified.ino(), prepared.ino());
         let ghost trace = verified_prefix(verified.ino());
         proof {
             lemma_safe_empty(run);
@@ -203,7 +357,7 @@ impl<I: Identity> Exchange<I> {
             assert(Seq::<Ev>::empty().push(e0) =~= seq![e0]);
             assert(seq![e0].push(e1) =~= trace);
         }
-        Exchange { v: verified, p: prepared, trace: Ghost(trace), run: Ghost(run) }
+        Exchange { v: verified, p: prepared, own, trace: Ghost(trace), run: Ghost(run) }
     }
 
     /// Feed the exchange's answer.
@@ -226,10 +380,10 @@ impl<I: Identity> Exchange<I> {
         }
         match exchanged {
             Attempt::Done => Exchanged::Check(
-                SwapProbe { v: self.v, p: self.p, trace: Ghost(u), run: self.run },
+                SwapProbe { v: self.v, p: self.p, own: self.own, trace: Ghost(u), run: self.run },
             ),
             Attempt::Unsupported => Exchanged::Displace(
-                Reprove { v: self.v, p: self.p, trace: Ghost(u), run: self.run },
+                Reprove { v: self.v, p: self.p, own: self.own, trace: Ghost(u), run: self.run },
             ),
             Attempt::Failed(error) => Exchanged::Failed(error),
         }
@@ -253,6 +407,7 @@ pub enum Exchanged<I: Identity, E> {
 pub struct SwapProbe<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -260,7 +415,7 @@ pub struct SwapProbe<I: Identity> {
 impl<I: Identity> SwapProbe<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        &&& state_ok(self.v, self.p, self.trace@, self.run@)
+        &&& state_ok(self.v, self.p, self.own, self.trace@, self.run@)
         &&& self.trace@ == verified_prefix(self.v.ino()).push(Ev::Exchange { res: Res::Ok })
     }
 }
@@ -299,9 +454,13 @@ impl<I: Identity> SwapProbe<I> {
             assert(u == t.push(u.last()));
         }
         if holds {
-            SwapProbed::Pinned(SwapPinned { v: self.v, p: self.p, trace: Ghost(u), run: self.run })
+            SwapProbed::Pinned(
+                SwapPinned { v: self.v, p: self.p, own: self.own, trace: Ghost(u), run: self.run },
+            )
         } else {
-            SwapProbed::Undo(Undo { v: self.v, p: self.p, trace: Ghost(u), run: self.run })
+            SwapProbed::Undo(
+                Undo { v: self.v, p: self.p, own: self.own, trace: Ghost(u), run: self.run },
+            )
         }
     }
 }
@@ -320,6 +479,7 @@ pub enum SwapProbed<I: Identity> {
 pub struct SwapPinned<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -327,7 +487,7 @@ pub struct SwapPinned<I: Identity> {
 impl<I: Identity> SwapPinned<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        &&& state_ok(self.v, self.p, self.trace@, self.run@)
+        &&& state_ok(self.v, self.p, self.own, self.trace@, self.run@)
         &&& self.trace@ == verified_prefix(self.v.ino()).push(Ev::Exchange { res: Res::Ok }).push(
             Ev::Probe { name: Name::Staging, ino: self.v.ino(), holds: true },
         )
@@ -343,24 +503,23 @@ impl<I: Identity> SwapPinned<I> {
     /// Feed whether the pinned descriptor still reads back as planned.
     ///
     /// Only if it does is the swapped-out file the one that was planned
-    /// against: the staging guard is then re-aimed at it and its proven
-    /// removal handed out. Otherwise the exchange is undone and the guard is
-    /// left exactly as it was.
+    /// against: the staging guard is then disarmed (its name no longer holds
+    /// this run's file) and the kernel's own proven removal of the planned
+    /// inode from the staging name is handed out. Otherwise the exchange is
+    /// undone and the guard is left exactly as it was.
     pub fn after_pinned(self, guard: &mut GuardState<I>, matches: bool) -> (r: SwapChecked<I>)
-        requires
-            old(guard).name() == Name::Staging,
-            old(guard).ident() == self.run().own,
         ensures
             r is Remove <==> matches,
-            r matches SwapChecked::Remove(x, removal) ==> {
-                &&& x.run() == self.run()
+            r matches SwapChecked::Remove(removal) ==> {
+                &&& removal.then().run() == self.run()
                 &&& removal.name() == Name::Staging
                 &&& removal.ident() == self.run().verified
-                &&& final(guard).ident() == self.run().verified
                 &&& !final(guard).is_armed()
-                &&& final(guard).name() == Name::Staging
             },
-            r matches SwapChecked::Undo(u) ==> u.run() == self.run() && *final(guard) == *old(guard),
+            r matches SwapChecked::Undo(u) ==> u.run() == self.run() && *final(guard)
+                == *old(guard),
+            final(guard).name() == old(guard).name(),
+            final(guard).ident() == old(guard).ident(),
     {
         proof {
             use_type_invariant(&self);
@@ -375,22 +534,28 @@ impl<I: Identity> SwapPinned<I> {
             proof {
                 assert(moved_then_verified(u, 2, Name::Staging, self.v.ino()));
             }
-            guard.now_holds(self.v);
-            let removal = guard.take_removal();
-            SwapChecked::Remove(
-                ExchangeRemove { v: self.v, p: self.p, trace: Ghost(u), run: self.run },
-                removal,
-            )
+            guard.disarm();
+            let remove = ExchangeRemove {
+                v: self.v,
+                p: self.p,
+                own: self.own,
+                trace: Ghost(u),
+                run: self.run,
+            };
+            SwapChecked::Remove(ProvenRemoval::new(Some(self.v), remove))
         } else {
-            SwapChecked::Undo(Undo { v: self.v, p: self.p, trace: Ghost(u), run: self.run })
+            SwapChecked::Undo(
+                Undo { v: self.v, p: self.p, own: self.own, trace: Ghost(u), run: self.run },
+            )
         }
     }
 }
 
 /// After the read-back.
 pub enum SwapChecked<I: Identity> {
-    /// The planned file was swapped out intact: remove it, then report.
-    Remove(ExchangeRemove<I>, ProvenRemoval<I>),
+    /// The planned file was swapped out intact: remove it from the staging
+    /// name, then feed the result back with `after_removal`.
+    Remove(ProvenRemoval<I, ExchangeRemove<I>>),
     /// It was not: undo.
     Undo(Undo<I>),
 }
@@ -401,6 +566,7 @@ pub enum SwapChecked<I: Identity> {
 pub struct ExchangeRemove<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -408,43 +574,54 @@ pub struct ExchangeRemove<I: Identity> {
 impl<I: Identity> ExchangeRemove<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        &&& state_ok(self.v, self.p, self.trace@, self.run@)
+        &&& state_ok(self.v, self.p, self.own, self.trace@, self.run@)
         &&& verified_at(self.trace@, Name::Staging, self.v.ino())
     }
-}
 
-impl<I: Identity> ExchangeRemove<I> {
     /// The run this replacement acts for.
     pub closed spec fn run(&self) -> Run {
         self.run@
     }
+}
 
-    /// Feed the removal handed out with this state.
-    pub fn after_removal<E>(self, removal: RemovalDone<E>) -> (d: ExchangeDone<E>)
-        requires
-            removal.name() == Name::Staging,
-            removal.ident() == self.run().verified,
+impl<I: Identity> AwaitsRemoval for ExchangeRemove<I> {
+    closed spec fn removal_name(&self) -> Name {
+        Name::Staging
+    }
+
+    closed spec fn removal_ident(&self) -> Option<Ino> {
+        self.run@.verified
+    }
+}
+
+impl<I: Identity, E> RemovalDone<E, ExchangeRemove<I>> {
+    /// Feed back the removal of the planned file from the staging name.
+    pub fn after_removal(self) -> (d: ExchangeDone<E>)
         ensures
-            d.run() == self.run(),
-            d.result() is Ok <==> removal.outcome() is Removed,
-            removal.outcome() matches Removal::Left(l) ==> d.result() == Err::<(), Leftover<E>>(l),
+            d.run() == self.then().run(),
+            d.result() is Ok <==> self.outcome() is Removed,
+            self.outcome() matches Removal::Left(l) ==> d.result() == Err::<(), Leftover<E>>(l),
     {
+        let ghost b = self.trace();
+        let (state, outcome) = self.into_parts();
         proof {
-            use_type_invariant(&self);
+            use_type_invariant(&state);
         }
-        let ghost t = self.trace@;
-        let ghost b = removal.trace();
-        let outcome = removal.into_outcome();
+        let ghost t = state.trace@;
         let ghost u = t + b;
         proof {
-            lemma_safe_append_removal(t, b, Name::Staging, self.run@.verified, outcome, self.run@);
-            lemma_verified_at_append(t, b, Name::Staging, self.v.ino());
+            lemma_safe_append_removal(t, b, Name::Staging, state.run@.verified, outcome, state.run@);
+            lemma_verified_at_append(t, b, Name::Staging, state.v.ino());
+            if outcome is Removed {
+                assert(u[u.len() - 2] == b[0]);
+                assert(u[u.len() - 1] == b[1]);
+            }
         }
         let result = match outcome {
             Removal::Removed => Ok(()),
             Removal::Left(left) => Err(left),
         };
-        ExchangeDone { result, trace: Ghost(u), run: self.run }
+        ExchangeDone { result, trace: Ghost(u), run: state.run }
     }
 }
 
@@ -458,11 +635,13 @@ pub struct ExchangeDone<E> {
 }
 
 /// X2: the exchange happened, the swapped-out name was verified to hold the
-/// planned inode, and the trace ends with that inode's successful removal.
+/// planned inode, and the trace ends with a probe proving the staging name
+/// holds that inode immediately followed by its successful unlink.
 pub open spec fn exchanged_and_removed(t: Seq<Ev>, v: Option<Ino>) -> bool {
     &&& v is Some
     &&& verified_at(t, Name::Staging, v->Some_0)
-    &&& t.len() > 0
+    &&& t.len() >= 2
+    &&& t[t.len() - 2] == (Ev::Probe { name: Name::Staging, ino: v->Some_0, holds: true })
     &&& t.last() == (Ev::Unlink { name: Name::Staging, ok: true })
 }
 
@@ -515,6 +694,7 @@ impl<E> ExchangeDone<E> {
 pub struct Undo<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -522,7 +702,7 @@ pub struct Undo<I: Identity> {
 impl<I: Identity> Undo<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        state_ok(self.v, self.p, self.trace@, self.run@)
+        state_ok(self.v, self.p, self.own, self.trace@, self.run@)
     }
 }
 
@@ -549,8 +729,6 @@ impl<I: Identity> Undo<I> {
     /// guard is disarmed, so the swapped-out file is kept.
     pub fn after_destination_probe<E>(self, guard: &mut GuardState<I>, holds: bool) -> (r:
         UndoProbed<I, E>)
-        requires
-            old(guard).name() == Name::Staging,
         ensures
             r is ExchangeBack <==> holds,
             r matches UndoProbed::Done(d) ==> d.run() == self.run() && d.verdict()
@@ -571,7 +749,13 @@ impl<I: Identity> Undo<I> {
         }
         if holds {
             UndoProbed::ExchangeBack(
-                UndoExchangeBack { v: self.v, p: self.p, trace: Ghost(u), run: self.run },
+                UndoExchangeBack {
+                    v: self.v,
+                    p: self.p,
+                    own: self.own,
+                    trace: Ghost(u),
+                    run: self.run,
+                },
             )
         } else {
             guard.disarm();
@@ -595,6 +779,7 @@ pub enum UndoProbed<I: Identity, E> {
 pub struct UndoExchangeBack<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -602,7 +787,7 @@ pub struct UndoExchangeBack<I: Identity> {
 impl<I: Identity> UndoExchangeBack<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        &&& state_ok(self.v, self.p, self.trace@, self.run@)
+        &&& state_ok(self.v, self.p, self.own, self.trace@, self.run@)
         &&& self.trace@.len() > 0
         &&& self.trace@.last() == (Ev::Probe { name: Name::Dest, ino: self.p.ino(), holds: true })
     }
@@ -619,8 +804,6 @@ impl<I: Identity> UndoExchangeBack<I> {
     /// is never removed.
     pub fn after_exchange_back<E>(self, guard: &mut GuardState<I>, exchanged: Result<(), E>) -> (r:
         UndoExchangedBack<I, E>)
-        requires
-            old(guard).name() == Name::Staging,
         ensures
             r is ProbeStaging <==> exchanged is Ok,
             r matches UndoExchangedBack::Done(d) ==> d.run() == self.run() && (exchanged matches Err(
@@ -642,7 +825,13 @@ impl<I: Identity> UndoExchangeBack<I> {
         }
         match exchanged {
             Ok(()) => UndoExchangedBack::ProbeStaging(
-                UndoStagingProbe { v: self.v, p: self.p, trace: Ghost(u), run: self.run },
+                UndoStagingProbe {
+                    v: self.v,
+                    p: self.p,
+                    own: self.own,
+                    trace: Ghost(u),
+                    run: self.run,
+                },
             ),
             Err(error) => {
                 guard.disarm();
@@ -672,6 +861,7 @@ pub enum UndoExchangedBack<I: Identity, E> {
 pub struct UndoStagingProbe<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -679,7 +869,7 @@ pub struct UndoStagingProbe<I: Identity> {
 impl<I: Identity> UndoStagingProbe<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        state_ok(self.v, self.p, self.trace@, self.run@)
+        state_ok(self.v, self.p, self.own, self.trace@, self.run@)
     }
 }
 
@@ -702,23 +892,22 @@ impl<I: Identity> UndoStagingProbe<I> {
     }
 
     /// Feed whether the staging name holds this run's file again. Only then
-    /// is the guard's proven removal handed out; otherwise the guard is
-    /// disarmed and the name left alone.
+    /// is the staging guard's removal handed out — entitled to the run's own
+    /// file, the identity the guard was entitled to when the replacement
+    /// started; the guard is disarmed either way, since that removal replaces
+    /// it or the name is left alone.
     pub fn after_staging_probe<E>(self, guard: &mut GuardState<I>, holds: bool) -> (r:
         UndoStagingProbed<I, E>)
-        requires
-            old(guard).name() == Name::Staging,
-            old(guard).ident() == self.run().own,
         ensures
             r is Remove <==> holds,
             r matches UndoStagingProbed::Done(d) ==> d.run() == self.run() && d.verdict()
-                == UndoVerdict::<E>::ReplacementNotHeld && !final(guard).is_armed(),
-            r matches UndoStagingProbed::Remove(x, removal) ==> {
-                &&& x.run() == self.run()
+                == UndoVerdict::<E>::ReplacementNotHeld,
+            r matches UndoStagingProbed::Remove(removal) ==> {
+                &&& removal.then().run() == self.run()
                 &&& removal.name() == Name::Staging
                 &&& removal.ident() == self.run().own
-                &&& !final(guard).is_armed()
             },
+            !final(guard).is_armed(),
             final(guard).name() == old(guard).name(),
             final(guard).ident() == old(guard).ident(),
     {
@@ -731,14 +920,17 @@ impl<I: Identity> UndoStagingProbe<I> {
             lemma_safe_push_observation(t, u.last(), self.run@);
             assert(u == t.push(u.last()));
         }
+        guard.disarm();
         if holds {
-            let removal = guard.take_removal();
-            UndoStagingProbed::Remove(
-                UndoRemove { v: self.v, p: self.p, trace: Ghost(u), run: self.run },
-                removal,
-            )
+            let remove = UndoRemove {
+                v: self.v,
+                p: self.p,
+                own: self.own,
+                trace: Ghost(u),
+                run: self.run,
+            };
+            UndoStagingProbed::Remove(ProvenRemoval::new(self.own, remove))
         } else {
-            guard.disarm();
             UndoStagingProbed::Done(
                 UndoDone {
                     verdict: UndoVerdict::ReplacementNotHeld,
@@ -754,8 +946,9 @@ impl<I: Identity> UndoStagingProbe<I> {
 pub enum UndoStagingProbed<I: Identity, E> {
     /// The staging name was taken; it is left alone.
     Done(UndoDone<E>),
-    /// Remove this run's prepared file through the staging guard.
-    Remove(UndoRemove<I>, ProvenRemoval<I>),
+    /// Remove this run's prepared file from the staging name, then feed the
+    /// result back with `after_removal`.
+    Remove(ProvenRemoval<I, UndoRemove<I>>),
 }
 
 /// An undo waiting for its final proven removal.
@@ -763,6 +956,7 @@ pub enum UndoStagingProbed<I: Identity, E> {
 pub struct UndoRemove<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -770,41 +964,51 @@ pub struct UndoRemove<I: Identity> {
 impl<I: Identity> UndoRemove<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        state_ok(self.v, self.p, self.trace@, self.run@)
+        state_ok(self.v, self.p, self.own, self.trace@, self.run@)
     }
-}
 
-impl<I: Identity> UndoRemove<I> {
     /// The run this replacement acts for.
     pub closed spec fn run(&self) -> Run {
         self.run@
     }
+}
 
-    /// Feed the removal handed out with this state.
-    pub fn after_removal<E>(self, removal: RemovalDone<E>) -> (d: UndoDone<E>)
-        requires
-            removal.name() == Name::Staging,
-            removal.ident() == self.run().own,
+impl<I: Identity> AwaitsRemoval for UndoRemove<I> {
+    closed spec fn removal_name(&self) -> Name {
+        Name::Staging
+    }
+
+    closed spec fn removal_ident(&self) -> Option<Ino> {
+        self.run@.own
+    }
+}
+
+impl<I: Identity, E> RemovalDone<E, UndoRemove<I>> {
+    /// Feed back the removal of this run's file from the staging name.
+    pub fn after_removal(self) -> (d: UndoDone<E>)
         ensures
-            d.run() == self.run(),
-            d.verdict() is Undone <==> removal.outcome() is Removed,
-            removal.outcome() matches Removal::Left(l) ==> d.verdict()
+            d.run() == self.then().run(),
+            d.verdict() is Undone <==> self.outcome() is Removed,
+            self.outcome() matches Removal::Left(l) ==> d.verdict()
                 == UndoVerdict::ReplacementNotRemoved(l),
     {
+        let ghost b = self.trace();
+        let (state, outcome) = self.into_parts();
         proof {
-            use_type_invariant(&self);
+            use_type_invariant(&state);
         }
-        let ghost t = self.trace@;
-        let ghost b = removal.trace();
-        let outcome = removal.into_outcome();
+        let ghost t = state.trace@;
         proof {
-            lemma_safe_append_removal(t, b, Name::Staging, self.run@.own, outcome, self.run@);
+            lemma_safe_append_removal(t, b, Name::Staging, state.run@.own, outcome, state.run@);
+            if outcome is Removed {
+                assert((t + b).last() == b[1]);
+            }
         }
         let verdict = match outcome {
             Removal::Removed => UndoVerdict::Undone,
             Removal::Left(left) => UndoVerdict::ReplacementNotRemoved(left),
         };
-        UndoDone { verdict, trace: Ghost(t + b), run: self.run }
+        UndoDone { verdict, trace: Ghost(t + b), run: state.run }
     }
 }
 
@@ -886,6 +1090,7 @@ impl<E> UndoDone<E> {
 pub struct Reprove<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -893,7 +1098,7 @@ pub struct Reprove<I: Identity> {
 impl<I: Identity> Reprove<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        &&& state_ok(self.v, self.p, self.trace@, self.run@)
+        &&& state_ok(self.v, self.p, self.own, self.trace@, self.run@)
         &&& self.trace@ == verified_prefix(self.v.ino()).push(
             Ev::Exchange { res: Res::Unsupported },
         )
@@ -923,7 +1128,13 @@ impl<I: Identity> Reprove<I> {
             lemma_safe_push_observation(t, e0, self.run@);
             lemma_safe_push_observation(t.push(e0), e1, self.run@);
         }
-        Aside { v: self.v, p: self.p, trace: Ghost(t.push(e0).push(e1)), run: self.run }
+        Aside {
+            v: self.v,
+            p: self.p,
+            own: self.own,
+            trace: Ghost(t.push(e0).push(e1)),
+            run: self.run,
+        }
     }
 }
 
@@ -933,6 +1144,7 @@ impl<I: Identity> Reprove<I> {
 pub struct Aside<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -944,10 +1156,45 @@ pub open spec fn aside_prefix(v: Ino) -> Seq<Ev> {
     ).push(Ev::PinnedMatches { holds: true })
 }
 
+/// The trace of a displacement right after the destination was moved aside
+/// and the displaced name was identified as `v`.
+pub open spec fn lstat_prefix(v: Ino) -> Seq<Ev> {
+    aside_prefix(v).push(Ev::RenameAside { ok: true }).push(
+        Ev::Lstat { name: Name::Displaced, found: Some(v) },
+    )
+}
+
+/// The trace of a displacement whose displaced planned file was verified
+/// intact: what the publication of the replacement starts from.
+pub open spec fn publish_prefix(v: Ino) -> Seq<Ev> {
+    lstat_prefix(v).push(Ev::PinnedMatches { holds: true })
+}
+
+proof fn lemma_quiet_aside_prefix(v: Ino)
+    ensures
+        quiet(aside_prefix(v)),
+        quiet(aside_prefix(v).push(Ev::RenameAside { ok: true })),
+        quiet(lstat_prefix(v)),
+        quiet(publish_prefix(v)),
+{
+    lemma_quiet_verified_prefix(v);
+    let a = verified_prefix(v).push(Ev::Exchange { res: Res::Unsupported });
+    lemma_quiet_push(verified_prefix(v), Ev::Exchange { res: Res::Unsupported });
+    let b = a.push(Ev::Probe { name: Name::Dest, ino: v, holds: true });
+    lemma_quiet_push(a, Ev::Probe { name: Name::Dest, ino: v, holds: true });
+    lemma_quiet_push(b, Ev::PinnedMatches { holds: true });
+    lemma_quiet_push(aside_prefix(v), Ev::RenameAside { ok: true });
+    lemma_quiet_push(
+        aside_prefix(v).push(Ev::RenameAside { ok: true }),
+        Ev::Lstat { name: Name::Displaced, found: Some(v) },
+    );
+    lemma_quiet_push(lstat_prefix(v), Ev::PinnedMatches { holds: true });
+}
+
 impl<I: Identity> Aside<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        &&& state_ok(self.v, self.p, self.trace@, self.run@)
+        &&& state_ok(self.v, self.p, self.own, self.trace@, self.run@)
         &&& self.trace@ == aside_prefix(self.v.ino())
     }
 }
@@ -960,6 +1207,13 @@ impl<I: Identity> Aside<I> {
 
     /// Feed the answer to `renameat(Dest, Displaced)`. On success the
     /// displaced name gets a guard entitled to the planned inode.
+    ///
+    /// The guard is armed from here on, before the displaced entry has been
+    /// identified as `v`, as waft's guard always was: an unwinding panic before
+    /// the verdict would let its `Drop` remove `v` from the displaced name
+    /// while the destination name is vacant. That path is outside the model
+    /// (Verus does not model unwinding) and outside `safe`, whose entitlement
+    /// for the displaced name starts only at `verified_at`.
     pub fn after_rename_aside<E>(self, moved: Result<(), E>) -> (r: Result<
         (Lstat<I>, GuardState<I>),
         E,
@@ -985,7 +1239,14 @@ impl<I: Identity> Aside<I> {
                     lemma_safe_push(t, e, self.run@);
                 }
                 let guard = GuardState::displaced(self.v);
-                Ok((Lstat { v: self.v, p: self.p, trace: Ghost(t.push(e)), run: self.run }, guard))
+                let lstat = Lstat {
+                    v: self.v,
+                    p: self.p,
+                    own: self.own,
+                    trace: Ghost(t.push(e)),
+                    run: self.run,
+                };
+                Ok((lstat, guard))
             },
             Err(error) => Err(error),
         }
@@ -998,6 +1259,7 @@ impl<I: Identity> Aside<I> {
 pub struct Lstat<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -1005,7 +1267,7 @@ pub struct Lstat<I: Identity> {
 impl<I: Identity> Lstat<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        &&& state_ok(self.v, self.p, self.trace@, self.run@)
+        &&& state_ok(self.v, self.p, self.own, self.trace@, self.run@)
         &&& self.trace@ == aside_prefix(self.v.ino()).push(Ev::RenameAside { ok: true })
     }
 }
@@ -1022,21 +1284,18 @@ impl<I: Identity> Lstat<I> {
         I,
         E,
     >)
-        requires
-            old(displaced).name() == Name::Displaced,
         ensures
             r matches Lstated::Done(d) ==> {
                 &&& d.run() == self.run()
                 &&& (found matches Err(e) && d.verdict() == DisplaceVerdict::<E>::ReadBackFailed(e))
                 &&& !final(displaced).is_armed()
             },
-            r matches Lstated::Restore(x, restore) ==> {
+            r matches Lstated::Restore(restore) ==> {
                 &&& found matches Ok(d)
                 &&& d.ino() != self.run().verified->Some_0
-                &&& x.run() == self.run()
+                &&& restore.then().run() == self.run()
                 &&& restore.from() == Name::Displaced
                 &&& restore.ident() == Some(d.ino())
-                &&& x.found() == d.ino()
                 &&& !final(displaced).is_armed()
             },
             r matches Lstated::Pinned(x) ==> {
@@ -1050,6 +1309,7 @@ impl<I: Identity> Lstat<I> {
     {
         proof {
             use_type_invariant(&self);
+            lemma_quiet_aside_prefix(self.v.ino());
         }
         let ghost t = self.trace@;
         match found {
@@ -1058,6 +1318,9 @@ impl<I: Identity> Lstat<I> {
                 proof {
                     lemma_safe_push_observation(t, u.last(), self.run@);
                     assert(u == t.push(u.last()));
+                    lemma_quiet_push(t, u.last());
+                    lemma_quiet_names(u, Name::Staging);
+                    lemma_quiet_names(u, Name::Displaced);
                 }
                 displaced.disarm();
                 Lstated::Done(
@@ -1073,17 +1336,30 @@ impl<I: Identity> Lstat<I> {
                 proof {
                     lemma_safe_push_observation(t, u.last(), self.run@);
                     assert(u == t.push(u.last()));
+                    lemma_quiet_push(t, u.last());
                 }
                 if d.same_inode(&self.v) {
                     Lstated::Pinned(
-                        DisplacedPinned { v: self.v, p: self.p, d, trace: Ghost(u), run: self.run },
+                        DisplacedPinned {
+                            v: self.v,
+                            p: self.p,
+                            own: self.own,
+                            d,
+                            trace: Ghost(u),
+                            run: self.run,
+                        },
                     )
                 } else {
                     displaced.disarm();
-                    Lstated::Restore(
-                        Restore { v: self.v, p: self.p, d, trace: Ghost(u), run: self.run },
-                        NoReplace::new(Some(d), Ghost(Name::Displaced)),
-                    )
+                    let restore = Restore {
+                        v: self.v,
+                        p: self.p,
+                        own: self.own,
+                        d,
+                        trace: Ghost(u),
+                        run: self.run,
+                    };
+                    Lstated::Restore(NoReplace::new(Some(d), restore))
                 }
             },
         }
@@ -1095,8 +1371,9 @@ pub enum Lstated<I: Identity, E> {
     /// The displaced name could not be read back.
     Done(DisplaceDone<E>),
     /// Something other than the planned inode was displaced: put it back
-    /// with a no-clobber publication, then report.
-    Restore(Restore<I>, NoReplace<I>),
+    /// with a no-clobber publication, then feed the result back with
+    /// `after_restore`.
+    Restore(NoReplace<I, Restore<I>>),
     /// The planned inode was displaced: check its bytes.
     Pinned(DisplacedPinned<I>),
 }
@@ -1107,6 +1384,7 @@ pub enum Lstated<I: Identity, E> {
 pub struct DisplacedPinned<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     d: I,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
@@ -1115,11 +1393,9 @@ pub struct DisplacedPinned<I: Identity> {
 impl<I: Identity> DisplacedPinned<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        &&& state_ok(self.v, self.p, self.trace@, self.run@)
+        &&& state_ok(self.v, self.p, self.own, self.trace@, self.run@)
         &&& self.d.ino() == self.v.ino()
-        &&& self.trace@ == aside_prefix(self.v.ino()).push(Ev::RenameAside { ok: true }).push(
-            Ev::Lstat { name: Name::Displaced, found: Some(self.v.ino()) },
-        )
+        &&& self.trace@ == lstat_prefix(self.v.ino())
     }
 }
 
@@ -1131,26 +1407,21 @@ impl<I: Identity> DisplacedPinned<I> {
 
     /// Feed whether the pinned descriptor still reads back as planned. If it
     /// does, the replacement is published next (entitled to clean up the
-    /// staging guard's identity); otherwise the displaced file is put back.
-    pub fn after_pinned(self, guard: &GuardState<I>, displaced: &mut GuardState<I>, matches: bool) -> (r:
+    /// run's own staging file); otherwise the displaced file is put back.
+    pub fn after_pinned(self, displaced: &mut GuardState<I>, matches: bool) -> (r:
         DisplacedChecked<I>)
-        requires
-            guard.name() == Name::Staging,
-            guard.ident() == self.run().own,
-            old(displaced).name() == Name::Displaced,
         ensures
             r is Publish <==> matches,
-            r matches DisplacedChecked::Publish(x, publish) ==> {
-                &&& x.run() == self.run()
+            r matches DisplacedChecked::Publish(publish) ==> {
+                &&& publish.then().run() == self.run()
                 &&& publish.from() == Name::Staging
                 &&& publish.ident() == self.run().own
                 &&& *final(displaced) == *old(displaced)
             },
-            r matches DisplacedChecked::Restore(x, restore) ==> {
-                &&& x.run() == self.run()
+            r matches DisplacedChecked::Restore(restore) ==> {
+                &&& restore.then().run() == self.run()
                 &&& restore.from() == Name::Displaced
                 &&& restore.ident() == self.run().verified
-                &&& x.found() == self.run().verified->Some_0
                 &&& !final(displaced).is_armed()
             },
             final(displaced).name() == old(displaced).name(),
@@ -1158,37 +1429,47 @@ impl<I: Identity> DisplacedPinned<I> {
     {
         proof {
             use_type_invariant(&self);
+            lemma_quiet_aside_prefix(self.v.ino());
         }
         let ghost t = self.trace@;
         let ghost u = t.push(Ev::PinnedMatches { holds: matches });
         proof {
             lemma_safe_push_observation(t, u.last(), self.run@);
             assert(u == t.push(u.last()));
+            lemma_quiet_push(t, u.last());
         }
         if matches {
-            proof {
-                assert(moved_then_verified(u, 5, Name::Displaced, self.v.ino()));
-            }
-            DisplacedChecked::Publish(
-                Publish { v: self.v, p: self.p, trace: Ghost(u), run: self.run },
-                NoReplace::new(guard.identity(), Ghost(Name::Staging)),
-            )
+            let publish = Publish {
+                v: self.v,
+                p: self.p,
+                own: self.own,
+                trace: Ghost(u),
+                run: self.run,
+            };
+            DisplacedChecked::Publish(NoReplace::new(self.own, publish))
         } else {
             displaced.disarm();
-            DisplacedChecked::Restore(
-                Restore { v: self.v, p: self.p, d: self.d, trace: Ghost(u), run: self.run },
-                NoReplace::new(Some(self.d), Ghost(Name::Displaced)),
-            )
+            let restore = Restore {
+                v: self.v,
+                p: self.p,
+                own: self.own,
+                d: self.d,
+                trace: Ghost(u),
+                run: self.run,
+            };
+            DisplacedChecked::Restore(NoReplace::new(Some(self.d), restore))
         }
     }
 }
 
 /// After checking the displaced planned inode's bytes.
 pub enum DisplacedChecked<I: Identity> {
-    /// It is intact: publish the replacement onto the vacated name.
-    Publish(Publish<I>, NoReplace<I>),
-    /// It was rewritten in place: put it back.
-    Restore(Restore<I>, NoReplace<I>),
+    /// It is intact: publish the replacement onto the vacated name, then feed
+    /// the result back with `after_publish`.
+    Publish(NoReplace<I, Publish<I>>),
+    /// It was rewritten in place: put it back, then feed the result back with
+    /// `after_restore`.
+    Restore(NoReplace<I, Restore<I>>),
 }
 
 /// A displaced file that is not the planned one (or not with the planned
@@ -1197,6 +1478,7 @@ pub enum DisplacedChecked<I: Identity> {
 pub struct Restore<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     d: I,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
@@ -1205,11 +1487,10 @@ pub struct Restore<I: Identity> {
 impl<I: Identity> Restore<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        state_ok(self.v, self.p, self.trace@, self.run@)
+        &&& state_ok(self.v, self.p, self.own, self.trace@, self.run@)
+        &&& quiet(self.trace@)
     }
-}
 
-impl<I: Identity> Restore<I> {
     /// The run this replacement acts for.
     pub closed spec fn run(&self) -> Run {
         self.run@
@@ -1219,38 +1500,52 @@ impl<I: Identity> Restore<I> {
     pub closed spec fn found(&self) -> Ino {
         self.d.ino()
     }
+}
 
-    /// Feed the restore handed out with this state.
-    pub fn after_restore<E>(self, restore: NoReplaceDone<E>) -> (d: DisplaceDone<E>)
-        requires
-            restore.from() == Name::Displaced,
-            restore.ident() == Some(self.found()),
+impl<I: Identity> AwaitsPublication for Restore<I> {
+    closed spec fn publication_from(&self) -> Name {
+        Name::Displaced
+    }
+
+    closed spec fn publication_ident(&self) -> Option<Ino> {
+        Some(self.d.ino())
+    }
+}
+
+impl<I: Identity, E> NoReplaceDone<E, Restore<I>> {
+    /// Feed back the restore of a displaced file that was not the planned
+    /// one.
+    pub fn after_restore(self) -> (d: DisplaceDone<E>)
         ensures
-            d.run() == self.run(),
-            restore.result() == Ok::<Published<E>, E>(Published::Consumed) ==> d.verdict()
+            d.run() == self.then().run(),
+            self.result() == Ok::<Published<E>, E>(Published::Consumed) ==> d.verdict()
                 == DisplaceVerdict::<E>::RestoredUntouched,
-            restore.result() matches Ok(Published::LeftBehind(l)) ==> d.verdict()
+            self.result() matches Ok(Published::LeftBehind(l)) ==> d.verdict()
                 == DisplaceVerdict::RestoredLeftBehind(l),
-            restore.result() matches Err(e) ==> d.verdict() == DisplaceVerdict::RestoreFailed(e),
+            self.result() matches Err(e) ==> d.verdict() == DisplaceVerdict::RestoreFailed(e),
     {
+        let ghost b = self.trace();
+        let ghost ident = self.ident();
+        let (state, result) = self.into_parts();
         proof {
-            use_type_invariant(&self);
+            use_type_invariant(&state);
         }
-        let ghost t = self.trace@;
-        let ghost b = restore.trace();
-        let ghost ident = restore.ident();
-        let result = restore.into_result();
+        let ghost t = state.trace@;
         proof {
-            lemma_safe_append_noreplace(t, b, Name::Displaced, ident, result, self.run@);
+            lemma_safe_append_noreplace(t, b, Name::Displaced, ident, result, state.run@);
             crate::publish::noreplace::theorem_noreplace(b, Name::Displaced, ident, result);
-            lemma_published_append(t, b, Name::Displaced);
+            lemma_names_append(t, b, Name::Staging);
+            lemma_names_append(t, b, Name::Displaced);
+            lemma_quiet_names(t, Name::Staging);
+            lemma_quiet_names(t, Name::Displaced);
+            lemma_noreplace_names(b, Name::Displaced, ident, result, Name::Staging);
         }
         let verdict = match result {
             Ok(Published::Consumed) => DisplaceVerdict::RestoredUntouched,
             Ok(Published::LeftBehind(left)) => DisplaceVerdict::RestoredLeftBehind(left),
             Err(error) => DisplaceVerdict::RestoreFailed(error),
         };
-        DisplaceDone { verdict, trace: Ghost(t + b), run: self.run }
+        DisplaceDone { verdict, trace: Ghost(t + b), run: state.run }
     }
 }
 
@@ -1260,6 +1555,7 @@ impl<I: Identity> Restore<I> {
 pub struct Publish<I: Identity> {
     v: I,
     p: I,
+    own: Option<I>,
     trace: Ghost<Seq<Ev>>,
     run: Ghost<Run>,
 }
@@ -1267,45 +1563,49 @@ pub struct Publish<I: Identity> {
 impl<I: Identity> Publish<I> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
-        &&& state_ok(self.v, self.p, self.trace@, self.run@)
-        &&& verified_at(self.trace@, Name::Displaced, self.v.ino())
+        &&& state_ok(self.v, self.p, self.own, self.trace@, self.run@)
+        &&& self.trace@ == publish_prefix(self.v.ino())
     }
-}
 
-impl<I: Identity> Publish<I> {
     /// The run this replacement acts for.
     pub closed spec fn run(&self) -> Run {
         self.run@
     }
+}
 
-    /// Feed the publication handed out with this state. Published: the
-    /// staging guard is disarmed (its name is consumed or reported by the
-    /// publication) and the displaced planned file's proven removal is handed
-    /// out. Not published: the displaced file is put back.
-    pub fn after_publish<E>(
-        self,
-        guard: &mut GuardState<I>,
-        displaced: &mut GuardState<I>,
-        publication: NoReplaceDone<E>,
-    ) -> (r: PublishedStep<I, E>)
-        requires
-            publication.from() == Name::Staging,
-            publication.ident() == self.run().own,
-            old(displaced).name() == Name::Displaced,
-            old(displaced).ident() == self.run().verified,
+impl<I: Identity> AwaitsPublication for Publish<I> {
+    closed spec fn publication_from(&self) -> Name {
+        Name::Staging
+    }
+
+    closed spec fn publication_ident(&self) -> Option<Ino> {
+        self.run@.own
+    }
+}
+
+impl<I: Identity, E> NoReplaceDone<E, Publish<I>> {
+    /// Feed back the publication of the replacement. Published: the staging
+    /// guard is disarmed (its name is consumed or reported by the
+    /// publication), the displaced guard is disarmed, and the kernel's proven
+    /// removal of the displaced planned file is handed out. Not published:
+    /// the displaced file is put back, and both guards are left as they were.
+    pub fn after_publish(self, guard: &mut GuardState<I>, displaced: &mut GuardState<I>) -> (r:
+        PublishedStep<I, E>)
         ensures
-            r is Cleanup <==> publication.result() is Ok,
-            r matches PublishedStep::Cleanup(x, removal) ==> {
-                &&& x.run() == self.run()
+            r is Cleanup <==> self.result() is Ok,
+            r matches PublishedStep::Cleanup(removal) ==> {
+                &&& removal.then().run() == self.then().run()
+                &&& self.result() == Ok::<Published<E>, E>(removal.then().staging())
                 &&& removal.name() == Name::Displaced
-                &&& removal.ident() == self.run().verified
+                &&& removal.ident() == self.then().run().verified
                 &&& !final(guard).is_armed()
                 &&& !final(displaced).is_armed()
             },
-            r matches PublishedStep::Restore(x, restore) ==> {
-                &&& x.run() == self.run()
+            r matches PublishedStep::Restore(restore) ==> {
+                &&& restore.then().run() == self.then().run()
+                &&& self.result() == Err::<Published<E>, E>(restore.then().publish_error())
                 &&& restore.from() == Name::Displaced
-                &&& restore.ident() == self.run().verified
+                &&& restore.ident() == self.then().run().verified
                 &&& *final(guard) == *old(guard)
                 &&& *final(displaced) == *old(displaced)
             },
@@ -1314,48 +1614,55 @@ impl<I: Identity> Publish<I> {
             final(displaced).name() == old(displaced).name(),
             final(displaced).ident() == old(displaced).ident(),
     {
+        let ghost b = self.trace();
+        let ghost ident = self.ident();
+        let (state, result) = self.into_parts();
         proof {
-            use_type_invariant(&self);
+            use_type_invariant(&state);
         }
-        let ghost t = self.trace@;
-        let ghost b = publication.trace();
-        let ghost ident = publication.ident();
-        let result = publication.into_result();
+        let ghost t = state.trace@;
+        let ghost u = t + b;
         proof {
-            lemma_safe_append_noreplace(t, b, Name::Staging, ident, result, self.run@);
+            lemma_quiet_aside_prefix(state.v.ino());
+            lemma_safe_append_noreplace(t, b, Name::Staging, ident, result, state.run@);
             crate::publish::noreplace::theorem_noreplace(b, Name::Staging, ident, result);
-            lemma_published_append(t, b, Name::Staging);
-            lemma_verified_at_append(t, b, Name::Displaced, self.v.ino());
+            assert(moved_then_verified(t, 5, Name::Displaced, state.v.ino()));
+            lemma_verified_at_append(t, b, Name::Displaced, state.v.ino());
+            lemma_names_append(t, b, Name::Staging);
+            lemma_names_append(t, b, Name::Displaced);
+            lemma_quiet_names(t, Name::Staging);
+            lemma_quiet_names(t, Name::Displaced);
+            lemma_noreplace_names(b, Name::Staging, ident, result, Name::Displaced);
         }
         match result {
             Ok(staging) => {
                 guard.disarm();
-                let removal = displaced.take_removal();
-                let ghost v = self.v.ino();
-                PublishedStep::Cleanup(
-                    Cleanup { v: Ghost(v), staging, trace: Ghost(t + b), run: self.run },
-                    removal,
-                )
+                displaced.disarm();
+                let ghost v = state.v.ino();
+                let cleanup = Cleanup { v: Ghost(v), staging, trace: Ghost(u), run: state.run };
+                PublishedStep::Cleanup(ProvenRemoval::new(Some(state.v), cleanup))
             },
-            Err(error) => PublishedStep::Restore(
-                RestoreAfterFailure {
-                    v: self.v,
+            Err(error) => {
+                let restore = RestoreAfterFailure {
+                    v: state.v,
                     publish_error: error,
-                    trace: Ghost(t + b),
-                    run: self.run,
-                },
-                NoReplace::new(Some(self.v), Ghost(Name::Displaced)),
-            ),
+                    trace: Ghost(u),
+                    run: state.run,
+                };
+                PublishedStep::Restore(NoReplace::new(Some(state.v), restore))
+            },
         }
     }
 }
 
 /// After the publication of the replacement.
 pub enum PublishedStep<I: Identity, E> {
-    /// Published: remove the displaced planned file, then report.
-    Cleanup(Cleanup<E>, ProvenRemoval<I>),
-    /// Not published: put the displaced file back, then report.
-    Restore(RestoreAfterFailure<I, E>, NoReplace<I>),
+    /// Published: remove the displaced planned file, then feed the result
+    /// back with `after_removal`.
+    Cleanup(ProvenRemoval<I, Cleanup<E>>),
+    /// Not published: put the displaced file back, then feed the result back
+    /// with `after_restore`.
+    Restore(NoReplace<I, RestoreAfterFailure<I, E>>),
 }
 
 /// The replacement is published; waiting for the proven removal of the
@@ -1375,6 +1682,8 @@ impl<E> Cleanup<E> {
         &&& self.run@.verified == Some(self.v@)
         &&& verified_at(self.trace@, Name::Displaced, self.v@)
         &&& published(self.trace@, Name::Staging)
+        &&& (self.staging is Consumed <==> consumed(self.trace@, Name::Staging))
+        &&& !consumed(self.trace@, Name::Displaced)
     }
 
     /// The run this replacement acts for.
@@ -1382,29 +1691,60 @@ impl<E> Cleanup<E> {
         self.run@
     }
 
-    /// Feed the removal handed out with this state. Both cleanups matter: the
-    /// displaced original may hold secrets, and a surviving staging name may
-    /// belong to another writer.
-    pub fn after_removal(self, removal: RemovalDone<E>) -> (d: DisplaceDone<E>)
-        requires
-            removal.name() == Name::Displaced,
-            removal.ident() == self.run().verified,
+    /// What the publication left under the staging name.
+    pub closed spec fn staging(&self) -> Published<E> {
+        self.staging
+    }
+}
+
+impl<E> AwaitsRemoval for Cleanup<E> {
+    closed spec fn removal_name(&self) -> Name {
+        Name::Displaced
+    }
+
+    closed spec fn removal_ident(&self) -> Option<Ino> {
+        self.run@.verified
+    }
+}
+
+impl<E> RemovalDone<E, Cleanup<E>> {
+    /// Feed back the removal of the displaced planned file. Both cleanups
+    /// matter: the displaced original may hold secrets, and a surviving
+    /// staging name may belong to another writer.
+    pub fn after_removal(self) -> (d: DisplaceDone<E>)
         ensures
-            d.run() == self.run(),
-            d.verdict() is Replaced <==> (removal.outcome() is Removed && self.staging() is Consumed),
+            d.run() == self.then().run(),
+            published_verdict(d.verdict()),
+            displaced_left(d.verdict()) == left_of(self.outcome()),
+            staging_left(d.verdict()) == left_behind(self.then().staging()),
     {
+        let ghost b = self.trace();
+        let (state, outcome) = self.into_parts();
         proof {
-            use_type_invariant(&self);
+            use_type_invariant(&state);
         }
-        let ghost t = self.trace@;
-        let ghost b = removal.trace();
-        let outcome = removal.into_outcome();
+        let ghost t = state.trace@;
+        let ghost u = t + b;
         proof {
-            lemma_safe_append_removal(t, b, Name::Displaced, self.run@.verified, outcome, self.run@);
-            lemma_verified_at_append(t, b, Name::Displaced, self.v@);
-            lemma_published_append(t, b, Name::Staging);
+            lemma_safe_append_removal(
+                t,
+                b,
+                Name::Displaced,
+                state.run@.verified,
+                outcome,
+                state.run@,
+            );
+            lemma_verified_at_append(t, b, Name::Displaced, state.v@);
+            lemma_names_append(t, b, Name::Staging);
+            lemma_names_append(t, b, Name::Displaced);
+            lemma_removal_names(b, Name::Displaced, state.run@.verified, outcome, Name::Staging);
+            lemma_removal_names(b, Name::Displaced, state.run@.verified, outcome, Name::Displaced);
+            if outcome is Removed {
+                assert(u[u.len() - 2] == b[0]);
+                assert(u[u.len() - 1] == b[1]);
+            }
         }
-        let verdict = match (outcome, self.staging) {
+        let verdict = match (outcome, state.staging) {
             (Removal::Removed, Published::Consumed) => DisplaceVerdict::Replaced,
             (Removal::Left(displaced), Published::Consumed) => DisplaceVerdict::DisplacedLeft(
                 displaced,
@@ -1416,12 +1756,7 @@ impl<E> Cleanup<E> {
                 DisplaceVerdict::BothLeft { displaced: displaced_left, staging: staging_left }
             },
         };
-        DisplaceDone { verdict, trace: Ghost(t + b), run: self.run }
-    }
-
-    /// What the publication left under the staging name.
-    pub closed spec fn staging(&self) -> Published<E> {
-        self.staging
+        DisplaceDone { verdict, trace: Ghost(u), run: state.run }
     }
 }
 
@@ -1440,37 +1775,54 @@ impl<I: Identity, E> RestoreAfterFailure<I, E> {
     closed spec fn inv(&self) -> bool {
         &&& safe(self.trace@, self.run@)
         &&& self.run@.verified == Some(self.v.ino())
+        &&& !published(self.trace@, Name::Staging)
+        &&& !consumed(self.trace@, Name::Displaced)
     }
-}
 
-impl<I: Identity, E> RestoreAfterFailure<I, E> {
     /// The run this replacement acts for.
     pub closed spec fn run(&self) -> Run {
         self.run@
     }
 
-    /// Feed the restore handed out with this state. Restored: the displaced
-    /// guard is disarmed (its name was consumed or is reported) and the
-    /// staging guard stays armed, since the replacement was never published.
-    /// Not restored: both are disarmed and both files are kept.
-    pub fn after_restore(
-        self,
-        guard: &mut GuardState<I>,
-        displaced: &mut GuardState<I>,
-        restore: NoReplaceDone<E>,
-    ) -> (d: DisplaceDone<E>)
-        requires
-            restore.from() == Name::Displaced,
-            restore.ident() == self.run().verified,
+    /// Why the replacement could not be published.
+    pub closed spec fn publish_error(&self) -> E {
+        self.publish_error
+    }
+}
+
+impl<I: Identity, E> AwaitsPublication for RestoreAfterFailure<I, E> {
+    closed spec fn publication_from(&self) -> Name {
+        Name::Displaced
+    }
+
+    closed spec fn publication_ident(&self) -> Option<Ino> {
+        self.run@.verified
+    }
+}
+
+impl<I: Identity, E> NoReplaceDone<E, RestoreAfterFailure<I, E>> {
+    /// Feed back the restore of the displaced planned file after the
+    /// replacement could not be published. Restored: the displaced guard is
+    /// disarmed (its name was consumed or is reported) and the staging guard
+    /// stays armed, since the replacement was never published. Not restored:
+    /// both are disarmed and both files are kept.
+    pub fn after_restore(self, guard: &mut GuardState<I>, displaced: &mut GuardState<I>) -> (d:
+        DisplaceDone<E>)
         ensures
-            d.run() == self.run(),
-            restore.result() is Ok ==> {
-                &&& d.verdict() is PublishFailedRestored
+            d.run() == self.then().run(),
+            self.result() matches Ok(p) ==> {
+                &&& d.verdict() == DisplaceVerdict::PublishFailedRestored {
+                    publish: self.then().publish_error(),
+                    left: left_behind(p),
+                }
                 &&& !final(displaced).is_armed()
                 &&& *final(guard) == *old(guard)
             },
-            restore.result() is Err ==> {
-                &&& d.verdict() is PublishFailedStranded
+            self.result() matches Err(e) ==> {
+                &&& d.verdict() == DisplaceVerdict::PublishFailedStranded {
+                    publish: self.then().publish_error(),
+                    restore: e,
+                }
                 &&& !final(displaced).is_armed()
                 &&& !final(guard).is_armed()
             },
@@ -1479,17 +1831,19 @@ impl<I: Identity, E> RestoreAfterFailure<I, E> {
             final(displaced).name() == old(displaced).name(),
             final(displaced).ident() == old(displaced).ident(),
     {
+        let ghost b = self.trace();
+        let ghost ident = self.ident();
+        let (state, result) = self.into_parts();
         proof {
-            use_type_invariant(&self);
+            use_type_invariant(&state);
         }
-        let ghost t = self.trace@;
-        let ghost b = restore.trace();
-        let ghost ident = restore.ident();
-        let result = restore.into_result();
+        let ghost t = state.trace@;
         proof {
-            lemma_safe_append_noreplace(t, b, Name::Displaced, ident, result, self.run@);
+            lemma_safe_append_noreplace(t, b, Name::Displaced, ident, result, state.run@);
             crate::publish::noreplace::theorem_noreplace(b, Name::Displaced, ident, result);
-            lemma_published_append(t, b, Name::Displaced);
+            lemma_names_append(t, b, Name::Staging);
+            lemma_names_append(t, b, Name::Displaced);
+            lemma_noreplace_names(b, Name::Displaced, ident, result, Name::Staging);
         }
         let verdict = match result {
             Ok(restored) => {
@@ -1498,18 +1852,18 @@ impl<I: Identity, E> RestoreAfterFailure<I, E> {
                     Published::Consumed => None,
                     Published::LeftBehind(left) => Some(left),
                 };
-                DisplaceVerdict::PublishFailedRestored { publish: self.publish_error, left }
+                DisplaceVerdict::PublishFailedRestored { publish: state.publish_error, left }
             },
             Err(restore_error) => {
                 guard.disarm();
                 displaced.disarm();
                 DisplaceVerdict::PublishFailedStranded {
-                    publish: self.publish_error,
+                    publish: state.publish_error,
                     restore: restore_error,
                 }
             },
         };
-        DisplaceDone { verdict, trace: Ghost(t + b), run: self.run }
+        DisplaceDone { verdict, trace: Ghost(t + b), run: state.run }
     }
 }
 
@@ -1540,6 +1894,69 @@ pub enum DisplaceVerdict<E> {
     PublishFailedStranded { publish: E, restore: E },
 }
 
+/// Why a proven removal left its name, if it did.
+pub open spec fn left_of<E>(r: Removal<E>) -> Option<Leftover<E>> {
+    match r {
+        Removal::Removed => None,
+        Removal::Left(l) => Some(l),
+    }
+}
+
+/// Why a no-clobber publication left the name it published from, if it did.
+pub open spec fn left_behind<E>(p: Published<E>) -> Option<Leftover<E>> {
+    match p {
+        Published::Consumed => None,
+        Published::LeftBehind(l) => Some(l),
+    }
+}
+
+/// The verdict reports a published replacement.
+pub open spec fn published_verdict<E>(v: DisplaceVerdict<E>) -> bool {
+    v is Replaced || v is DisplacedLeft || v is StagingLeft || v is BothLeft
+}
+
+/// What the verdict says was left under the displaced name after a
+/// publication.
+pub open spec fn displaced_left<E>(v: DisplaceVerdict<E>) -> Option<Leftover<E>> {
+    match v {
+        DisplaceVerdict::DisplacedLeft(l) => Some(l),
+        DisplaceVerdict::BothLeft { displaced, .. } => Some(displaced),
+        _ => None,
+    }
+}
+
+/// What the verdict says was left under the staging name after a
+/// publication.
+pub open spec fn staging_left<E>(v: DisplaceVerdict<E>) -> Option<Leftover<E>> {
+    match v {
+        DisplaceVerdict::StagingLeft(l) => Some(l),
+        DisplaceVerdict::BothLeft { staging, .. } => Some(staging),
+        _ => None,
+    }
+}
+
+/// D5: the verdict says exactly which names the trace consumed — whether the
+/// replacement was published at all, whether the staging name is gone after a
+/// publication, and whether the displaced name is gone.
+pub open spec fn names_left<E>(v: DisplaceVerdict<E>, t: Seq<Ev>) -> bool {
+    let staged = published(t, Name::Staging);
+    let staging_gone = consumed(t, Name::Staging);
+    let displaced_gone = consumed(t, Name::Displaced);
+    match v {
+        DisplaceVerdict::Replaced => staged && staging_gone && displaced_gone,
+        DisplaceVerdict::DisplacedLeft(_) => staged && staging_gone && !displaced_gone,
+        DisplaceVerdict::StagingLeft(_) => staged && !staging_gone && displaced_gone,
+        DisplaceVerdict::BothLeft { .. } => staged && !staging_gone && !displaced_gone,
+        DisplaceVerdict::ReadBackFailed(_) => !staged && !displaced_gone,
+        DisplaceVerdict::RestoredUntouched => !staged && displaced_gone,
+        DisplaceVerdict::RestoredLeftBehind(_) => !staged && !displaced_gone,
+        DisplaceVerdict::RestoreFailed(_) => !staged && !displaced_gone,
+        DisplaceVerdict::PublishFailedRestored { left, .. } => !staged && (left is None
+            <==> displaced_gone),
+        DisplaceVerdict::PublishFailedStranded { .. } => !staged && !displaced_gone,
+    }
+}
+
 /// A finished displacement.
 #[allow(dead_code)]
 pub struct DisplaceDone<E> {
@@ -1549,13 +1966,15 @@ pub struct DisplaceDone<E> {
 }
 
 /// D7: the displaced entry was verified as the planned inode, the
-/// replacement was published, and the trace ends with the planned inode's
-/// successful removal from the displaced name.
+/// replacement was published, and the trace ends with a probe proving the
+/// displaced name holds the planned inode immediately followed by its
+/// successful unlink.
 pub open spec fn displaced_and_replaced(t: Seq<Ev>, v: Option<Ino>) -> bool {
     &&& v is Some
     &&& verified_at(t, Name::Displaced, v->Some_0)
     &&& published(t, Name::Staging)
-    &&& t.len() > 0
+    &&& t.len() >= 2
+    &&& t[t.len() - 2] == (Ev::Probe { name: Name::Displaced, ino: v->Some_0, holds: true })
     &&& t.last() == (Ev::Unlink { name: Name::Displaced, ok: true })
 }
 
@@ -1563,10 +1982,8 @@ impl<E> DisplaceDone<E> {
     #[verifier::type_invariant]
     closed spec fn inv(&self) -> bool {
         &&& safe(self.trace@, self.run@)
+        &&& names_left(self.verdict, self.trace@)
         &&& (self.verdict is Replaced ==> displaced_and_replaced(self.trace@, self.run@.verified))
-        &&& (self.verdict is RestoredUntouched ==> consumed(self.trace@, Name::Displaced))
-        &&& (self.verdict matches DisplaceVerdict::PublishFailedRestored { left, .. } && left is None
-            ==> consumed(self.trace@, Name::Displaced))
     }
 
     /// The run this replacement acted for.
@@ -1589,10 +2006,8 @@ impl<E> DisplaceDone<E> {
         ensures
             r == self.verdict(),
             safe(self.trace(), self.run()),
+            names_left(r, self.trace()),
             r is Replaced ==> displaced_and_replaced(self.trace(), self.run().verified),
-            r is RestoredUntouched ==> consumed(self.trace(), Name::Displaced),
-            (r matches DisplaceVerdict::PublishFailedRestored { left, .. } && left is None)
-                ==> consumed(self.trace(), Name::Displaced),
     {
         proof {
             use_type_invariant(&self);

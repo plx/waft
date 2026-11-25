@@ -17,8 +17,10 @@
 //!
 //! * `proven_unlinks`: every unlink is issued immediately after a probe that
 //!   proved the name holds an inode the run is `entitled` to remove — the
-//!   run's own staging file, an inode its own hard link has just published at
-//!   the destination, or the planned destination inode after a read-back
+//!   run's own staging file, whatever the name holds right after the run's
+//!   own fallback hard link from that name succeeded (the extra name of the
+//!   publication; the model's A-link axiom is what ties it to the inode the
+//!   link published), or the planned destination inode after a read-back
 //!   showed it still holds the planned bytes. The destination name itself is
 //!   never entitled, so it is never unlinked.
 //! * `links_are_fallbacks`: a hard link is only ever made as the fallback of
@@ -195,8 +197,10 @@ pub open spec fn verified_at(t: Seq<Ev>, n: Name, v: Ino) -> bool {
 ///
 /// Only from a name other than the destination, and only if `x` is the run's
 /// own staging file, or `n` was just hard-linked to the destination by the run
-/// (so the removal drops a redundant second name), or `x` is the verified
-/// planned destination inode and was verified after being moved under `n`.
+/// (so the removal drops what is meant to be a redundant second name — this
+/// clause does not constrain `x`; the model's A-link axiom is what makes it
+/// the linked inode), or `x` is the verified planned destination inode and
+/// was verified after being moved under `n`.
 pub open spec fn entitled(pre: Seq<Ev>, n: Name, x: Ino, own: Option<Ino>, v: Option<Ino>) -> bool {
     &&& n != Name::Dest
     &&& {

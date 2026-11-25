@@ -31,15 +31,22 @@
 //!   successful no-clobber rename or link found the destination vacant, a
 //!   successful exchange found both names present, and so on.
 //!
-//! # Axioms of an admissible schedule (`admissible`)
+//! # Schedules
 //!
-//! * **A-window**: nothing else acts on the namespace between a successful
-//!   probe and the waft step right after it. POSIX has no conditional unlink,
-//!   so the two-syscall gap between proving a name and unlinking it is
-//!   irreducible; this axiom states it rather than hiding it.
-//! * **A-fresh**: the displaced name is vacant whenever waft moves the
-//!   destination onto it — it is a fresh 128-bit random name nobody else has a
-//!   reason to create.
+//! `consistent_run`: every answer production fed back is consistent with the
+//! namespace it ran against. Beyond that, an admissible schedule
+//! (`admissible`) satisfies two axioms:
+//!
+//! * **A-window** (`window_quiet`): nothing else acts on the namespace between
+//!   a successful probe and an unlink that immediately follows it. POSIX has no
+//!   conditional unlink, so that two-syscall gap between proving a name and
+//!   unlinking it is irreducible; this axiom states it rather than hiding it.
+//!   Every other gap — between a probe and the read-back or exchange after it,
+//!   between an exchange and the probe that follows, and so on — is open to the
+//!   environment.
+//! * **A-fresh** (`aside_fresh`): the displaced name is vacant whenever waft
+//!   moves the destination onto it — it is a fresh 128-bit random name nobody
+//!   else has a reason to create.
 //!
 //! `theorem_only_own_or_verified_lost` additionally assumes **A-link**
 //! (`link_window_quiet`): nothing else acts between a successful fallback
@@ -54,10 +61,12 @@
 //!   the namespace is one the step's immediately preceding probe proved under
 //!   the name it unlinked, and that the run was `entitled` to remove there:
 //!   its own staging file, the verified planned destination after the
-//!   read-back that followed moving it, or the extra name of an inode waft's
-//!   own hard link had just published at the destination. In the last case the
-//!   inode only vanishes if another process removed it from the destination
-//!   in between — the hard-link fallback cannot do better than POSIX lets it.
+//!   read-back that followed moving it, or an inode proved under a name right
+//!   after waft's own fallback hard link from that name succeeded. In the last
+//!   case T1 does not say which inode that is — only T1′, with A-link, ties it
+//!   to the inode the link published at the destination, which then only
+//!   vanishes if another process removed it from the destination in between:
+//!   the hard-link fallback cannot do better than POSIX lets it.
 //! * `theorem_only_own_or_verified_lost` (**T1′**): with A-link as well,
 //!   the only inodes waft ever makes vanish are its own staging file and the
 //!   verified planned destination; a third writer's file never vanishes
@@ -65,10 +74,13 @@
 //! * `theorem_dest_never_clobbered` (**T2**): whatever the destination name
 //!   holds right before any of waft's steps is still in the namespace right
 //!   after it — a waft step can move it aside or swap it out, never drop it.
-//!   (This needs neither axiom.)
+//!   This needs neither axiom: only `consistent_run` and `safe`.
 //! * `theorem_noreplace_keeps_dest` (**NR5**): a no-clobber publication
-//!   never changes an occupied destination entry at all.
-//! * `theorem_repair_keeps_namespace` (**T3**): a repair changes no name.
+//!   never changes an occupied destination entry at all (again from
+//!   `consistent_run` and `safe` alone).
+//! * `theorem_repair_keeps_namespace` (**T3**): a repair changes no name. The
+//!   repair kernel has no namespace-changing step at all, so this states a
+//!   property of its event alphabet rather than of any decision it makes.
 //!
 //! Every finished kernel record ensures `safe` of its trace (or
 //! `no_namespace_change` for a repair), so each theorem applies to every run
@@ -137,21 +149,37 @@ pub open spec fn probe_held(e: Ev) -> bool {
     e matches Ev::Probe { holds, .. } && holds
 }
 
+/// `pre` is a schedule for `t` in which every recorded answer is consistent
+/// with the namespace it ran against.
+pub open spec fn consistent_run(t: Seq<Ev>, pre: Seq<Fs>) -> bool {
+    &&& pre.len() == t.len()
+    &&& forall|i: int| 0 <= i < t.len() ==> consistent(#[trigger] pre[i], t[i])
+}
+
+/// A-window: nothing else acts on the namespace between a successful probe
+/// and an unlink issued immediately after it.
+pub open spec fn window_quiet(t: Seq<Ev>, pre: Seq<Fs>) -> bool {
+    forall|i: int|
+        0 <= i && i + 1 < t.len() && #[trigger] probe_held(t[i]) && t[i + 1] is Unlink ==> pre[i
+            + 1] == effect(pre[i], t[i])
+}
+
+/// A-fresh: the displaced name is vacant whenever the destination is moved
+/// onto it.
+pub open spec fn aside_fresh(t: Seq<Ev>, pre: Seq<Fs>) -> bool {
+    forall|i: int|
+        0 <= i < t.len() && #[trigger] t[i] is RenameAside ==> !pre[i].at.contains_key(
+            Name::Displaced,
+        )
+}
+
 /// `pre` is an admissible schedule for `t`: every recorded answer is
 /// consistent with the namespace it ran against, and the axioms A-window and
 /// A-fresh hold. The environment is otherwise unconstrained.
 pub open spec fn admissible(t: Seq<Ev>, pre: Seq<Fs>) -> bool {
-    &&& pre.len() == t.len()
-    &&& forall|i: int| 0 <= i < t.len() ==> consistent(#[trigger] pre[i], t[i])
-    &&& forall|i: int|
-        0 <= i && i + 1 < t.len() && #[trigger] probe_held(t[i]) ==> pre[i + 1] == effect(
-            pre[i],
-            t[i],
-        )
-    &&& forall|i: int|
-        0 <= i < t.len() && #[trigger] t[i] is RenameAside ==> !pre[i].at.contains_key(
-            Name::Displaced,
-        )
+    &&& consistent_run(t, pre)
+    &&& window_quiet(t, pre)
+    &&& aside_fresh(t, pre)
 }
 
 /// Some name in `fs` holds inode `x`.
@@ -333,12 +361,44 @@ pub proof fn theorem_only_own_or_verified_lost(t: Seq<Ev>, pre: Seq<Fs>, r: Run)
     }
 }
 
+/// Every step other than a successful unlink keeps whatever the destination
+/// held somewhere in the namespace — from consistency alone: no rename or
+/// link onto an occupied destination succeeds, and an exchange or a move
+/// aside carries the destination's inode to another name.
+proof fn lemma_dest_kept(t: Seq<Ev>, pre: Seq<Fs>, i: int)
+    requires
+        consistent_run(t, pre),
+        0 <= i < t.len(),
+        pre[i].at.contains_key(Name::Dest),
+        !(t[i] matches Ev::Unlink { ok, .. } && ok),
+    ensures
+        present(effect(pre[i], t[i]), pre[i].at[Name::Dest]),
+{
+    let fs = pre[i];
+    let x = fs.at[Name::Dest];
+    let post = effect(fs, t[i]);
+    assert(consistent(pre[i], t[i]));
+    match t[i] {
+        Ev::Exchange { res: Res::Ok } => {
+            lemma_present_witness(post, Name::Staging, x);
+        },
+        Ev::RenameAside { ok: true } => {
+            lemma_present_witness(post, Name::Displaced, x);
+        },
+        _ => {
+            assert(post == fs);
+            lemma_present_witness(post, Name::Dest, x);
+        },
+    }
+}
+
 /// **T2**: whatever the destination holds right before any of waft's steps is
-/// still in the namespace right after it.
+/// still in the namespace right after it. Needs neither A-window nor
+/// A-fresh: only that every answer was consistent.
 pub proof fn theorem_dest_never_clobbered(t: Seq<Ev>, pre: Seq<Fs>, r: Run)
     requires
         safe(t, r),
-        admissible(t, pre),
+        consistent_run(t, pre),
     ensures
         forall|i: int|
             0 <= i < t.len() && (#[trigger] pre[i]).at.contains_key(Name::Dest) ==> present(
@@ -359,18 +419,19 @@ pub proof fn theorem_dest_never_clobbered(t: Seq<Ev>, pre: Seq<Fs>, r: Run)
             assert(name != Name::Dest);
             lemma_present_witness(effect(pre[i], t[i]), Name::Dest, x);
         } else {
-            lemma_step_keeps(t, pre, i, x);
+            lemma_dest_kept(t, pre, i);
         }
     }
 }
 
 /// **NR5**: a trace with no exchange and no move-aside — every no-clobber
-/// publication — never changes an occupied destination entry.
+/// publication — never changes an occupied destination entry. Like T2, this
+/// needs only consistent answers.
 pub proof fn theorem_noreplace_keeps_dest(t: Seq<Ev>, pre: Seq<Fs>, r: Run)
     requires
         safe(t, r),
         no_exchange_or_aside(t),
-        admissible(t, pre),
+        consistent_run(t, pre),
     ensures
         forall|i: int|
             0 <= i < t.len() && (#[trigger] pre[i]).at.contains_key(Name::Dest) ==> {
@@ -470,10 +531,10 @@ pub proof fn lemma_model_witness()
         0 <= i < t.len() && #[trigger] crate::publish::trace::is_aside(t[i]) implies false by {}
     assert forall|i: int| 0 <= i < t.len() implies consistent(#[trigger] pre[i], t[i]) by {}
     assert forall|i: int|
-        0 <= i && i + 1 < t.len() && #[trigger] probe_held(t[i]) implies pre[i + 1] == effect(
-            pre[i],
-            t[i],
-        ) by {}
+        0 <= i && i + 1 < t.len() && #[trigger] probe_held(t[i]) && t[i + 1] is Unlink implies pre[i
+            + 1] == effect(pre[i], t[i]) by {
+        assert(i == 5);
+    }
     lemma_present_witness(pre[6], Name::Staging, v);
     let gone = effect(pre[6], t[6]);
     assert(gone.at =~= Map::empty().insert(Name::Dest, p));
