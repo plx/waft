@@ -18,7 +18,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use ignore::Match;
+use ignore::gitignore::{Gitignore, GitignoreBuilder, Glob};
+use waft_verified::rules::lines;
+use waft_verified::rules::precedence::{self, MatchKind, RuleMatchOracle, Verdict};
+use waft_verified::selection::{self, RuleFileProbe};
 
 use crate::config::SymlinkPolicy;
 use crate::model::WorktreeincludeStatus;
@@ -47,19 +51,21 @@ fn build_file_match_context(
 
     for (line_num_0, line_text) in content.lines().enumerate() {
         let line_1based = line_num_0 + 1;
-        let pattern_text = line_text.trim_end();
 
         // Git only treats `#` in the first column as a comment. Leading
         // whitespace is significant and may be part of a valid filename.
-        if pattern_text.is_empty() || line_text.starts_with('#') {
+        // The verified kernel decides whether the line is a pattern and the
+        // length of its text without trailing whitespace.
+        let chars: Vec<char> = line_text.chars().collect();
+        let Some(pattern_len) = lines::rule_line_pattern_len(&chars) else {
             continue;
-        }
+        };
 
         if builder
             .add_line(Some(file_path.to_path_buf()), line_text)
             .is_ok()
         {
-            line_info.push((line_1based, pattern_text.to_string()));
+            line_info.push((line_1based, chars[..pattern_len].iter().collect()));
         }
     }
 
@@ -126,11 +132,9 @@ pub fn explain_path(
     let mut contexts: Vec<FileMatchContext> = Vec::new();
     for dir in &dirs_to_check {
         let wti_path = dir.join(".worktreeinclude");
-        if !wti_path.is_file() {
-            continue;
-        }
-        if symlink_policy == SymlinkPolicy::Ignore && is_symlink(&wti_path) {
-            // Ignore policy: treat symlinked rule files as if absent.
+        // A rule file must resolve to a regular file; the Ignore policy
+        // treats symlinked rule files as if absent.
+        if !rule_file_consulted(&wti_path, symlink_policy) {
             continue;
         }
 
@@ -144,120 +148,125 @@ pub fn explain_path(
         }
     }
 
-    // Evaluate each file, shallowest to deepest, last match wins
+    // Evaluate each file, shallowest to deepest, last match wins, with the
+    // within-file and cross-file negation caveats. The decision is the
+    // verified `rules::precedence::explain` kernel; this module only answers
+    // its matcher queries and renders the verdict.
     let full_path: PathBuf = repo_root.join(rel_path).components().collect();
-    let mut last_result = WorktreeincludeStatus::NoMatch;
-
-    for ctx in &contexts {
-        if let Some(result) = evaluate_against_context(ctx, &full_path, rel_path, is_dir, repo_root)
-        {
-            last_result = result;
-        }
-    }
-
-    // Cross-file caveat: if the final result is ExcludedByNegation, check
-    // whether ANY applicable file selected a parent directory of this path.
-    // Per Git semantics, a negation cannot deselect a file whose parent
-    // directory is selected — regardless of which file the patterns come from.
-    if matches!(
-        last_result,
-        WorktreeincludeStatus::ExcludedByNegation { .. }
-    ) && let Some(override_result) = cross_file_ancestor_check(&contexts, rel_path, repo_root)
-    {
-        return override_result;
-    }
-
-    last_result
+    let mut matchers = ContextMatchers::new(repo_root, &contexts, &full_path, rel_path, is_dir);
+    let verdict = precedence::explain(&mut matchers);
+    status_from_verdict(&contexts, verdict)
 }
 
-/// Evaluate a single `.worktreeinclude` file's matcher against a path.
-///
-/// Uses Git-style last-match-wins semantics and enforces the within-file
-/// negation caveat: a negation pattern cannot de-select a file whose parent
-/// directory is already selected by an earlier pattern in the same file.
-///
-/// Returns `Some(status)` if any pattern matches, `None` otherwise.
-fn evaluate_against_context(
-    ctx: &FileMatchContext,
-    full_path: &Path,
-    rel_path: &Path,
+/// The applicable rule files' matchers, answering the verified precedence
+/// kernel's queries (its [`RuleMatchOracle`] trust boundary).
+struct ContextMatchers<'a> {
+    repo_root: &'a Path,
+    contexts: &'a [FileMatchContext],
+    full_path: &'a Path,
     is_dir: bool,
-    repo_root: &Path,
-) -> Option<WorktreeincludeStatus> {
-    let matched = ctx.matcher.matched_path_or_any_parents(full_path, is_dir);
+    /// The non-empty ancestor directories of the queried path, parent first.
+    ancestors: Vec<&'a Path>,
+}
 
-    if matched.is_ignore() {
-        let glob = matched.inner().unwrap();
-        let (line, pattern) = glob_line_info(glob, &ctx.line_info);
-        Some(WorktreeincludeStatus::Included {
-            file: ctx.file_path.clone(),
-            line,
-            pattern,
-        })
-    } else if matched.is_whitelist() {
-        // Within-file caveat: check if this file's own patterns select a
-        // parent directory — if so, negation cannot override.
-        let path_within = rel_path;
-        let mut ancestor = path_within.parent();
+impl<'a> ContextMatchers<'a> {
+    fn new(
+        repo_root: &'a Path,
+        contexts: &'a [FileMatchContext],
+        full_path: &'a Path,
+        rel_path: &'a Path,
+        is_dir: bool,
+    ) -> Self {
+        let mut ancestors = Vec::new();
+        let mut ancestor = rel_path.parent();
         while let Some(p) = ancestor {
             if p.as_os_str().is_empty() {
                 break;
             }
-            let ancestor_full: PathBuf = repo_root.join(p).components().collect();
-            let ancestor_match = ctx.matcher.matched(&ancestor_full, true);
-            if ancestor_match.is_ignore() {
-                let parent_glob = ancestor_match.inner().unwrap();
-                let (line, pattern) = glob_line_info(parent_glob, &ctx.line_info);
-                return Some(WorktreeincludeStatus::Included {
-                    file: ctx.file_path.clone(),
-                    line,
-                    pattern,
-                });
-            }
+            ancestors.push(p);
             ancestor = p.parent();
         }
-
-        let glob = matched.inner().unwrap();
-        let (line, pattern) = glob_line_info(glob, &ctx.line_info);
-        Some(WorktreeincludeStatus::ExcludedByNegation {
-            file: ctx.file_path.clone(),
-            line,
-            pattern,
-        })
-    } else {
-        None
+        ContextMatchers {
+            repo_root,
+            contexts,
+            full_path,
+            is_dir,
+            ancestors,
+        }
     }
 }
 
-/// Check all file contexts for an ancestor directory selection that would
-/// override a negation result (the cross-file negation caveat).
-fn cross_file_ancestor_check(
-    contexts: &[FileMatchContext],
-    rel_path: &Path,
-    repo_root: &Path,
-) -> Option<WorktreeincludeStatus> {
-    let path_within = rel_path;
-    let mut ancestor = path_within.parent();
-    while let Some(p) = ancestor {
-        if p.as_os_str().is_empty() {
-            break;
+impl<'a> RuleMatchOracle<&'a Glob> for ContextMatchers<'a> {
+    fn contexts(&self) -> usize {
+        self.contexts.len()
+    }
+
+    fn ancestors(&self) -> usize {
+        self.ancestors.len()
+    }
+
+    fn query_path(&mut self, ctx: usize) -> Option<(MatchKind, &'a Glob)> {
+        let contexts: &'a [FileMatchContext] = self.contexts;
+        path_match_kind(
+            contexts[ctx]
+                .matcher
+                .matched_path_or_any_parents(self.full_path, self.is_dir),
+        )
+    }
+
+    fn query_ancestor(&mut self, anc: usize, ctx: usize) -> Option<&'a Glob> {
+        let contexts: &'a [FileMatchContext] = self.contexts;
+        let ancestor_full: PathBuf = self
+            .repo_root
+            .join(self.ancestors[anc])
+            .components()
+            .collect();
+        match contexts[ctx].matcher.matched(&ancestor_full, true) {
+            Match::Ignore(glob) => Some(glob),
+            Match::None | Match::Whitelist(_) => None,
         }
-        let ancestor_full: PathBuf = repo_root.join(p).components().collect();
-        for ctx in contexts {
-            let ancestor_match = ctx.matcher.matched(&ancestor_full, true);
-            if ancestor_match.is_ignore() {
-                let glob = ancestor_match.inner().unwrap();
-                let (line, pattern) = glob_line_info(glob, &ctx.line_info);
-                return Some(WorktreeincludeStatus::Included {
-                    file: ctx.file_path.clone(),
-                    line,
-                    pattern,
-                });
+    }
+}
+
+/// Convert a rule file's verdict for the queried path to kernel data.
+fn path_match_kind(matched: Match<&Glob>) -> Option<(MatchKind, &Glob)> {
+    match matched {
+        Match::None => None,
+        Match::Ignore(glob) => Some((MatchKind::Ignore, glob)),
+        Match::Whitelist(glob) => Some((MatchKind::Whitelist, glob)),
+    }
+}
+
+/// Render the kernel's verdict with the deciding rule file and line.
+fn status_from_verdict(
+    contexts: &[FileMatchContext],
+    verdict: Verdict<&Glob>,
+) -> WorktreeincludeStatus {
+    match verdict {
+        Verdict::NoMatch => WorktreeincludeStatus::NoMatch,
+        Verdict::Included {
+            ctx,
+            by: _,
+            witness,
+        } => {
+            let ctx = &contexts[ctx];
+            let (line, pattern) = glob_line_info(witness, &ctx.line_info);
+            WorktreeincludeStatus::Included {
+                file: ctx.file_path.clone(),
+                line,
+                pattern,
             }
         }
-        ancestor = p.parent();
+        Verdict::ExcludedByNegation { ctx, witness } => {
+            let ctx = &contexts[ctx];
+            let (line, pattern) = glob_line_info(witness, &ctx.line_info);
+            WorktreeincludeStatus::ExcludedByNegation {
+                file: ctx.file_path.clone(),
+                line,
+                pattern,
+            }
+        }
     }
-    None
 }
 
 /// Map a matched `Glob` back to its line number and pattern text.
@@ -269,13 +278,16 @@ fn glob_line_info(
     line_info: &[(usize, String)],
 ) -> (usize, String) {
     let original = glob.original();
-    for (line, pattern) in line_info.iter().rev() {
-        if pattern == original {
-            return (*line, pattern.clone());
+    match lines::last_line_with_text(line_info, original) {
+        Some(index) => {
+            let (line, pattern) = &line_info[index];
+            (*line, pattern.clone())
         }
+        // Fallback — reached for a line ending in an escaped space, whose
+        // recorded text differs from the glob's original text (see
+        // `lines::lemma_quirk_escaped_trailing_space_loses_provenance`).
+        None => (0, original.to_string()),
     }
-    // Fallback — should not happen with well-formed input
-    (0, original.to_string())
 }
 
 /// Evaluate `rel_path` using ONLY the repo-root `.worktreeinclude` file.
@@ -325,8 +337,10 @@ pub fn evaluate_root_only_path(
     };
 
     let full_path: PathBuf = repo_root.join(rel_path).components().collect();
-    evaluate_against_context(&ctx, &full_path, rel_path, is_dir, repo_root)
-        .unwrap_or(WorktreeincludeStatus::NoMatch)
+    let contexts = [ctx];
+    let mut matchers = ContextMatchers::new(repo_root, &contexts, &full_path, rel_path, is_dir);
+    let verdict = precedence::explain_root_only(&mut matchers);
+    status_from_verdict(&contexts, verdict)
 }
 
 /// Whether the repo-root `.worktreeinclude` is a file the root-only engine
@@ -338,18 +352,33 @@ pub fn evaluate_root_only_path(
 /// engine never looks" — a distinction the repo-wide existence check in
 /// `GitBackend::worktreeinclude_exists_anywhere` cannot make.
 pub fn root_rule_file_is_consulted(repo_root: &Path, symlink_policy: SymlinkPolicy) -> bool {
-    let wti_path = repo_root.join(".worktreeinclude");
-    if !wti_path.is_file() {
-        return false;
-    }
-    !(symlink_policy == SymlinkPolicy::Ignore && is_symlink(&wti_path))
+    rule_file_consulted(&repo_root.join(".worktreeinclude"), symlink_policy)
 }
 
-/// True if `path` itself is a symlink (without following).
-fn is_symlink(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
+/// The per-path engines' consult gate for the rule file at `wti_path`,
+/// decided by the verified `selection::rule_file_consulted` kernel.
+fn rule_file_consulted(wti_path: &Path, symlink_policy: SymlinkPolicy) -> bool {
+    selection::rule_file_consulted(
+        &mut RuleFilePath(wti_path),
+        crate::worktreeinclude_engine::kernel_symlink_policy(symlink_policy),
+    )
+}
+
+/// The filesystem facts about one rule-file location (the consult gate's
+/// [`RuleFileProbe`] trust boundary).
+struct RuleFilePath<'a>(&'a Path);
+
+impl RuleFileProbe for RuleFilePath<'_> {
+    fn probe_is_file(&mut self) -> bool {
+        self.0.is_file()
+    }
+
+    /// True if the path itself is a symlink (without following).
+    fn probe_is_symlink(&mut self) -> bool {
+        fs::symlink_metadata(self.0)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
@@ -799,6 +828,180 @@ mod tests {
             matches!(result, WorktreeincludeStatus::Included { .. }),
             "cross-file caveat: dir selected by root should block nested negation, got {result:?}"
         );
+    }
+
+    #[test]
+    fn path_match_kind_preserves_kind_and_glob() {
+        let dir = setup_repo();
+        let mut builder = GitignoreBuilder::new(dir.path());
+        builder.add_line(None, "*.env").unwrap();
+        builder.add_line(None, "!keep.env").unwrap();
+        let matcher = builder.build().unwrap();
+
+        match path_match_kind(matcher.matched("a.env", false)) {
+            Some((MatchKind::Ignore, glob)) => assert_eq!(glob.original(), "*.env"),
+            other => panic!("expected an ignore match, got {other:?}"),
+        }
+        match path_match_kind(matcher.matched("keep.env", false)) {
+            Some((MatchKind::Whitelist, glob)) => assert_eq!(glob.original(), "!keep.env"),
+            other => panic!("expected a whitelist match, got {other:?}"),
+        }
+        assert!(path_match_kind(matcher.matched("README.md", false)).is_none());
+    }
+
+    #[test]
+    fn rule_line_kernel_matches_trim_end_grammar() {
+        // Reference: the grammar the kernel replaced.
+        let reference = |line: &str| {
+            let pattern_text = line.trim_end();
+            if pattern_text.is_empty() || line.starts_with('#') {
+                None
+            } else {
+                Some(pattern_text.to_string())
+            }
+        };
+        let samples = [
+            "",
+            " ",
+            "\t",
+            "#x",
+            " #x",
+            "foo",
+            "foo  ",
+            "foo\t",
+            "foo\\ ",
+            "\u{a0}foo\u{a0}",
+            "\u{3000}",
+            "a b ",
+            "!x",
+            "\u{85}",
+            "#",
+            "x\u{2028}",
+            "\u{feff}x",
+        ];
+        for line in samples {
+            let chars: Vec<char> = line.chars().collect();
+            let actual = lines::rule_line_pattern_len(&chars)
+                .map(|len| chars[..len].iter().collect::<String>());
+            assert_eq!(actual, reference(line), "line {line:?}");
+        }
+    }
+
+    #[test]
+    fn line_lookup_returns_last_matching_entry() {
+        let info = vec![
+            (1, "a".to_string()),
+            (3, "b".to_string()),
+            (5, "a".to_string()),
+        ];
+        assert_eq!(lines::last_line_with_text(&info, "a"), Some(2));
+        assert_eq!(lines::last_line_with_text(&info, "b"), Some(1));
+        assert_eq!(lines::last_line_with_text(&info, "c"), None);
+        assert_eq!(lines::last_line_with_text(&[], "a"), None);
+    }
+
+    #[test]
+    fn quirk_escaped_trailing_space_reports_line_zero() {
+        // Pins current behavior (lines::
+        // lemma_quirk_escaped_trailing_space_loses_provenance).
+        let dir = setup_repo();
+        fs::write(dir.path().join(".worktreeinclude"), "foo\\ \n").unwrap();
+
+        let result = explain(dir.path(), "foo ", false, false, SymlinkPolicy::Follow);
+        match result {
+            WorktreeincludeStatus::Included { line, pattern, .. } => {
+                assert_eq!(line, 0);
+                assert_eq!(pattern, "foo\\ ");
+            }
+            other => panic!("expected the current Included at line 0, got {other:?}"),
+        }
+    }
+
+    // The next four tests pin current behavior that differs from Git; each
+    // is proved as a divergence lemma in `waft_verified::rules::reference`.
+
+    #[test]
+    fn quirk_nested_file_reaches_outside_its_directory() {
+        let dir = setup_repo();
+        let nested = dir.path().join("app").join("config");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join(".worktreeinclude"), "*\n!secret.key\n").unwrap();
+
+        let result = explain(
+            dir.path(),
+            "app/config/secret.key",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
+        match result {
+            WorktreeincludeStatus::Included { pattern, .. } => assert_eq!(pattern, "*"),
+            other => panic!("expected the current Included (*), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quirk_cross_file_caveat_ignores_deeper_reinclusion() {
+        let dir = setup_repo();
+        fs::create_dir(dir.path().join("a")).unwrap();
+        fs::write(dir.path().join(".worktreeinclude"), "a/b/\n").unwrap();
+        fs::write(dir.path().join("a").join(".worktreeinclude"), "!b/\n!b/x\n").unwrap();
+
+        let result = explain(dir.path(), "a/b/x", false, false, SymlinkPolicy::Follow);
+        match result {
+            WorktreeincludeStatus::Included { pattern, .. } => assert_eq!(pattern, "a/b/"),
+            other => panic!("expected the current Included (a/b/), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quirk_ancestor_negation_shadows_shallower_selection() {
+        let dir = setup_repo();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join(".worktreeinclude"), "*.env\n").unwrap();
+        fs::write(dir.path().join("sub").join(".worktreeinclude"), "!x/\n").unwrap();
+
+        let result = explain(
+            dir.path(),
+            "sub/x/a.env",
+            false,
+            false,
+            SymlinkPolicy::Follow,
+        );
+        match result {
+            WorktreeincludeStatus::ExcludedByNegation { pattern, .. } => {
+                assert_eq!(pattern, "!x/")
+            }
+            other => panic!("expected the current ExcludedByNegation (!x/), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quirk_bare_slash_selects_everything() {
+        let dir = setup_repo();
+        fs::write(dir.path().join(".worktreeinclude"), "/\n").unwrap();
+
+        for result in [
+            explain(
+                dir.path(),
+                "deep/any/file.txt",
+                false,
+                false,
+                SymlinkPolicy::Follow,
+            ),
+            evaluate_root_only(
+                dir.path(),
+                "deep/any/file.txt",
+                false,
+                false,
+                SymlinkPolicy::Follow,
+            ),
+        ] {
+            assert!(
+                matches!(result, WorktreeincludeStatus::Included { .. }),
+                "expected the current Included, got {result:?}"
+            );
+        }
     }
 
     #[test]

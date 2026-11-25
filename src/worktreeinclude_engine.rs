@@ -14,6 +14,9 @@
 
 use std::path::Path;
 
+use waft_verified::rules::lines;
+use waft_verified::selection;
+
 use crate::config::{SymlinkPolicy, WorktreeincludeSemantics};
 use crate::model::WorktreeincludeStatus;
 
@@ -253,13 +256,10 @@ fn collect_wt_literal_negations(
         if !crate::walk::special_filename_matches(entry.file_name(), ".worktreeinclude") {
             continue;
         }
-        if entry.file_type().is_dir() {
-            continue;
-        }
-        if entry.file_type().is_symlink() && symlink_policy == SymlinkPolicy::Ignore {
-            continue;
-        }
-        if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
+        if !selection::wt_entry_consulted(
+            entry_kind(entry.file_type()),
+            kernel_symlink_policy(symlink_policy),
+        ) {
             continue;
         }
         let path = entry.path();
@@ -269,20 +269,16 @@ fn collect_wt_literal_negations(
         };
         let dir = path.parent().unwrap_or(source_root);
         for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let Some(rest) = trimmed.strip_prefix('!') else {
+            // The verified kernel parses the line: after trimming, only a
+            // `!` negation without glob metacharacters names a target (wt's
+            // observed behavior only honors literal-name negations; glob
+            // negations, comments and positive patterns are ignored), with
+            // one leading `/` stripped.
+            let chars: Vec<char> = line.chars().collect();
+            let Some((start, end)) = lines::wt_negation_target(&chars) else {
                 continue;
             };
-            // Skip glob patterns. Wt's observed behavior only honors
-            // literal-name negations; anything containing a glob meta
-            // character is left in the candidate set.
-            if rest.chars().any(|c| matches!(c, '*' | '?' | '[' | ']')) {
-                continue;
-            }
-            let stripped = rest.strip_prefix('/').unwrap_or(rest);
+            let stripped: String = chars[start..end].iter().collect();
             let abs = dir.join(stripped);
             if let Ok(rel) = crate::path::RepoRelPath::normalize(&abs, source_root) {
                 out.insert(rel.as_str().to_string());
@@ -292,11 +288,137 @@ fn collect_wt_literal_negations(
     out
 }
 
+/// The no-follow type of a walked entry, as kernel data. `is_dir`,
+/// `is_symlink` and `is_file` are mutually exclusive, so the order of the
+/// tests does not matter.
+fn entry_kind(file_type: std::fs::FileType) -> selection::EntryKind {
+    if file_type.is_dir() {
+        selection::EntryKind::Dir
+    } else if file_type.is_symlink() {
+        selection::EntryKind::Symlink
+    } else if file_type.is_file() {
+        selection::EntryKind::File
+    } else {
+        selection::EntryKind::Other
+    }
+}
+
+/// The symlink policy as kernel data.
+pub(crate) fn kernel_symlink_policy(policy: SymlinkPolicy) -> selection::SymlinkPolicy {
+    match policy {
+        SymlinkPolicy::Follow => selection::SymlinkPolicy::Follow,
+        SymlinkPolicy::Ignore => selection::SymlinkPolicy::Ignore,
+        SymlinkPolicy::Error => selection::SymlinkPolicy::Error,
+    }
+}
+
+/// The semantics profile as kernel data.
+pub(crate) fn kernel_semantics(semantics: WorktreeincludeSemantics) -> selection::Semantics {
+    match semantics {
+        WorktreeincludeSemantics::Git => selection::Semantics::Git,
+        WorktreeincludeSemantics::Claude202604 => selection::Semantics::Claude202604,
+        WorktreeincludeSemantics::Wt039 => selection::Semantics::Wt039,
+    }
+}
+
 /// Construct the engine implementing the requested semantics.
 pub fn engine_for(s: WorktreeincludeSemantics) -> Box<dyn WorktreeincludeSemanticsEngine> {
     match s {
         WorktreeincludeSemantics::Git => Box::new(GitSemantics),
         WorktreeincludeSemantics::Claude202604 => Box::new(Claude202604Semantics),
         WorktreeincludeSemantics::Wt039 => Box::new(Wt039Semantics),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_enums_keep_their_variant() {
+        for policy in [
+            SymlinkPolicy::Follow,
+            SymlinkPolicy::Ignore,
+            SymlinkPolicy::Error,
+        ] {
+            assert_eq!(
+                format!("{:?}", kernel_symlink_policy(policy)),
+                format!("{policy:?}")
+            );
+        }
+        for semantics in [
+            WorktreeincludeSemantics::Git,
+            WorktreeincludeSemantics::Claude202604,
+            WorktreeincludeSemantics::Wt039,
+        ] {
+            assert_eq!(
+                format!("{:?}", kernel_semantics(semantics)),
+                format!("{semantics:?}")
+            );
+        }
+    }
+
+    #[test]
+    fn wt_kernel_matches_reference_grammar() {
+        // Reference: the grammar the kernel replaced.
+        fn reference(line: &str) -> Option<String> {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return None;
+            }
+            let rest = trimmed.strip_prefix('!')?;
+            if rest.chars().any(|c| matches!(c, '*' | '?' | '[' | ']')) {
+                return None;
+            }
+            Some(rest.strip_prefix('/').unwrap_or(rest).to_string())
+        }
+        let samples = [
+            "",
+            "  ",
+            "#c",
+            "  #c",
+            "!#c",
+            "  !a  ",
+            "!/a",
+            "!//a",
+            "!",
+            "!/",
+            "!a*b",
+            "!a?",
+            "![x]",
+            "!a]b",
+            "\\!a",
+            "a",
+            "\u{3000}!b\u{3000}",
+            "!a b",
+            "! a",
+            "!\t/x",
+            "!\u{a0}",
+            "\t!x/y/\t",
+            "!dir/",
+            "!../x",
+            "!\u{e9}/\u{fc}",
+        ];
+        for line in samples {
+            let chars: Vec<char> = line.chars().collect();
+            let actual = lines::wt_negation_target(&chars)
+                .map(|(start, end)| chars[start..end].iter().collect::<String>());
+            assert_eq!(actual, reference(line), "line {line:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn entry_kind_classifies_without_following_links() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "x").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let kind = |path: &Path| entry_kind(std::fs::symlink_metadata(path).unwrap().file_type());
+        assert_eq!(kind(dir.path()), selection::EntryKind::Dir);
+        assert_eq!(kind(&file), selection::EntryKind::File);
+        assert_eq!(kind(&link), selection::EntryKind::Symlink);
+        assert_eq!(kind(Path::new("/dev/null")), selection::EntryKind::Other);
     }
 }

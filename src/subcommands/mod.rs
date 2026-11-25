@@ -12,6 +12,8 @@ mod validate;
 
 use std::path::Path;
 
+use waft_verified::selection::{self, DiagnosisFacts, SelectionSource};
+
 use crate::config::{
     ResolvedPolicy, SymlinkPolicy, WhenMissingWorktreeinclude, WorktreeincludeSemantics,
 };
@@ -19,6 +21,7 @@ use crate::error::{Error, Result};
 use crate::git::{GitBackend, IgnoreCheckRecord};
 use crate::model::WorktreeincludeStatus;
 use crate::path::RepoRelPath;
+use crate::worktreeinclude_engine::{kernel_semantics, kernel_symlink_policy};
 
 pub(crate) use copy::run_copy_with_context;
 pub use copy::{CopyArgs, run_copy};
@@ -52,32 +55,40 @@ pub(crate) fn select_candidates(
     source_root: &Path,
     policy: &ResolvedPolicy,
 ) -> Result<(Vec<RepoRelPath>, bool)> {
-    if git.worktreeinclude_exists_anywhere(source_root, policy.symlink_policy)? {
-        // The wt-0.39 engine is too unusual for the per-path
-        // `list_worktreeinclude_candidates` shape (it's purely subtractive
-        // on top of the all-ignored set); route it through a dedicated
-        // helper. when_missing is not consulted here because a rule file
-        // exists; explicit-selection mode is engaged.
-        if policy.semantics == WorktreeincludeSemantics::Wt039 {
-            let candidates = crate::worktreeinclude_engine::wt_collect_candidates(
-                source_root,
-                git,
-                policy.symlink_policy,
-            )?;
-            return Ok((candidates, true));
-        }
-        let candidates = git.list_worktreeinclude_candidates(
+    let rule_file_exists =
+        git.worktreeinclude_exists_anywhere(source_root, policy.symlink_policy)?;
+    // The routing is the verified `selection::selection_source` kernel. The
+    // wt-0.39 engine is too unusual for the per-path
+    // `list_worktreeinclude_candidates` shape (it's purely subtractive on top
+    // of the all-ignored set), so it has a dedicated source; when_missing is
+    // consulted only when no rule file exists.
+    let source = selection::selection_source(
+        rule_file_exists,
+        kernel_semantics(policy.semantics),
+        kernel_when_missing(policy.when_missing),
+    );
+    let candidates = match source {
+        SelectionSource::WtSubtractive => crate::worktreeinclude_engine::wt_collect_candidates(
+            source_root,
+            git,
+            policy.symlink_policy,
+        )?,
+        SelectionSource::PerPathEngine => git.list_worktreeinclude_candidates(
             source_root,
             policy.semantics,
             policy.symlink_policy,
-        )?;
-        Ok((candidates, true))
-    } else {
-        let candidates = match policy.when_missing {
-            WhenMissingWorktreeinclude::Blank => Vec::new(),
-            WhenMissingWorktreeinclude::AllIgnored => git.list_ignored_untracked(source_root)?,
-        };
-        Ok((candidates, false))
+        )?,
+        SelectionSource::Blank => Vec::new(),
+        SelectionSource::AllIgnored => git.list_ignored_untracked(source_root)?,
+    };
+    Ok((candidates, rule_file_exists))
+}
+
+/// The `when_missing` policy as kernel data.
+fn kernel_when_missing(when_missing: WhenMissingWorktreeinclude) -> selection::WhenMissing {
+    match when_missing {
+        WhenMissingWorktreeinclude::Blank => selection::WhenMissing::Blank,
+        WhenMissingWorktreeinclude::AllIgnored => selection::WhenMissing::AllIgnored,
     }
 }
 
@@ -94,53 +105,55 @@ pub(crate) struct Eligibility {
 /// Observed reasons an empty selection may need configuration attention.
 /// These are hints, not predictions that a different policy will validate or
 /// select files. Diagnosis never opens a rule file skipped by the policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EmptySelectionCause {
-    NoRuleFile,
-    NoRootRuleFile,
-    RuleFileSymlinkIgnored,
-    NestedRuleFileSymlinkIgnored,
-}
+pub(crate) use waft_verified::selection::EmptySelectionCause;
 
+/// Diagnose an empty selection. The decision and the order and laziness of
+/// its probes are the verified `selection::diagnose_empty_selection` kernel.
 fn diagnose_empty_selection(
     git: &dyn GitBackend,
     source_root: &Path,
     policy: &ResolvedPolicy,
     rule_file_found: bool,
 ) -> Result<Option<EmptySelectionCause>> {
-    let root_only = policy.semantics == WorktreeincludeSemantics::Claude202604;
-    let root_symlink_ignored = policy.symlink_policy == SymlinkPolicy::Ignore
-        && std::fs::symlink_metadata(source_root.join(".worktreeinclude"))
-            .is_ok_and(|metadata| metadata.file_type().is_symlink());
-    if rule_file_found {
-        if root_only {
-            if root_symlink_ignored {
-                return Ok(Some(EmptySelectionCause::RuleFileSymlinkIgnored));
-            }
-            if !crate::worktreeinclude::root_rule_file_is_consulted(
-                source_root,
-                policy.symlink_policy,
-            ) {
-                return Ok(Some(EmptySelectionCause::NoRootRuleFile));
-            }
-        }
-        return Ok(None);
+    let mut facts = DiagnosisProbes {
+        git,
+        source_root,
+        symlink_policy: policy.symlink_policy,
+    };
+    selection::diagnose_empty_selection(
+        &mut facts,
+        kernel_semantics(policy.semantics),
+        kernel_symlink_policy(policy.symlink_policy),
+        kernel_when_missing(policy.when_missing),
+        rule_file_found,
+    )
+}
+
+/// The facts behind a diagnosis (the kernel's [`DiagnosisFacts`] trust
+/// boundary).
+struct DiagnosisProbes<'a> {
+    git: &'a dyn GitBackend,
+    source_root: &'a Path,
+    symlink_policy: SymlinkPolicy,
+}
+
+impl DiagnosisFacts<Error> for DiagnosisProbes<'_> {
+    fn probe_root_is_symlink(&mut self) -> bool {
+        std::fs::symlink_metadata(self.source_root.join(".worktreeinclude"))
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
     }
-    if policy.when_missing != WhenMissingWorktreeinclude::Blank {
-        return Ok(None);
+
+    fn probe_root_consulted(&mut self) -> bool {
+        crate::worktreeinclude::root_rule_file_is_consulted(self.source_root, self.symlink_policy)
     }
-    // This existing metadata-only walk counts symlink entries without opening
-    // their targets. It observes what Ignore omitted; Follow is not validated.
-    if policy.symlink_policy == SymlinkPolicy::Ignore
-        && git.worktreeinclude_exists_anywhere(source_root, SymlinkPolicy::Follow)?
-    {
-        return Ok(Some(if root_only && !root_symlink_ignored {
-            EmptySelectionCause::NestedRuleFileSymlinkIgnored
-        } else {
-            EmptySelectionCause::RuleFileSymlinkIgnored
-        }));
+
+    /// This existing metadata-only walk counts symlink entries without
+    /// opening their targets. It observes what Ignore omitted; Follow is not
+    /// validated.
+    fn probe_exists_under_follow(&mut self) -> Result<bool> {
+        self.git
+            .worktreeinclude_exists_anywhere(self.source_root, SymlinkPolicy::Follow)
     }
-    Ok(Some(EmptySelectionCause::NoRuleFile))
 }
 
 /// Evaluate the complete, command-independent eligibility contract.
@@ -292,5 +305,23 @@ pub(crate) fn format_worktreeinclude_status(
         } => format!("excluded ({}:{}: {})", file.display(), line, pattern),
         WorktreeincludeStatus::NoMatch if selected => "selected (effective policy)".to_string(),
         WorktreeincludeStatus::NoMatch => "no match".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kernel_when_missing_keeps_its_variant() {
+        for when_missing in [
+            WhenMissingWorktreeinclude::Blank,
+            WhenMissingWorktreeinclude::AllIgnored,
+        ] {
+            assert_eq!(
+                format!("{:?}", kernel_when_missing(when_missing)),
+                format!("{when_missing:?}")
+            );
+        }
     }
 }
