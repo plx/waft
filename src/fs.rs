@@ -538,6 +538,39 @@ const DIRECTORY_FLAGS: rustix::fs::OFlags = rustix::fs::OFlags::RDONLY
     .union(rustix::fs::OFlags::NOFOLLOW)
     .union(rustix::fs::OFlags::CLOEXEC);
 
+/// The verified publication kernel (`waft-verified`, module `publish`).
+///
+/// Every decision below about what may be published, exchanged, moved aside,
+/// re-moded, or unlinked is made by a kernel step machine; this file performs
+/// exactly the probe or syscall each kernel state names, in the order the
+/// typestates allow, and feeds the answer back.
+#[cfg(unix)]
+use waft_verified::publish as kernel;
+
+/// The identity of a file as the publication kernel sees it: the `stat` it
+/// was read from, compared by `(st_dev, st_ino)` only — the same comparison
+/// [`name_holds_inode`] makes when it proves a name for the kernel.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct Ident(rustix::fs::Stat);
+
+#[cfg(unix)]
+impl kernel::trace::Identity for Ident {
+    fn same_inode(&self, other: &Self) -> bool {
+        same_inode(&self.0, &other.0)
+    }
+}
+
+/// Classify the answer to a rename carrying a `RENAME_*` flag for the kernel.
+#[cfg(unix)]
+fn flag_attempt(result: Result<(), rustix::io::Errno>) -> kernel::noreplace::Attempt<io::Error> {
+    match result {
+        Ok(()) => kernel::noreplace::Attempt::Done,
+        Err(error) if rename_flag_unsupported(error) => kernel::noreplace::Attempt::Unsupported,
+        Err(error) => kernel::noreplace::Attempt::Failed(error.into()),
+    }
+}
+
 /// Removes an anchored temporary name unless it has been disarmed — and only
 /// while that name still holds the inode the guard is entitled to unlink.
 ///
@@ -546,10 +579,15 @@ const DIRECTORY_FLAGS: rustix::fs::OFlags = rustix::fs::OFlags::RDONLY
 /// in the destination directory for that whole window, so cleanup is not
 /// allowed to trust it: the guard pins the identity of the file it was armed
 /// for and re-proves it immediately before every unlink, from `Drop` as well as
-/// from [`AnchoredTempGuard::remove_now`]. A name another process has since
-/// re-pointed is left alone — silently from `Drop`, which has nowhere to report
-/// anything, and as an error from `remove_now`, whose caller can name the file
-/// in a per-file failure.
+/// from an explicit removal. A name another process has since re-pointed is
+/// left alone — silently from `Drop`, which has nowhere to report anything,
+/// and as an error from an explicit removal, whose caller can name the file in
+/// a per-file failure.
+///
+/// Which inode the guard may unlink, whether a removal is still owed, and the
+/// prove-then-unlink sequence itself are decided by the publication kernel
+/// (`kernel::removal`); only kernel steps that have just proved the name holds
+/// a different inode can re-aim the guard.
 ///
 /// This narrows the window; it does not close it. POSIX has no conditional
 /// unlink — no `unlinkat` that takes an inode — so between the proof and the
@@ -562,10 +600,10 @@ const DIRECTORY_FLAGS: rustix::fs::OFlags = rustix::fs::OFlags::RDONLY
 struct AnchoredTempGuard<'a> {
     parent: &'a OwnedFd,
     name: OsString,
-    /// The only inode this guard may unlink from `name`. `None` means the
-    /// identity could not be read at all, which is a permanent "do not touch".
-    identity: Option<rustix::fs::Stat>,
-    armed: bool,
+    /// The only inode this guard may unlink from `name`, and whether a
+    /// removal is still owed. A `None` identity means the identity could not
+    /// be read at all, which is a permanent "do not touch".
+    state: kernel::removal::GuardState<Ident>,
 }
 
 #[cfg(unix)]
@@ -581,20 +619,21 @@ impl<'a> AnchoredTempGuard<'a> {
         Self {
             parent,
             name,
-            identity: rustix::fs::fstat(file).ok(),
-            armed: true,
+            state: kernel::removal::GuardState::staging(rustix::fs::fstat(file).ok().map(Ident)),
         }
     }
 
-    /// Guard `name` under `parent`, entitled to unlink `identity` — used where
-    /// the inode a name holds comes from a proof made earlier rather than from
-    /// an open descriptor of this run's own file.
-    fn for_identity(parent: &'a OwnedFd, name: OsString, identity: rustix::fs::Stat) -> Self {
+    /// Guard `name` under `parent` with a state the kernel created — the name
+    /// a destination was displaced to, entitled to exactly the planned inode.
+    fn with_state(
+        parent: &'a OwnedFd,
+        name: OsString,
+        state: kernel::removal::GuardState<Ident>,
+    ) -> Self {
         Self {
             parent,
             name,
-            identity: Some(identity),
-            armed: true,
+            state,
         }
     }
 
@@ -604,71 +643,111 @@ impl<'a> AnchoredTempGuard<'a> {
 
     /// The inode this guard is entitled to unlink, for callers that publish the
     /// same file under another name and must prove it there too.
-    fn identity(&self) -> Option<&rustix::fs::Stat> {
-        self.identity.as_ref()
-    }
-
-    /// Re-aim the guard after an atomic exchange has moved a different inode
-    /// under this name.
-    fn now_holds(&mut self, identity: rustix::fs::Stat) {
-        self.identity = Some(identity);
+    fn identity(&self) -> Option<Ident> {
+        self.state.identity()
     }
 
     /// Stop tracking the temporary name; the caller has consumed it.
     fn disarm(&mut self) {
-        self.armed = false;
+        self.state.disarm();
     }
 
     /// Remove the temporary name now, reporting whether it worked.
     ///
-    /// Tracking stops either way, so `Drop` can never unlink this name twice —
-    /// and after a successful exchange it must not: the name then holds the
-    /// *previous* destination, and a retry that happened to succeed would
-    /// delete the very file the caller is about to name in an error. A failure
-    /// is handed back rather than retried, because only the caller knows what a
-    /// leftover means at that point. A name that no longer holds the guarded
-    /// inode is such a failure: nothing is deleted and the error names the
-    /// file that was left alone.
+    /// Tracking stops either way, so `Drop` can never unlink this name twice.
+    /// Production removals are issued by the publication kernel's steps, which
+    /// stop tracking the name the same way and hand the removal to
+    /// [`AnchoredTempGuard::run_removal`].
+    #[cfg(test)]
     fn remove_now(&mut self) -> io::Result<()> {
-        let removed = if temporary_removal_forced_failure() {
-            Err(rustix::io::Errno::IO.into())
-        } else {
-            self.remove_proven()
-        };
-        self.armed = false;
-        removed
+        let removal = self.state.take_removal();
+        match self.run_removal(removal).into_outcome() {
+            kernel::trace::Removal::Removed => Ok(()),
+            kernel::trace::Removal::Left(left) => Err(self.left_error(left)),
+        }
     }
 
-    /// Unlink the guarded name only while it still holds the guarded inode.
-    fn remove_proven(&self) -> io::Result<()> {
+    /// Carry out a removal of this guard's name that the kernel handed out.
+    ///
+    /// After a successful exchange the name holds the *previous* destination,
+    /// and a retry that happened to succeed would delete the very file the
+    /// caller is about to name in an error, so the kernel has already stopped
+    /// tracking the name. A failure is handed back rather than retried,
+    /// because only the caller knows what a leftover means at that point. A
+    /// name that no longer holds the guarded inode is such a failure: nothing
+    /// is deleted and the error names the file that was left alone.
+    fn run_removal(
+        &self,
+        removal: kernel::removal::ProvenRemoval<Ident>,
+    ) -> kernel::removal::RemovalDone<io::Error> {
+        if temporary_removal_forced_failure() {
+            return removal.abandon(rustix::io::Errno::IO.into());
+        }
+        remove_proven_name(self.parent, &self.name, removal)
+    }
+
+    /// Why a removal of this guard's name left it on disk, as the error that
+    /// names it.
+    fn left_error(&self, left: kernel::trace::Leftover<io::Error>) -> io::Error {
         let path = Path::new(&self.name).display();
-        let Some(identity) = self.identity.as_ref() else {
-            return Err(io::Error::other(format!(
+        match left {
+            kernel::trace::Leftover::Unchecked => io::Error::other(format!(
                 "{path} could not be checked against the file this run put there, so it was left \
                  alone rather than deleted"
-            )));
-        };
-        if !name_holds_inode(self.parent, &self.name, identity).unwrap_or(false) {
-            return Err(io::Error::new(
+            )),
+            kernel::trace::Leftover::NotHeld => io::Error::new(
                 io::ErrorKind::Interrupted,
                 format!(
                     "{path} no longer holds the file this run put there, so it was left alone \
                      rather than deleted"
                 ),
-            ));
+            ),
+            kernel::trace::Leftover::RemoveFailed(error) => error,
         }
-        unlink_anchored(self.parent, &self.name)
     }
 }
 
 #[cfg(unix)]
 impl Drop for AnchoredTempGuard<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            // Conservative and silent: a name that no longer holds this run's
-            // file belongs to someone else, and a drop has nowhere to report.
-            let _ = self.remove_proven();
+        // Conservative and silent: a name that no longer holds this run's
+        // file belongs to someone else, and a drop has nowhere to report.
+        if let Some(removal) = self.state.drop_removal() {
+            let _ = remove_proven_name(self.parent, &self.name, removal);
         }
+    }
+}
+
+/// Unlink `name` under `parent` only while it still holds the inode `removal`
+/// is entitled to: the kernel's proven removal, carried out. Without an
+/// identity nothing is attempted; a name the probe cannot prove is left
+/// alone.
+#[cfg(unix)]
+fn remove_proven_name(
+    parent: &OwnedFd,
+    name: &OsStr,
+    removal: kernel::removal::ProvenRemoval<Ident>,
+) -> kernel::removal::RemovalDone<io::Error> {
+    let probe = match removal.start() {
+        kernel::removal::RemovalStart::Done(done) => return done,
+        kernel::removal::RemovalStart::Probe(probe) => probe,
+    };
+    let holds = name_holds_inode(parent, name, &probe.identity().0).unwrap_or(false);
+    match probe.after_probe(holds) {
+        kernel::removal::RemovalProbed::Done(done) => done,
+        kernel::removal::RemovalProbed::Unlink(unlink) => {
+            unlink.after_unlink(unlink_anchored(parent, name))
+        }
+    }
+}
+
+/// The fields of a snapshot a permission repair compares.
+#[cfg(unix)]
+fn repair_snap(snapshot: &FileSnapshot) -> kernel::repair::Snap {
+    kernel::repair::Snap {
+        len: snapshot.len,
+        fingerprint: snapshot.content_fingerprint,
+        permissions: snapshot.permissions,
     }
 }
 
@@ -677,6 +756,8 @@ fn copy_file_anchored_unix(
     request: CopyFileRequest<'_>,
     before_publish: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<PublishOutcome> {
+    use std::os::unix::fs::PermissionsExt;
+
     let rel_path = request.rel_path;
     let expected_destination = request.expected_destination;
     let source_root = open_canonical_directory(request.source_root)?;
@@ -726,26 +807,20 @@ fn copy_file_anchored_unix(
 
     // An expected-existing destination is pinned to a descriptor and matched
     // against its planning snapshot before anything is prepared. Every later
-    // step compares against this descriptor's identity, never a pathname.
-    let expected_destination_snapshot = expected_destination.existing_snapshot();
-    let mut verified_destination = match expected_destination_snapshot {
-        Some(expected) => Some(open_verified_destination(
-            &destination_parent,
-            &destination_name,
+    // step compares against this descriptor's identity, never a pathname. The
+    // planned snapshot travels with the descriptor, so no later step has to
+    // look it up again.
+    let mut verified_destination = match expected_destination.existing_snapshot() {
+        Some(expected) => Some((
+            open_verified_destination(&destination_parent, &destination_name, expected)?,
             expected,
-        )?),
+        )),
         None => None,
     };
 
-    if matches!(
-        expected_destination,
-        DestinationExpectation::RepairPermissions(_)
-    ) {
-        let expected = expected_destination_snapshot
-            .expect("a repair expectation always carries a destination snapshot");
-        let destination = verified_destination
-            .as_mut()
-            .expect("a repair expectation always carries a destination snapshot");
+    if let (DestinationExpectation::RepairPermissions(_), Some((destination, expected))) =
+        (expected_destination, verified_destination.as_mut())
+    {
         // A repair changes only the mode, so it is only ever correct when the
         // destination already holds the source's bytes. Planning proved that
         // with a full byte comparison, but the source and destination
@@ -753,19 +828,37 @@ fn copy_file_anchored_unix(
         // pinned data itself. Both snapshots have just been matched against
         // live descriptors, so agreeing with each other means the two files
         // agree right now.
-        if !expected.content_matches(request.expected_source) {
+        let Ok(repair) = kernel::repair::Repair::start(
+            repair_snap(expected),
+            repair_snap(request.expected_source),
+            permission_signature(&source_metadata),
+        ) else {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "destination content no longer matches the source; refusing to repair permissions",
             ));
-        }
-        ensure_open_handle_unchanged(&source, &source_metadata)?;
-        before_publish()?;
-        ensure_same_relative_parent(&destination_root, rel_path, &destination_parent)?;
-        ensure_name_refers_to_file(&destination_parent, &destination_name, destination)?;
-        ensure_open_snapshot_matches(destination, expected)?;
+        };
+        // The kernel hands out the `fchmod` only after these checks have
+        // passed, in this order.
+        let repair =
+            repair.after_source_check(ensure_open_handle_unchanged(&source, &source_metadata))?;
+        let repair = repair.after_before_publish(before_publish())?;
+        let repair = repair.after_parent_check(ensure_same_relative_parent(
+            &destination_root,
+            rel_path,
+            &destination_parent,
+        ))?;
+        let repair = repair.after_name_check(ensure_name_refers_to_file(
+            &destination_parent,
+            &destination_name,
+            destination,
+        ))?;
+        let chmod =
+            repair.after_pinned_check(ensure_open_snapshot_matches(destination, expected))?;
         before_permission_repair();
-        destination.set_permissions(source_metadata.permissions())?;
+        let mode = chmod.source_mode();
+        let read_back =
+            chmod.after_chmod(destination.set_permissions(fs::Permissions::from_mode(mode)))?;
         after_permission_repair();
         // Three things have to hold for this to be reportable as a repair: the
         // content is still the content that was verified, the mode is now the
@@ -788,25 +881,21 @@ fn copy_file_anchored_unix(
         // overwritten a microsecond later. What it bounds is what waft itself
         // does and claims — waft never alters the destination's content, and
         // never reports a repair it did not re-verify.
-        match verify_permission_repair(
-            destination,
-            expected,
-            permission_signature(&source_metadata),
-        ) {
-            RepairVerdict::Repaired => {}
+        let prove_name = match read_back.after_read_back(read_back_permission_repair(destination)) {
+            kernel::repair::ReadBackStep::ProveName(prove_name) => prove_name,
             // The content is not what was verified, so waft's mode is
             // certainly wrong on it whatever it now reads as; putting back the
             // mode the file was found with is the only way back to the state
             // the caller was promised.
-            RepairVerdict::ContentChanged => {
-                return Err(revert_permission_repair(destination, expected));
+            kernel::repair::ReadBackStep::Revert(revert) => {
+                return Err(revert_permission_repair(destination, &revert));
             }
             // The content is intact and the mode is someone else's deliberate
             // choice, made after waft's. Answering a concurrent `chmod` with
             // another `chmod` would be waft fighting a writer over a file it
             // has no claim to; the file is left exactly as that writer set it
             // and this run reports a failure instead of a repair.
-            RepairVerdict::ModeChanged => {
+            kernel::repair::ReadBackStep::ModeChanged => {
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "destination changed during publication; its content was not touched and its \
@@ -814,7 +903,7 @@ fn copy_file_anchored_unix(
                      writer set it",
                 ));
             }
-        }
+        };
         // Everything above was proved through the descriptor, which is the only
         // way to prove content and mode at all — but a descriptor keeps
         // answering after its name has been handed to somebody else's file.
@@ -837,17 +926,18 @@ fn copy_file_anchored_unix(
         // writer can always land after whatever check is last — and it is
         // bounded the same way: waft never reports a repair it did not
         // re-verify, and never touches what it did not prove.
-        if ensure_name_refers_to_file(&destination_parent, &destination_name, destination).is_err()
-        {
+        let name_holds =
+            ensure_name_refers_to_file(&destination_parent, &destination_name, destination).is_ok();
+        let Ok(sync) = prove_name.after_name_check(name_holds) else {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "destination changed during publication; another file took the destination name \
                  after the repair, so the file now there was never touched and no repair is \
                  reported",
             ));
-        }
+        };
         // The directory entry is untouched, so only the inode needs syncing.
-        rustix::fs::fsync(&*destination)?;
+        sync.after_sync(rustix::fs::fsync(&*destination))?;
         return Ok(PublishOutcome::PermissionsRepaired);
     }
 
@@ -875,36 +965,51 @@ fn copy_file_anchored_unix(
         io::copy(&mut source, &mut temporary)?;
     }
 
-    ensure_open_handle_unchanged(&source, &source_metadata)?;
-    temporary.set_permissions(source_metadata.permissions())?;
-    temporary.sync_all()?;
+    // The kernel's ordering chain: publication of any kind can only start
+    // from the token these checks yield, in this order.
+    let staged = kernel::ordering::Staged::prepared();
+    let staged =
+        staged.after_source_check(ensure_open_handle_unchanged(&source, &source_metadata))?;
+    let staged =
+        staged.after_staging_mode(temporary.set_permissions(source_metadata.permissions()))?;
+    let staged = staged.after_staging_sync(temporary.sync_all())?;
 
     // This callback performs the final tracked-index check under Git's
     // cooperative index lock. Revalidate the parent capability after it
     // returns, then publish immediately.
-    before_publish()?;
-    ensure_same_relative_parent(&destination_root, rel_path, &destination_parent)?;
-    ensure_name_refers_to_file(&destination_parent, temporary_guard.name(), &temporary)?;
+    let staged = staged.after_before_publish(before_publish())?;
+    let staged = staged.after_parent_check(ensure_same_relative_parent(
+        &destination_root,
+        rel_path,
+        &destination_parent,
+    ))?;
+    let ready = staged.after_staging_proof(ensure_name_refers_to_file(
+        &destination_parent,
+        temporary_guard.name(),
+        &temporary,
+    ))?;
 
     let outcome = match verified_destination.as_mut() {
         None => {
+            let publication =
+                kernel::noreplace::NoReplace::staging(ready, temporary_guard.identity());
             let published = publish_noreplace(
                 &destination_parent,
                 temporary_guard.name(),
                 &destination_name,
-                temporary_guard.identity(),
-            )?;
+                publication,
+            )
+            .into_result()?;
             let staging_path = destination_directory.join(temporary_guard.name());
             // The staging name is either gone or holds a file this run has no
             // right to delete; the guard must not act on it either way.
             temporary_guard.disarm();
-            published.into_result(&destination_path, &staging_path)?;
+            publication_result(published, &destination_path, &staging_path)?;
             PublishOutcome::Created
         }
-        Some(destination) => {
-            let expected = expected_destination_snapshot
-                .expect("an existing-destination expectation always carries a snapshot");
+        Some((destination, expected)) => {
             replace_verified_destination(
+                ready,
                 &destination_parent,
                 &destination_directory,
                 &mut temporary_guard,
@@ -966,66 +1071,43 @@ fn ensure_open_snapshot_matches(file: &mut fs::File, expected: &FileSnapshot) ->
     Ok(())
 }
 
-/// What a permissions repair turned out to have done, read back from the
-/// descriptor it was applied to.
-#[cfg(unix)]
-enum RepairVerdict {
-    /// The pinned bytes are still there and the mode is now the source's.
-    Repaired,
-    /// The bytes are not the ones that were verified.
-    ContentChanged,
-    /// The bytes are intact, but the mode is no longer the one waft set.
-    ModeChanged,
-}
-
-/// Whether a repair may be reported as a repair: the file must still hold
-/// exactly the bytes recorded in `expected` *and* carry `source_permissions`,
-/// the mode this repair was supposed to give it.
+/// Read back the descriptor a permission repair was applied to, for the
+/// kernel's verdict on whether the repair may be reported as one.
 ///
-/// Used only after waft has already changed something, to decide whether that
-/// change can be reported as correct. Anything that prevents proving the
-/// content — an unreadable descriptor, a file that is no longer regular, a
-/// change observed mid-read — is a content mismatch rather than an error to
-/// propagate. Content is judged first: a file whose bytes changed is the more
-/// serious finding, and its mode is meaningless either way.
+/// Used only after waft has already changed something. Anything that prevents
+/// proving the content — an unreadable descriptor, a file that is no longer
+/// regular, a change observed mid-read — reads back as nothing, which the
+/// kernel classifies as a content mismatch rather than an error to propagate:
+/// content is judged first, since a file whose bytes changed is the more
+/// serious finding and its mode is meaningless either way.
 #[cfg(unix)]
-fn verify_permission_repair(
-    file: &mut fs::File,
-    expected: &FileSnapshot,
-    source_permissions: u32,
-) -> RepairVerdict {
+fn read_back_permission_repair(file: &mut fs::File) -> Option<kernel::repair::Snap> {
     let Ok(metadata) = file.metadata() else {
-        return RepairVerdict::ContentChanged;
+        return None;
     };
     if !metadata.file_type().is_file() {
-        return RepairVerdict::ContentChanged;
+        return None;
     }
     let Ok(actual) = snapshot_open_regular_file(file, &metadata) else {
-        return RepairVerdict::ContentChanged;
+        return None;
     };
-    if !actual.content_matches(expected) {
-        RepairVerdict::ContentChanged
-    } else if actual.permissions != source_permissions {
-        RepairVerdict::ModeChanged
-    } else {
-        RepairVerdict::Repaired
-    }
+    Some(repair_snap(&actual))
 }
 
 /// Put the destination's mode back after a repair whose premise turned out to
 /// be false, and describe what happened.
 ///
-/// The restore is best effort: it is the only way back to the state the caller
+/// The kernel hands out the mode: the permission bits of the `st_mode` the
+/// destination was planned with, the only bits meaningful to `fchmod`. The
+/// restore is best effort: it is the only way back to the state the caller
 /// was promised, but a descriptor that cannot be `fchmod`-ed leaves the file
-/// carrying the source's mode over content this run never verified. That is the
-/// more specific problem, so it is the one reported.
+/// carrying the source's mode over content this run never verified. That is
+/// the more specific problem, so it is the one reported.
 #[cfg(unix)]
-fn revert_permission_repair(file: &fs::File, expected: &FileSnapshot) -> io::Error {
+fn revert_permission_repair(file: &fs::File, revert: &kernel::repair::RepairRevert) -> io::Error {
     use std::os::unix::fs::PermissionsExt;
 
-    // `expected.permissions` is a full `st_mode`; only the permission bits are
-    // meaningful to `fchmod`.
-    match file.set_permissions(fs::Permissions::from_mode(expected.permissions & 0o7777)) {
+    match file.set_permissions(fs::Permissions::from_mode(revert.revert_mode())) {
         Ok(()) => io::Error::new(
             io::ErrorKind::Interrupted,
             "destination changed during publication; its content was not touched and its \
@@ -1049,12 +1131,15 @@ fn revert_permission_repair(file: &fs::File, expected: &FileSnapshot) -> io::Err
 /// exchange is undone and this file is reported as a per-file failure rather
 /// than a silent clobber.
 ///
-/// `parent_directory` is the pathname of `parent` at planning time, used only
-/// to name files a caller may have to deal with by hand. `prepared` is the open
-/// descriptor for the temporary this run wrote; its identity is what every
-/// recovery step below proves before it moves or removes anything.
+/// `ready` is the publication kernel's proof that every pre-publication check
+/// passed. `parent_directory` is the pathname of `parent` at planning time,
+/// used only to name files a caller may have to deal with by hand. `prepared`
+/// is the open descriptor for the temporary this run wrote; its identity is
+/// what every recovery step below proves before it moves or removes anything.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn replace_verified_destination(
+    ready: kernel::ordering::Ready,
     parent: &OwnedFd,
     parent_directory: &Path,
     temporary_guard: &mut AnchoredTempGuard<'_>,
@@ -1065,72 +1150,94 @@ fn replace_verified_destination(
 ) -> io::Result<()> {
     ensure_name_refers_to_file(parent, destination_name, verified)?;
     ensure_open_snapshot_matches(verified, expected)?;
-    let verified_identity = rustix::fs::fstat(&*verified)?;
+    let verified_identity = Ident(rustix::fs::fstat(&*verified)?);
     // Pinned before the swap, while the temporary name is still guaranteed to
     // be this run's own file. Afterwards it is the only way to tell waft's
     // replacement apart from whatever a concurrent writer may have put under
     // either name.
-    let prepared_identity = rustix::fs::fstat(prepared)?;
+    let prepared_identity = Ident(rustix::fs::fstat(prepared)?);
+    let exchange = kernel::replace::Exchange::after_destination_verified(
+        ready,
+        &temporary_guard.state,
+        verified_identity,
+        prepared_identity,
+    );
 
     after_destination_verified();
 
-    match exchange_anchored(parent, temporary_guard.name(), destination_name) {
-        Ok(()) => {
-            let swapped_out_as_planned =
-                name_holds_inode(parent, temporary_guard.name(), &verified_identity)
-                    .unwrap_or(false)
-                    && ensure_open_snapshot_matches(verified, expected).is_ok();
-            if swapped_out_as_planned {
-                // The temporary name now holds the outgoing inode, which is
-                // therefore the only inode the guard may unlink from it.
-                temporary_guard.now_holds(verified_identity);
-                // Removing it is the last step, and its failure is not
-                // cosmetic: the replacement itself stands, but the file it
-                // replaced is still on disk under a name nobody expects,
-                // possibly holding the secrets this run was moving around.
-                // Report the file as failed and say exactly what is left.
-                let leftover = parent_directory.join(temporary_guard.name());
-                return temporary_guard.remove_now().map_err(|error| {
-                    io::Error::new(
-                        error.kind(),
-                        format!(
-                            "{} was replaced with the planned content, but the file it replaced \
-                             could not be removed ({error}): {} was left on disk and may still \
-                             hold the previous content; check it and delete it by hand",
-                            Path::new(destination_name).display(),
-                            leftover.display(),
-                        ),
-                    )
-                });
+    let exchanged = flag_attempt(exchange_anchored(
+        parent,
+        temporary_guard.name(),
+        destination_name,
+    ));
+    let undo = match exchange.after_exchange(exchanged) {
+        kernel::replace::Exchanged::Check(check) => {
+            let holds = name_holds_inode(parent, temporary_guard.name(), &check.expected().0)
+                .unwrap_or(false);
+            match check.after_probe(holds) {
+                kernel::replace::SwapProbed::Pinned(pinned) => {
+                    let matches = ensure_open_snapshot_matches(verified, expected).is_ok();
+                    match pinned.after_pinned(&mut temporary_guard.state, matches) {
+                        // The temporary name now holds the outgoing inode,
+                        // which is therefore the only inode the guard may
+                        // unlink from it. Removing it is the last step, and
+                        // its failure is not cosmetic: the replacement itself
+                        // stands, but the file it replaced is still on disk
+                        // under a name nobody expects, possibly holding the
+                        // secrets this run was moving around. Report the file
+                        // as failed and say exactly what is left.
+                        kernel::replace::SwapChecked::Remove(remove, removal) => {
+                            let leftover = parent_directory.join(temporary_guard.name());
+                            let removed =
+                                remove.after_removal(temporary_guard.run_removal(removal));
+                            return removed.into_result().map_err(|left| {
+                                let error = temporary_guard.left_error(left);
+                                io::Error::new(
+                                    error.kind(),
+                                    format!(
+                                        "{} was replaced with the planned content, but the file \
+                                         it replaced could not be removed ({error}): {} was left \
+                                         on disk and may still hold the previous content; check \
+                                         it and delete it by hand",
+                                        Path::new(destination_name).display(),
+                                        leftover.display(),
+                                    ),
+                                )
+                            });
+                        }
+                        kernel::replace::SwapChecked::Undo(undo) => undo,
+                    }
+                }
+                kernel::replace::SwapProbed::Undo(undo) => undo,
             }
-            // Another writer changed the destination between the identity
-            // proof and the exchange, so this run has just published over a
-            // file it never verified. Put both names back and fail this file.
-            Err(undo_lost_exchange(
-                parent,
-                parent_directory,
-                temporary_guard,
-                destination_name,
-                &prepared_identity,
-            ))
         }
-        Err(error) if rename_flag_unsupported(error) => {
+        kernel::replace::Exchanged::Displace(reprove) => {
             // Without an atomic exchange the destination is moved aside rather
             // than removed: a rename can be undone and cannot delete anything.
             ensure_name_refers_to_file(parent, destination_name, verified)?;
             ensure_open_snapshot_matches(verified, expected)?;
-            replace_by_displacement(
+            return replace_by_displacement(
                 parent,
                 parent_directory,
                 temporary_guard,
                 destination_name,
                 verified,
                 expected,
-                &verified_identity,
-            )
+                reprove.reproved(),
+            );
         }
-        Err(error) => Err(error.into()),
-    }
+        kernel::replace::Exchanged::Failed(error) => return Err(error),
+    };
+    // Another writer changed the destination between the identity proof and
+    // the exchange, so this run has just published over a file it never
+    // verified. Put both names back and fail this file.
+    Err(undo_lost_exchange(
+        parent,
+        parent_directory,
+        temporary_guard,
+        destination_name,
+        undo,
+    ))
 }
 
 /// Replace the destination on a filesystem that cannot exchange two names —
@@ -1166,6 +1273,9 @@ fn replace_verified_destination(
 /// and never deleted, and if it cannot be moved back it is named in the error
 /// rather than cleaned up. On this path "the previous destination is already
 /// gone" no longer describes any outcome.
+///
+/// Each of those decisions is the publication kernel's; `aside` is its state
+/// after the destination was re-proved.
 #[cfg(unix)]
 fn replace_by_displacement(
     parent: &OwnedFd,
@@ -1174,7 +1284,7 @@ fn replace_by_displacement(
     destination_name: &OsStr,
     verified: &mut fs::File,
     expected: &FileSnapshot,
-    verified_identity: &rustix::fs::Stat,
+    aside: kernel::replace::Aside<Ident>,
 ) -> io::Result<()> {
     let destination_path = parent_directory.join(destination_name);
     // A fresh 128-bit random name, generated exactly like a staging name. The
@@ -1182,10 +1292,19 @@ fn replace_by_displacement(
     // clobbered; nothing but waft creates these, and no name is ever reused.
     let displaced_name = next_displaced_name()?;
     before_destination_displaced();
-    rustix::fs::renameat(parent, destination_name, parent, &displaced_name)?;
+    let (identify, displaced_state) = aside.after_rename_aside(rustix::fs::renameat(
+        parent,
+        destination_name,
+        parent,
+        &displaced_name,
+    ))?;
     let mut displaced_guard =
-        AnchoredTempGuard::for_identity(parent, displaced_name, *verified_identity);
-    let displaced_path = parent_directory.join(displaced_guard.name());
+        AnchoredTempGuard::with_state(parent, displaced_name, displaced_state);
+    let displaced = Displaced {
+        directory: parent_directory,
+        destination: destination_path,
+        path: parent_directory.join(displaced_guard.name()),
+    };
 
     after_destination_displaced();
 
@@ -1193,42 +1312,140 @@ fn replace_by_displacement(
     // the destination name, including a symlink, so its identity is read with
     // `AT_SYMLINK_NOFOLLOW` rather than by opening it: the question here is
     // which entry was moved, not whether waft may read it.
-    let displaced_identity = match identity_at(parent, displaced_guard.name()) {
-        Ok(identity) => identity,
-        Err(error) => {
-            displaced_guard.disarm();
-            return Err(io::Error::other(format!(
+    let found = identity_at(parent, displaced_guard.name()).map(Ident);
+    let (restore, publication) = match identify.after_lstat(&mut displaced_guard.state, found) {
+        kernel::replace::Lstated::Done(done) => {
+            return displaced.result(done.into_verdict(), temporary_guard, &displaced_guard);
+        }
+        // What was displaced is not the file this run verified. Waft has no
+        // right to delete it and no reason to publish over it, so the only
+        // correct move is to put it back exactly where it was found.
+        kernel::replace::Lstated::Restore(restore, publication) => (restore, publication),
+        kernel::replace::Lstated::Pinned(pinned) => {
+            let matches = ensure_open_snapshot_matches(verified, expected).is_ok();
+            match pinned.after_pinned(&temporary_guard.state, &mut displaced_guard.state, matches) {
+                // ... or it is that inode, rewritten in place: the same holds.
+                kernel::replace::DisplacedChecked::Restore(restore, publication) => {
+                    (restore, publication)
+                }
+                kernel::replace::DisplacedChecked::Publish(publish, publication) => {
+                    let published = publish_noreplace(
+                        parent,
+                        temporary_guard.name(),
+                        destination_name,
+                        publication,
+                    );
+                    let verdict = match publish.after_publish(
+                        &mut temporary_guard.state,
+                        &mut displaced_guard.state,
+                        published,
+                    ) {
+                        // The replacement is published and the displaced file
+                        // is the one that was planned against: this is the
+                        // only unlink on this path, and the guard re-proves the
+                        // inode immediately before it runs.
+                        kernel::replace::PublishedStep::Cleanup(cleanup, removal) => cleanup
+                            .after_removal(displaced_guard.run_removal(removal))
+                            .into_verdict(),
+                        // Someone took the vacated name before the no-clobber
+                        // publish could use it. The previous destination is not
+                        // gone — it is under the displaced name — so put it back
+                        // rather than reporting a hole.
+                        kernel::replace::PublishedStep::Restore(restore, publication) => {
+                            let restored = publish_noreplace(
+                                parent,
+                                displaced_guard.name(),
+                                destination_name,
+                                publication,
+                            );
+                            restore
+                                .after_restore(
+                                    &mut temporary_guard.state,
+                                    &mut displaced_guard.state,
+                                    restored,
+                                )
+                                .into_verdict()
+                        }
+                    };
+                    return displaced.result(verdict, temporary_guard, &displaced_guard);
+                }
+            }
+        }
+    };
+    let restored = publish_noreplace(
+        parent,
+        displaced_guard.name(),
+        destination_name,
+        publication,
+    );
+    displaced.result(
+        restore.after_restore(restored).into_verdict(),
+        temporary_guard,
+        &displaced_guard,
+    )
+}
+
+/// The pathnames a displacement reports in its errors.
+#[cfg(unix)]
+struct Displaced<'p> {
+    /// The destination's parent directory, as the caller knows it.
+    directory: &'p Path,
+    /// The destination, as the caller knows it.
+    destination: std::path::PathBuf,
+    /// The fresh name the destination was moved aside to.
+    path: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl Displaced<'_> {
+    /// The per-file result of a displacement the kernel judged `verdict`.
+    fn result(
+        &self,
+        verdict: kernel::replace::DisplaceVerdict<io::Error>,
+        temporary_guard: &AnchoredTempGuard<'_>,
+        displaced_guard: &AnchoredTempGuard<'_>,
+    ) -> io::Result<()> {
+        use kernel::replace::DisplaceVerdict;
+
+        let destination_path = &self.destination;
+        let displaced_path = &self.path;
+        // Both cleanup failures matter: the displaced original may hold
+        // secrets, and a surviving staging name may belong to another writer.
+        let displaced_left = |left| {
+            let error = displaced_guard.left_error(left);
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "{} was replaced with the planned content, but the file it replaced could \
+                     not be removed ({error}): {} was left on disk and may still hold the \
+                     previous content; check it and delete it by hand",
+                    destination_path.display(),
+                    displaced_path.display(),
+                ),
+            )
+        };
+        let staging_left = |left| {
+            publication_left_error(left, destination_path, &self.staging_path(temporary_guard))
+        };
+        match verdict {
+            DisplaceVerdict::Replaced => Ok(()),
+            DisplaceVerdict::ReadBackFailed(error) => Err(io::Error::other(format!(
                 "{} was moved aside to {} and that name could not be read back ({error}): nothing \
                  was published and nothing was deleted, but the destination name is vacant until \
                  the displaced file is put back by hand",
                 destination_path.display(),
                 displaced_path.display(),
-            )));
-        }
-    };
-
-    if !same_inode(&displaced_identity, verified_identity)
-        || ensure_open_snapshot_matches(verified, expected).is_err()
-    {
-        // What was displaced is not the file this run verified. Waft has no
-        // right to delete it and no reason to publish over it, so the only
-        // correct move is to put it back exactly where it was found.
-        displaced_guard.disarm();
-        return Err(
-            match publish_noreplace(
-                parent,
-                displaced_guard.name(),
-                destination_name,
-                Some(&displaced_identity),
-            ) {
-                Ok(PublishedName::Consumed) => io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "destination changed during publication; it was left untouched",
-                ),
-                // The restore itself stands — the other writer's file is back
-                // under the destination name — but the link form of it could
-                // not consume the name the file was displaced to.
-                Ok(PublishedName::LeftBehind(reason)) => io::Error::new(
+            ))),
+            DisplaceVerdict::RestoredUntouched => Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "destination changed during publication; it was left untouched",
+            )),
+            // The restore itself stands — the other writer's file is back
+            // under the destination name — but the link form of it could not
+            // consume the name the file was displaced to.
+            DisplaceVerdict::RestoredLeftBehind(left) => {
+                let reason = publication_leftover(left);
+                Err(io::Error::new(
                     reason.kind(),
                     format!(
                         "destination changed during publication and the file that was there was \
@@ -1236,104 +1453,71 @@ fn replace_by_displacement(
                          it and delete it by hand",
                         displaced_path.display(),
                     ),
-                ),
-                Err(restore_error) => io::Error::other(format!(
-                    "destination changed during publication and the file that was there could not \
-                     be moved back ({restore_error}): it was kept as {} and nothing was deleted, \
-                     but {} now holds whatever took the name, or nothing at all",
-                    displaced_path.display(),
+                ))
+            }
+            DisplaceVerdict::RestoreFailed(restore_error) => Err(io::Error::other(format!(
+                "destination changed during publication and the file that was there could not \
+                 be moved back ({restore_error}): it was kept as {} and nothing was deleted, \
+                 but {} now holds whatever took the name, or nothing at all",
+                displaced_path.display(),
+                destination_path.display(),
+            ))),
+            DisplaceVerdict::DisplacedLeft(left) => Err(displaced_left(left)),
+            DisplaceVerdict::StagingLeft(left) => Err(staging_left(left)),
+            DisplaceVerdict::BothLeft { displaced, staging } => {
+                let displaced = displaced_left(displaced);
+                let staging = staging_left(staging);
+                Err(io::Error::new(
+                    displaced.kind(),
+                    format!("{displaced}; additionally, {staging}"),
+                ))
+            }
+            // The prepared replacement was never published, so the guard
+            // removes this run's own file on the way out.
+            DisplaceVerdict::PublishFailedRestored {
+                publish: publish_error,
+                left: None,
+            } => Err(io::Error::new(
+                publish_error.kind(),
+                format!(
+                    "could not publish over {} ({publish_error}): the file that was there was put \
+                     back and nothing was deleted",
                     destination_path.display(),
-                )),
-            },
-        );
-    }
-
-    match publish_noreplace(
-        parent,
-        temporary_guard.name(),
-        destination_name,
-        temporary_guard.identity(),
-    ) {
-        Ok(published) => {
-            let staging_path = parent_directory.join(temporary_guard.name());
-            temporary_guard.disarm();
-            // The replacement is published and the displaced file is the one
-            // that was planned against: this is the only unlink on this path,
-            // and the guard re-proves the inode immediately before it runs.
-            // Both cleanup failures matter: the displaced original may hold
-            // secrets, and a surviving staging name may belong to another writer.
-            let displaced_cleanup = displaced_guard.remove_now().map_err(|error| {
-                io::Error::new(
-                    error.kind(),
+                ),
+            )),
+            DisplaceVerdict::PublishFailedRestored {
+                publish: publish_error,
+                left: Some(left),
+            } => {
+                let reason = publication_leftover(left);
+                Err(io::Error::new(
+                    publish_error.kind(),
                     format!(
-                        "{} was replaced with the planned content, but the file it replaced could \
-                         not be removed ({error}): {} was left on disk and may still hold the \
-                         previous content; check it and delete it by hand",
+                        "could not publish over {} ({publish_error}): the file that was there was \
+                         put back and nothing was deleted, but {} was left on disk as well \
+                         ({reason}); check it and delete it by hand",
                         destination_path.display(),
                         displaced_path.display(),
                     ),
-                )
-            });
-            let staging_cleanup = published.into_result(&destination_path, &staging_path);
-            match (displaced_cleanup, staging_cleanup) {
-                (Err(displaced), Err(staging)) => Err(io::Error::new(
-                    displaced.kind(),
-                    format!("{displaced}; additionally, {staging}"),
-                )),
-                (Err(error), _) | (_, Err(error)) => Err(error),
-                (Ok(()), Ok(())) => Ok(()),
+                ))
             }
+            DisplaceVerdict::PublishFailedStranded {
+                publish: publish_error,
+                restore: restore_error,
+            } => Err(io::Error::other(format!(
+                "could not publish over {} ({publish_error}) and the file that was there could \
+                 not be put back ({restore_error}): it was kept as {} and the prepared \
+                 replacement as {}; nothing was deleted",
+                destination_path.display(),
+                displaced_path.display(),
+                self.staging_path(temporary_guard).display(),
+            ))),
         }
-        Err(publish_error) => {
-            // Someone took the vacated name before the no-clobber publish
-            // could use it. The previous destination is not gone — it is under
-            // the displaced name — so put it back rather than reporting a hole.
-            match publish_noreplace(
-                parent,
-                displaced_guard.name(),
-                destination_name,
-                Some(verified_identity),
-            ) {
-                Ok(restored) => {
-                    displaced_guard.disarm();
-                    // The prepared replacement was never published, so the
-                    // guard removes this run's own file on the way out.
-                    Err(match restored {
-                        PublishedName::Consumed => io::Error::new(
-                            publish_error.kind(),
-                            format!(
-                                "could not publish over {} ({publish_error}): the file that was \
-                                 there was put back and nothing was deleted",
-                                destination_path.display(),
-                            ),
-                        ),
-                        PublishedName::LeftBehind(reason) => io::Error::new(
-                            publish_error.kind(),
-                            format!(
-                                "could not publish over {} ({publish_error}): the file that was \
-                                 there was put back and nothing was deleted, but {} was left on \
-                                 disk as well ({reason}); check it and delete it by hand",
-                                destination_path.display(),
-                                displaced_path.display(),
-                            ),
-                        ),
-                    })
-                }
-                Err(restore_error) => {
-                    let stranded = parent_directory.join(temporary_guard.name());
-                    temporary_guard.disarm();
-                    displaced_guard.disarm();
-                    Err(io::Error::other(format!(
-                        "could not publish over {} ({publish_error}) and the file that was there \
-                         could not be put back ({restore_error}): it was kept as {} and the \
-                         prepared replacement as {}; nothing was deleted",
-                        destination_path.display(),
-                        displaced_path.display(),
-                        stranded.display(),
-                    )))
-                }
-            }
-        }
+    }
+
+    /// The full pathname of the staging name.
+    fn staging_path(&self, temporary_guard: &AnchoredTempGuard<'_>) -> std::path::PathBuf {
+        self.directory.join(temporary_guard.name())
     }
 }
 
@@ -1354,76 +1538,106 @@ fn replace_by_displacement(
 ///   assumed, because the same window exists around the temporary name.
 ///
 /// Leaving two files on disk under names the error spells out is recoverable by
-/// hand; deleting a file nobody has a copy of is not.
+/// hand; deleting a file nobody has a copy of is not. Each of those decisions,
+/// and the disarming of the guard whenever a proof fails, is the publication
+/// kernel's; `undo` is its state after the lost race was detected.
 #[cfg(unix)]
 fn undo_lost_exchange(
     parent: &OwnedFd,
     parent_directory: &Path,
     temporary_guard: &mut AnchoredTempGuard<'_>,
     destination_name: &OsStr,
-    prepared_identity: &rustix::fs::Stat,
+    undo: kernel::replace::Undo<Ident>,
 ) -> io::Error {
     before_exchange_back();
 
     // What the temporary name holds changes under this function's feet; its
     // pathname does not, and it is what an operator has to be told.
     let temporary_path = parent_directory.join(temporary_guard.name());
-    if !name_holds_inode(parent, destination_name, prepared_identity).unwrap_or(false) {
-        // Someone took the destination name again after the lost race was
-        // detected. Exchanging back now would file that writer's file under the
-        // temporary name and delete it on the way out.
-        temporary_guard.disarm();
-        return io::Error::other(format!(
-            "destination changed twice during publication: {} now holds a file this run never \
-             verified and was left untouched, so the swap was not undone and the file that was \
-             displaced was kept as {}; nothing was deleted",
-            Path::new(destination_name).display(),
-            temporary_path.display(),
-        ));
-    }
+    // Someone may have taken the destination name again after the lost race
+    // was detected. Exchanging back then would file that writer's file under
+    // the temporary name and delete it on the way out.
+    let holds = name_holds_inode(parent, destination_name, &undo.prepared().0).unwrap_or(false);
+    let swap_back = match undo.after_destination_probe(&mut temporary_guard.state, holds) {
+        kernel::replace::UndoProbed::Done(done) => {
+            return undo_error(done, temporary_guard, destination_name, &temporary_path);
+        }
+        kernel::replace::UndoProbed::ExchangeBack(swap_back) => swap_back,
+    };
 
-    if let Err(undo_error) = exchange_back(parent, temporary_guard.name(), destination_name) {
-        // The destination name still holds the newly prepared content and the
-        // temporary name holds a file this process never verified. Deleting
-        // that file would destroy another writer's data, so the guard is
-        // released and the situation is described instead.
-        temporary_guard.disarm();
-        return io::Error::other(format!(
-            "destination changed during publication and the swap could not be undone \
-             ({undo_error}): {} now holds newly published content and the file that was there was \
-             left as {}; nothing was deleted",
-            Path::new(destination_name).display(),
-            temporary_path.display(),
-        ));
-    }
+    // If this fails, the destination name still holds the newly prepared
+    // content and the temporary name holds a file this process never
+    // verified. Deleting that file would destroy another writer's data, so
+    // the guard is released and the situation is described instead.
+    let swapped =
+        exchange_back(parent, temporary_guard.name(), destination_name).map_err(io::Error::from);
+    let prove_staging = match swap_back.after_exchange_back(&mut temporary_guard.state, swapped) {
+        kernel::replace::UndoExchangedBack::Done(done) => {
+            return undo_error(done, temporary_guard, destination_name, &temporary_path);
+        }
+        kernel::replace::UndoExchangedBack::ProbeStaging(prove_staging) => prove_staging,
+    };
 
     after_exchange_back();
 
     // The undo put the other writer's file back, so the temporary name should
     // hold the prepared replacement once more — but "should" is not the
     // standard for an unlink.
-    if !name_holds_inode(parent, temporary_guard.name(), prepared_identity).unwrap_or(false) {
-        temporary_guard.disarm();
-        return io::Error::other(format!(
+    let holds = name_holds_inode(parent, temporary_guard.name(), &prove_staging.prepared().0)
+        .unwrap_or(false);
+    let done = match prove_staging.after_staging_probe(&mut temporary_guard.state, holds) {
+        kernel::replace::UndoStagingProbed::Done(done) => done,
+        kernel::replace::UndoStagingProbed::Remove(remove, removal) => {
+            remove.after_removal(temporary_guard.run_removal(removal))
+        }
+    };
+    undo_error(done, temporary_guard, destination_name, &temporary_path)
+}
+
+/// The per-file error for an undo the kernel judged `done`.
+#[cfg(unix)]
+fn undo_error(
+    done: kernel::replace::UndoDone<io::Error>,
+    temporary_guard: &AnchoredTempGuard<'_>,
+    destination_name: &OsStr,
+    temporary_path: &Path,
+) -> io::Error {
+    match done.into_verdict() {
+        kernel::replace::UndoVerdict::ChangedTwice => io::Error::other(format!(
+            "destination changed twice during publication: {} now holds a file this run never \
+             verified and was left untouched, so the swap was not undone and the file that was \
+             displaced was kept as {}; nothing was deleted",
+            Path::new(destination_name).display(),
+            temporary_path.display(),
+        )),
+        kernel::replace::UndoVerdict::UndoFailed(undo_error) => io::Error::other(format!(
+            "destination changed during publication and the swap could not be undone \
+             ({undo_error}): {} now holds newly published content and the file that was there was \
+             left as {}; nothing was deleted",
+            Path::new(destination_name).display(),
+            temporary_path.display(),
+        )),
+        kernel::replace::UndoVerdict::ReplacementNotHeld => io::Error::other(format!(
             "destination changed during publication and was left untouched, but {} no longer \
              holds the replacement this run prepared: it was left alone rather than deleted",
             temporary_path.display(),
-        ));
-    }
-    match temporary_guard.remove_now() {
-        Ok(()) => io::Error::new(
+        )),
+        kernel::replace::UndoVerdict::Undone => io::Error::new(
             io::ErrorKind::Interrupted,
             "destination changed during publication; it was left untouched",
         ),
-        Err(error) => io::Error::new(
-            error.kind(),
-            format!(
-                "destination changed during publication and was left untouched, but the \
-                 replacement this run prepared could not be removed ({error}): it is still on \
-                 disk as {}; delete it by hand",
-                temporary_path.display(),
-            ),
-        ),
+        kernel::replace::UndoVerdict::ReplacementNotRemoved(left) => {
+            let error = temporary_guard.left_error(left);
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "destination changed during publication and was left untouched, but the \
+                     replacement this run prepared could not be removed ({error}): it is still on \
+                     disk as {}; delete it by hand",
+                    temporary_path.display(),
+                ),
+            )
+        }
     }
 }
 
@@ -2024,8 +2238,7 @@ fn ensure_name_refers_to_file(
     }
 }
 
-/// What a successful no-clobber publication left under the name it published
-/// from.
+/// Why a no-clobber publication left the name it published from on disk.
 ///
 /// The rename form consumes that name: the move is the publication. The link
 /// form cannot — it publishes a second name for the same inode and removes the
@@ -2035,33 +2248,54 @@ fn ensure_name_refers_to_file(
 /// its guard once the publication is done, so a leftover nobody is told about
 /// is a `.waft-copy-*` file left on disk under a run reported as successful.
 #[cfg(unix)]
-#[must_use]
-enum PublishedName {
-    /// The name the publication started from is gone.
-    Consumed,
-    /// The publication stands, but the name it started from is still on disk
-    /// and was deliberately not deleted. Carries why, for the per-file failure
-    /// the caller builds around it.
-    LeftBehind(io::Error),
+fn publication_leftover(left: kernel::trace::Leftover<io::Error>) -> io::Error {
+    match left {
+        kernel::trace::Leftover::Unchecked => {
+            io::Error::other("it could not be checked against the file this run put there")
+        }
+        kernel::trace::Leftover::NotHeld => io::Error::new(
+            io::ErrorKind::Interrupted,
+            "it no longer holds the file this run put there",
+        ),
+        kernel::trace::Leftover::RemoveFailed(error) => {
+            io::Error::new(error.kind(), format!("removing it failed: {error}"))
+        }
+    }
 }
 
+/// The per-file failure for a publication of `leftover` onto `destination`
+/// that stands but left `leftover` behind: it names the full path of what is
+/// still on disk and says the destination itself is fine.
 #[cfg(unix)]
-impl PublishedName {
-    /// The per-file verdict for a publication of `leftover` onto
-    /// `destination`: success, or a failure that names the full path of what
-    /// is still on disk and says the destination itself is fine.
-    fn into_result(self, destination: &Path, leftover: &Path) -> io::Result<()> {
-        match self {
-            PublishedName::Consumed => Ok(()),
-            PublishedName::LeftBehind(reason) => Err(io::Error::new(
-                reason.kind(),
-                format!(
-                    "{} now holds the planned content, but {} was left on disk rather than \
-                     deleted ({reason}); check it and delete it by hand",
-                    destination.display(),
-                    leftover.display(),
-                ),
-            )),
+fn publication_left_error(
+    left: kernel::trace::Leftover<io::Error>,
+    destination: &Path,
+    leftover: &Path,
+) -> io::Error {
+    let reason = publication_leftover(left);
+    io::Error::new(
+        reason.kind(),
+        format!(
+            "{} now holds the planned content, but {} was left on disk rather than deleted \
+             ({reason}); check it and delete it by hand",
+            destination.display(),
+            leftover.display(),
+        ),
+    )
+}
+
+/// The per-file verdict for a publication of `leftover` onto `destination`:
+/// success, or the failure [`publication_left_error`] describes.
+#[cfg(unix)]
+fn publication_result(
+    published: kernel::trace::Published<io::Error>,
+    destination: &Path,
+    leftover: &Path,
+) -> io::Result<()> {
+    match published {
+        kernel::trace::Published::Consumed => Ok(()),
+        kernel::trace::Published::LeftBehind(left) => {
+            Err(publication_left_error(left, destination, leftover))
         }
     }
 }
@@ -2069,23 +2303,22 @@ impl PublishedName {
 /// Move `temporary` onto `destination` under `parent`, never clobbering a name
 /// that has been taken in the meantime.
 ///
-/// `identity` is what `temporary` is expected to hold; it is only needed where
+/// `publication` is the kernel's no-clobber machine for this move: it carries
+/// the identity `temporary` is expected to hold, which is only needed where
 /// the filesystem has no `RENAME_NOREPLACE` and the publication has to be done
-/// as a link followed by an unlink of the extra name. `None` means the caller
-/// could not pin it, which on that path means the extra name is left alone —
-/// and reported as [`PublishedName::LeftBehind`] rather than passed off as a
-/// clean publication.
+/// as a link followed by an unlink of the extra name. With no identity the
+/// extra name is left alone — and reported as left behind rather than passed
+/// off as a clean publication.
 #[cfg(unix)]
 fn publish_noreplace(
     parent: &OwnedFd,
     temporary: &OsStr,
     destination: &OsStr,
-    identity: Option<&rustix::fs::Stat>,
-) -> io::Result<PublishedName> {
-    if publish_forced_failure() {
-        return Err(rustix::io::Errno::IO.into());
-    }
-    let renamed = if noreplace_forced_unsupported() {
+    publication: kernel::noreplace::NoReplace<Ident>,
+) -> kernel::noreplace::NoReplaceDone<io::Error> {
+    let renamed = if publish_forced_failure() {
+        Err(rustix::io::Errno::IO)
+    } else if noreplace_forced_unsupported() {
         Err(rustix::io::Errno::NOTSUP)
     } else {
         rustix::fs::renameat_with(
@@ -2096,52 +2329,143 @@ fn publish_noreplace(
             rustix::fs::RenameFlags::NOREPLACE,
         )
     };
-    match renamed {
-        Ok(()) => Ok(PublishedName::Consumed),
-        // NOSYS/INVAL mean the kernel or filesystem does not implement the
-        // flag; NOTSUP/OPNOTSUPP are what macOS returns for SMB, NFS, and
-        // exFAT destinations. All four are "no RENAME_NOREPLACE here", not
-        // "this rename is wrong".
-        Err(error) if rename_flag_unsupported(error) => {
-            // A hard link is also an atomic no-replace publication for a
-            // regular file. The publication is done at that point; the extra
-            // name is then removed — but like every other unlink here, only
-            // while it still holds the inode that was just linked. A name
-            // another process has re-pointed in between is left as it is, and
-            // handed back rather than swallowed: from here on every return is
-            // a published destination, so the only question left is whether
-            // the caller has a leftover to report.
-            rustix::fs::linkat(
-                parent,
-                temporary,
-                parent,
-                destination,
-                rustix::fs::AtFlags::empty(),
-            )?;
+    // NOSYS/INVAL mean the kernel or filesystem does not implement the flag;
+    // NOTSUP/OPNOTSUPP are what macOS returns for SMB, NFS, and exFAT
+    // destinations. All four are "no RENAME_NOREPLACE here", not "this rename
+    // is wrong".
+    let link = match publication.after_rename(flag_attempt(renamed)) {
+        kernel::noreplace::NoReplaceRenamed::Done(done) => return done,
+        kernel::noreplace::NoReplaceRenamed::Link(link) => link,
+    };
+    // A hard link is also an atomic no-replace publication for a regular
+    // file. The publication is done at that point; the extra name is then
+    // removed — but like every other unlink here, only while it still holds
+    // the inode that was just linked. A name another process has re-pointed in
+    // between is left as it is, and handed back rather than swallowed: from
+    // here on every return is a published destination, so the only question
+    // left is whether the caller has a leftover to report.
+    let linked = rustix::fs::linkat(
+        parent,
+        temporary,
+        parent,
+        destination,
+        rustix::fs::AtFlags::empty(),
+    )
+    .map_err(io::Error::from);
+    match link.after_link(linked) {
+        kernel::noreplace::NoReplaceLinked::Done(done) => done,
+        kernel::noreplace::NoReplaceLinked::Cleanup(cleanup, removal) => {
             after_link_published();
-            let Some(identity) = identity else {
-                return Ok(PublishedName::LeftBehind(io::Error::other(
-                    "it could not be checked against the file this run put there",
-                )));
-            };
-            if !name_holds_inode(parent, temporary, identity).unwrap_or(false) {
-                return Ok(PublishedName::LeftBehind(io::Error::new(
-                    io::ErrorKind::Interrupted,
-                    "it no longer holds the file this run put there",
-                )));
-            }
-            match rustix::fs::unlinkat(parent, temporary, rustix::fs::AtFlags::empty()) {
-                Ok(()) => Ok(PublishedName::Consumed),
-                Err(error) => {
-                    let error = io::Error::from(error);
-                    Ok(PublishedName::LeftBehind(io::Error::new(
-                        error.kind(),
-                        format!("removing it failed: {error}"),
-                    )))
-                }
-            }
+            cleanup.after_cleanup(remove_proven_name(parent, temporary, removal))
         }
-        Err(error) => Err(error.into()),
+    }
+}
+
+/// The conversions between production values and the publication kernel's
+/// plain data.
+#[cfg(all(test, unix))]
+mod kernel_glue_tests {
+    use super::*;
+    use kernel::trace::Identity as _;
+    use tempfile::TempDir;
+
+    #[test]
+    fn flag_attempt_matches_the_unsupported_flag_table() {
+        assert!(matches!(
+            flag_attempt(Ok(())),
+            kernel::noreplace::Attempt::Done
+        ));
+        for errno in [
+            rustix::io::Errno::NOSYS,
+            rustix::io::Errno::INVAL,
+            rustix::io::Errno::NOTSUP,
+            rustix::io::Errno::OPNOTSUPP,
+        ] {
+            assert!(
+                matches!(
+                    flag_attempt(Err(errno)),
+                    kernel::noreplace::Attempt::Unsupported
+                ),
+                "{errno:?}"
+            );
+        }
+        for errno in [
+            rustix::io::Errno::EXIST,
+            rustix::io::Errno::NOENT,
+            rustix::io::Errno::ACCESS,
+            rustix::io::Errno::XDEV,
+            rustix::io::Errno::IO,
+        ] {
+            let kernel::noreplace::Attempt::Failed(error) = flag_attempt(Err(errno)) else {
+                panic!("{errno:?} must be a plain failure");
+            };
+            assert_eq!(error.raw_os_error(), Some(errno.raw_os_error()));
+            assert_eq!(error.to_string(), io::Error::from(errno).to_string());
+        }
+    }
+
+    #[test]
+    fn repair_snap_carries_length_fingerprint_and_full_mode() {
+        let snapshot = FileSnapshot::new(7, 0xfeed_beef, 0o100_644, Some((1, 2)));
+        let snap = repair_snap(&snapshot);
+        assert_eq!(
+            (snap.len, snap.fingerprint, snap.permissions),
+            (7, 0xfeed_beef, 0o100_644)
+        );
+    }
+
+    #[test]
+    fn ident_compares_device_and_inode_only() {
+        let tmp = TempDir::new().unwrap();
+        let first = tmp.path().join("first");
+        let second = tmp.path().join("second");
+        fs::write(&first, "x").unwrap();
+        fs::write(&second, "x").unwrap();
+        let before = Ident(rustix::fs::stat(&first).unwrap());
+        // Same inode, different size and times.
+        fs::write(&first, "rewritten in place").unwrap();
+        let after = Ident(rustix::fs::stat(&first).unwrap());
+        let other = Ident(rustix::fs::stat(&second).unwrap());
+        assert!(before.same_inode(&after));
+        assert!(after.same_inode(&before));
+        assert!(!before.same_inode(&other));
+    }
+
+    #[test]
+    fn a_guard_without_an_identity_never_unlinks() {
+        let tmp = TempDir::new().unwrap();
+        let directory = fs::canonicalize(tmp.path()).unwrap();
+        let parent = open_canonical_directory(&directory).unwrap();
+        let (name, _file) = create_anchored_temp(&parent).unwrap();
+        let mut guard = AnchoredTempGuard {
+            parent: &parent,
+            name: name.clone(),
+            state: kernel::removal::GuardState::staging(None),
+        };
+        let error = guard.remove_now().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(
+            error.to_string().contains("could not be checked"),
+            "{error}"
+        );
+        drop(guard);
+        assert!(
+            directory.join(&name).exists(),
+            "an unchecked name is never unlinked"
+        );
+    }
+
+    #[test]
+    fn a_disarmed_guard_does_nothing_on_drop() {
+        let tmp = TempDir::new().unwrap();
+        let directory = fs::canonicalize(tmp.path()).unwrap();
+        let parent = open_canonical_directory(&directory).unwrap();
+        let (name, file) = create_anchored_temp(&parent).unwrap();
+        {
+            let mut guard = AnchoredTempGuard::new(&parent, name.clone(), &file);
+            guard.disarm();
+        }
+        assert!(directory.join(&name).exists());
     }
 }
 
