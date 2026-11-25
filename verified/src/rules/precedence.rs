@@ -44,7 +44,7 @@
 //!   engine agree on a repository whose only rule file is the root one.
 //!
 //! The companion module [`super::reference`] relates these verdicts to Git's
-//! own per-directory semantics and proves four concrete divergences of the
+//! own per-directory semantics and proves five concrete divergences of the
 //! current behavior (kept on purpose; see its documentation).
 //!
 //! # Trust assumptions
@@ -318,7 +318,12 @@ pub open spec fn spec_cross_file<W>(ai: spec_fn(usize, usize) -> Option<W>, n: u
 ///   that file's verdict for every path below it and, being deeper, beats a
 ///   shallower selection of the path itself (`*.env`).
 /// - The empty path: `matched_path_or_any_parents` also tests the rule
-///   file's own directory, so a bare `/` line selects every path.
+///   file's own directory, as the empty path and as a directory. When the
+///   file selects it, the file selects every path for which no deeper level
+///   has a verdict in that file, and Git does not. A bare `/` line selects
+///   every path this way. A directory-only wildcard such as `*/` (anchored
+///   with a leading `/` or not) or `**/` selects every file directly in the
+///   rule file's directory (`.env` for the root file).
 pub open spec fn spec_explain<W>(
     pm: spec_fn(usize) -> Option<(MatchKind, W)>,
     ai: spec_fn(usize, usize) -> Option<W>,
