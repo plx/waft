@@ -6,9 +6,12 @@
 //!
 //! - **Outside** when the root is not a component-wise prefix of the path,
 //!   or when something other than a name remains after it (a remaining `..`
-//!   climbs out of the root; this only happens when the normalized root has
-//!   no name at all, such as `/`, `C:\` or an empty root; production used to
-//!   hit `unreachable!` here);
+//!   climbs out of the root, or a root directory or prefix follows a
+//!   repository root that is empty or only a prefix). For
+//!   `Path::components`-shaped paths this second case is possible exactly
+//!   when the normalized root has no name at all: `/`, `C:\`, `""`, `.`, or
+//!   a root that normalizes to only `..`s after those, such as `..`, `/..`
+//!   or `/repo/../..`. Production used to hit `unreachable!` here;
 //! - **RepoRoot** when the path is the root itself;
 //! - **Inside(n)** otherwise: the first `n` components are the root and the
 //!   rest, which is non-empty, consists of names only.
@@ -28,6 +31,9 @@
 //! - `theorem_escape_needs_nameless_root`: if the normalized root contains
 //!   a name, a path under it never has a non-name remainder, so the
 //!   escape branch is unreachable for ordinary repository roots.
+//! - `theorem_nameless_root_escapes`: conversely, every root whose
+//!   normalized form has no name reaches the escape branch (with the path
+//!   `root/..`). So the branch is reachable exactly for nameless roots.
 //! - `theorem_escape_is_leading`: whenever a non-name remains, it is the
 //!   very first remaining component, so production's former loop would have
 //!   panicked before converting any name to UTF-8. Reporting "outside the
@@ -229,9 +235,12 @@ pub proof fn theorem_round_trip(root: Seq<CompView>, rel: Seq<CompView>)
 }
 
 /// If the normalized root contains a name and is a component prefix of the
-/// normalized path, everything after it is a name. So for every repository
-/// root other than a bare filesystem root, drive or empty path, the
-/// "non-name remains" branch (formerly `unreachable!`) cannot be taken.
+/// normalized path, everything after it is a name. So the "non-name
+/// remains" branch (formerly `unreachable!`) can only be taken for a root
+/// whose normalized form has no name: a bare filesystem root, drive or
+/// prefix, an empty or `.` root, or a root that normalizes to only `..`s
+/// after those (`..`, `/..`, `/repo/../..`). `theorem_nameless_root_escapes`
+/// shows that every such root does reach the branch.
 /// Requires that a prefix component can only come first in the path's
 /// component list, which `Path::components` guarantees.
 pub proof fn theorem_escape_needs_nameless_root(abs: Seq<CompView>, root: Seq<CompView>, k: int)
@@ -254,6 +263,51 @@ pub proof fn theorem_escape_needs_nameless_root(abs: Seq<CompView>, root: Seq<Co
     assert forall|i: int| 0 <= i < rel.len() implies #[trigger] rel[i] is Normal by {
         assert(rel[i] == na[nr.len() + i]);
         assert(na[k] is Normal);
+    }
+}
+
+/// The converse of `theorem_escape_needs_nameless_root`: when the normalized
+/// root has no name, the root followed by `..` normalizes to the normalized
+/// root followed by `..`. That starts with the normalized root and leaves
+/// the non-name `..`, so the decision is Outside through the "non-name
+/// remains" branch. The witness path is `Path::components`-shaped whenever
+/// the root is. Together the two theorems say the formerly `unreachable!`
+/// branch is reachable exactly for roots whose normalized form has no name.
+pub proof fn theorem_nameless_root_escapes(root: Seq<CompView>)
+    requires
+        forall|k: int|
+            0 <= k < spec_normalize(root).len() ==> !(#[trigger] spec_normalize(root)[k] is Normal),
+    ensures
+        ({
+            let abs = root.push(CompView::ParentDir);
+            let na = spec_normalize(abs);
+            let nr = spec_normalize(root);
+            &&& prefix_first(root) ==> prefix_first(abs)
+            &&& na == nr.push(CompView::ParentDir)
+            &&& is_component_prefix(nr, na)
+            &&& na.len() > nr.len()
+            &&& !(na[nr.len() as int] is Normal)
+            &&& !all_normal(na.skip(nr.len() as int))
+            &&& spec_repo_relative(abs, root) is Outside
+        }),
+{
+    let abs = root.push(CompView::ParentDir);
+    let nr = spec_normalize(root);
+    assert(abs.drop_last() =~= root);
+    assert(spec_normalize(abs) == norm_step(nr, CompView::ParentDir));
+    if nr.len() > 0 {
+        assert(!(nr[nr.len() - 1] is Normal));
+    }
+    let na = spec_normalize(abs);
+    assert(na == nr.push(CompView::ParentDir));
+    assert(na.take(nr.len() as int) =~= nr);
+    assert(na.skip(nr.len() as int)[0] == na[nr.len() as int]);
+    if prefix_first(root) {
+        assert forall|i: int| 0 <= i < abs.len() && #[trigger] abs[i] is Prefix implies i == 0 by {
+            if i < root.len() {
+                assert(abs[i] == root[i]);
+            }
+        }
     }
 }
 

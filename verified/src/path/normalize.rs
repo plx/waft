@@ -442,8 +442,11 @@ proof fn lemma_names_after(s: Seq<CompView>, i: int, j: int)
 }
 
 /// For component lists shaped like `Path::components` output (a prefix can
-/// only come first), the normalized result is: prefixes and root, then
-/// `..`s, then names, with nothing after the first name except names.
+/// only come first), the normalized result keeps any prefix first and has
+/// nothing but names after its first name. With
+/// `theorem_normalize_is_normal_form` (no `.`, the root only after
+/// prefixes, no `..` after a name) the result is therefore: an optional
+/// prefix, an optional root, then `..`s, then names.
 pub proof fn theorem_names_last(cs: Seq<CompView>)
     requires
         prefix_first(cs),
