@@ -81,9 +81,19 @@
 //!   would report `skip (unsupported source type)` for the dangling symlink
 //!   and a per-file failure for the vanished source. Reachable only through
 //!   races, because eligibility requires a regular file.
+//! - `list -v` examines the source with two probes (`is_symlink`, then
+//!   `is_file`, which follows links) where the planner and `info` use one
+//!   `lstat`; the two can disagree only if the source changes in between.
 //! - `list -v` never names the `--overwrite` remedy for an untracked
 //!   conflict, although the label it receives carries the remedy flag; its
-//!   string table drops it. `info` and `copy --dry-run` name it.
+//!   string table drops it. `info` and `copy --dry-run` name it (in
+//!   different words: `--overwrite replaces` and `--overwrite replaces the
+//!   destination`).
+//! - Upstream of this kernel, `classify_destination` tests existence with
+//!   `Path::exists`, which follows symlinks, so a dangling symlink at the
+//!   destination is classified `Missing`. `info`, `list -v` and the planner
+//!   agree on that classification (and so predict and plan a copy), but the
+//!   real copy then fails because the name is taken.
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
