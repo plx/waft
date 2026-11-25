@@ -26,6 +26,9 @@
 //!   made with the descriptor of the file this acquisition created and the
 //!   path it staged, so the identity check can only ever unlink our own
 //!   lock; a stale descriptor from an earlier acquisition is never consulted.
+//!   (Its second clause, that no main or handler step changes a foreign
+//!   lock, follows from that and the trusted identity check, which `remove`
+//!   models as exact.)
 //! * `theorem_p2_one_removal_per_acquisition` — unless the previous
 //!   disposition is a handler that returns, an acquisition attempts removal
 //!   at most once. Exception (proved real by
@@ -33,6 +36,13 @@
 //!   previous handler, a second signal between `resume_pending`'s load and
 //!   its store of `STAGED` makes the handler remove the lock, and the main
 //!   thread then attempts a second removal (still identity-checked).
+//! * `theorem_p2_resume_never_repeats_a_removal` — under every previous
+//!   disposition, a resumed signal decides to remove the lock only if no
+//!   removal has been attempted yet in the acquisition. This is what
+//!   `resume_pending`'s `observed != EMPTY` guard buys: a lock that a
+//!   returning handler already removed is not unlinked a second time by the
+//!   resume (the race in the P2 exception happens after the resume's load,
+//!   which no guard can see).
 //! * `theorem_p3_no_stale_lock_on_signal_death` — if the lock path was
 //!   staged, the process never dies by a signal with its lock on disk, and no
 //!   acquisition ever leaves its lock behind. Exception (proved real by
@@ -925,6 +935,42 @@ pub proof fn theorem_p2_one_removal_per_acquisition(
 {
     lemma_inv_run(prev, stage_ok, coop, retries, disk, steps);
     reveal(inv);
+}
+
+/// P2, for every previous disposition: a resumed signal decides to remove
+/// the lock (`resume_pending` goes on from its load to its store of
+/// `STAGED`) only if no removal has been attempted yet in this acquisition.
+/// This is the role of `resume_pending`'s `observed != EMPTY` guard: when a
+/// handler that returns has already claimed and removed the lock, the
+/// resume's load sees `EMPTY` and the resume leaves the name alone, so it
+/// cannot unlink a lock another writer created after that removal. The guard
+/// cannot help when the handler claims the lock *after* the resume's load;
+/// that interleaving is `example_double_removal_with_returning_handler`.
+pub proof fn theorem_p2_resume_never_repeats_a_removal(
+    prev: Disposition,
+    stage_ok: bool,
+    coop: bool,
+    retries: nat,
+    disk: Disk,
+    steps: Seq<Step>,
+    other_error: bool,
+)
+    ensures
+        ({
+            let m = run(init(prev, stage_ok, coop, retries, disk), steps);
+            m.pc is ResumeLoad && main_step(m, other_error).pc is ResumeStoreStaged ==> m.removals == 0
+        }),
+{
+    lemma_inv_run(prev, stage_ok, coop, retries, disk, steps);
+    reveal(inv);
+    reveal(main_step);
+    let m = run(init(prev, stage_ok, coop, retries, disk), steps);
+    if !m.terminated {
+        match m.pc {
+            Pc::ResumeLoad(site) => {},
+            _ => {},
+        }
+    }
 }
 
 /// P3 (no stale lock on signal death). When the lock path fits the

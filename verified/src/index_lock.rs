@@ -26,7 +26,9 @@
 //!
 //! Each driver's `ensures` gives the exact sequence of effects it issues as a
 //! function of the values its loads and compare-exchanges observed
-//! (`*_events` / `acquire_log`). From those:
+//! (`*_events` / `acquire_log`). These sequences are close transcriptions of
+//! the drivers; the safety properties they serve are stated and proved on
+//! the [`model`] (see below). From those sequences:
 //!
 //! * `lemma_stage_writes_only_while_writing` — the descriptor is reset and
 //!   the path written strictly between the stores of `WRITING` and `STAGED`.
@@ -45,22 +47,36 @@
 //!   deferred-signal check whose `holds_lock` is whether that attempt created
 //!   the file; the `n`-th wait uses delay index `n < retries`; the "after N
 //!   attempt(s)" count equals the number of attempts.
+//! * [`acquire`] also says which value it returns, by the identity of the
+//!   values its steps produced (`acquire_outcome`): the error of a last check
+//!   that acted on a deferred signal takes precedence over everything else;
+//!   otherwise it returns the file the last attempt created, the error of the
+//!   attempt that failed for a reason other than contention, or the error
+//!   `locked_error` built on giving up. A contended attempt's own error is
+//!   never returned.
 //!
 //! # Theorems about the protocol model
 //!
 //! [`model`] is a ghost transition system of the main thread (one step per
 //! effect above), handler runs at any step boundary, and other Git writers.
 //! Its theorems — never remove a foreign lock (P1), at most one removal
-//! attempt per acquisition (P2), no stale lock on signal death (P3), no
-//! stranded deferral (P4), publication only under the lock (P7) — are
-//! stated and proved there, with the exceptions each one has.
+//! attempt per acquisition (P2), a resume never decides to remove a lock
+//! that was already removed (the role of `resume_pending`'s `EMPTY` guard),
+//! no stale lock on signal death (P3), no stranded deferral (P4),
+//! publication only under the lock (P7) — are stated and proved there, with
+//! the exceptions each one has. The model is linked to the drivers above by
+//! review, not by a mechanized refinement proof.
 //!
 //! # Trust assumptions
 //!
 //! * Each effect-trait method performs exactly the one operation its name
 //!   says, on the process-global cells (`STATE`, `PENDING_SIGNAL`,
 //!   `LOCK_FD`, `PATH`), with `SeqCst` ordering; its `ensures` only records
-//!   that the call happened and what it observed.
+//!   that the call happened and what it observed or produced.
+//! * `AcquireOps::try_create` classifies `AlreadyExists` (and only that) as
+//!   contention and returns any other failure already described for the
+//!   user; `AcquireOps::locked_error` describes a lock still held after the
+//!   given number of attempts. The message texts are not specified.
 //! * `remove_recorded_lock` unlinks the path only if `fstat(LOCK_FD)` and
 //!   `lstat(PATH)` report the same `(st_dev, st_ino)`.
 //! * The correspondence between the model's steps and these drivers is
@@ -537,7 +553,7 @@ pub enum CreateOutcome<F, Er> {
     Created(F),
     /// The name is taken (`AlreadyExists`): another writer holds the lock.
     Contended(Er),
-    /// Any other error; never retried.
+    /// Any other error, already described for the user; never retried.
     Failed(Er),
 }
 
@@ -561,9 +577,10 @@ pub open spec fn attempt_of<F, Er>(r: CreateOutcome<F, Er>) -> Attempt {
     }
 }
 
-/// One step of [`acquire`].
+/// One step of [`acquire`], without the values it carried: the shape the
+/// effect-order theorems are stated over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AcquireEvent {
+pub enum AcquireStep {
     /// [`stage`] ran.
     Stage,
     /// One `create_new` attempt, with its outcome.
@@ -581,10 +598,81 @@ pub enum AcquireEvent {
     Disarm,
 }
 
+/// One step of [`acquire`] as the ghost log records it: the step together
+/// with the values it produced, so the specification can say which file or
+/// error the acquisition returns.
+pub enum AcquireEvent<F, Er> {
+    /// [`stage`] ran.
+    Stage,
+    /// One `create_new` attempt, and what it produced.
+    Create(CreateOutcome<F, Er>),
+    /// One deferred-signal check: whether the caller held the lock, and what
+    /// the check returned (`Err` when it acted on a deferred signal and the
+    /// process survived the re-raise).
+    Check(bool, Result<(), Er>),
+    /// A retry delay: sleep for `INDEX_LOCK_RETRY_DELAYS[index]`.
+    Wait(usize),
+    /// The "locked after N attempt(s)" error was built, with this N.
+    GiveUp(usize, Er),
+    /// [`arm`] ran (after the creation hook).
+    Arm,
+    /// [`disarm`] ran.
+    Disarm,
+}
+
+/// The shape of a logged step.
+pub open spec fn step_of<F, Er>(e: AcquireEvent<F, Er>) -> AcquireStep {
+    match e {
+        AcquireEvent::Stage => AcquireStep::Stage,
+        AcquireEvent::Create(c) => AcquireStep::Create(attempt_of(c)),
+        AcquireEvent::Check(holds_lock, r) => AcquireStep::Check(holds_lock, r is Ok),
+        AcquireEvent::Wait(i) => AcquireStep::Wait(i),
+        AcquireEvent::GiveUp(n, _) => AcquireStep::GiveUp(n),
+        AcquireEvent::Arm => AcquireStep::Arm,
+        AcquireEvent::Disarm => AcquireStep::Disarm,
+    }
+}
+
+/// The shapes of a sequence of logged steps.
+pub open spec fn steps<F, Er>(events: Seq<AcquireEvent<F, Er>>) -> Seq<AcquireStep> {
+    events.map_values(|e: AcquireEvent<F, Er>| step_of(e))
+}
+
+/// The value the latest attempt that was not retried decided: the lock
+/// file it created, the error it failed with, or the "locked" error built
+/// on giving up. A contended attempt's own error never decides anything.
+pub open spec fn ending_value<F, Er>(events: Seq<AcquireEvent<F, Er>>) -> Option<Result<F, Er>>
+    decreases events.len(),
+{
+    if events.len() == 0 {
+        None
+    } else {
+        match events.last() {
+            AcquireEvent::Create(CreateOutcome::Created(file)) => Some(Ok(file)),
+            AcquireEvent::Create(CreateOutcome::Failed(error)) => Some(Err(error)),
+            AcquireEvent::GiveUp(_, error) => Some(Err(error)),
+            _ => ending_value(events.drop_last()),
+        }
+    }
+}
+
+/// What an acquisition with these events returns. A deferred signal that
+/// the last check acted on takes precedence over everything else: the
+/// result is that check's error. Otherwise it is the [`ending_value`]: the
+/// file created, the error of the attempt that failed, or the "locked"
+/// error.
+pub open spec fn acquire_outcome<F, Er>(events: Seq<AcquireEvent<F, Er>>) -> Option<Result<F, Er>> {
+    if events.len() > 0 && events.last() is Check && events.last()->Check_1 is Err {
+        Some(Err(events.last()->Check_1->Err_0))
+    } else {
+        ending_value(events)
+    }
+}
+
 /// The effects of `GitIndexLock::acquire`, implemented in `executor.rs`.
 pub trait AcquireOps<F, Er> {
     /// Ghost history of the operations performed through this value.
-    spec fn log(&self) -> Seq<AcquireEvent>;
+    spec fn log(&self) -> Seq<AcquireEvent<F, Er>>;
 
     /// Stage the lock path.
     fn stage(&mut self)
@@ -593,16 +681,17 @@ pub trait AcquireOps<F, Er> {
     ;
 
     /// Try to create the lock file exclusively; record its descriptor if
-    /// created.
+    /// created. A failure other than contention comes back already
+    /// described for the user.
     fn try_create(&mut self) -> (r: CreateOutcome<F, Er>)
         ensures
-            final(self).log() == old(self).log().push(AcquireEvent::Create(attempt_of(r))),
+            final(self).log() == old(self).log().push(AcquireEvent::Create(r)),
     ;
 
     /// Act on a deferred signal, if any; `Err` means acquisition must stop.
     fn check_deferred(&mut self, holds_lock: bool) -> (r: Result<(), Er>)
         ensures
-            final(self).log() == old(self).log().push(AcquireEvent::Check(holds_lock, r is Ok)),
+            final(self).log() == old(self).log().push(AcquireEvent::Check(holds_lock, r)),
     ;
 
     /// Sleep for the retry delay at `delay_index`.
@@ -612,15 +701,9 @@ pub trait AcquireOps<F, Er> {
     ;
 
     /// The error for a lock still held after `attempts` attempts.
-    fn locked_error(&mut self, attempts: usize) -> Er
+    fn locked_error(&mut self, attempts: usize) -> (e: Er)
         ensures
-            final(self).log() == old(self).log().push(AcquireEvent::GiveUp(attempts)),
-    ;
-
-    /// The error for a create attempt that failed for another reason.
-    fn create_error(&mut self, error: Er) -> Er
-        ensures
-            final(self).log() == old(self).log(),
+            final(self).log() == old(self).log().push(AcquireEvent::GiveUp(attempts, e)),
     ;
 
     /// Run the creation hook and arm the lock.
@@ -652,86 +735,102 @@ pub enum AcquireEnd {
 }
 
 /// `k` contended attempts, each followed by its check and a wait.
-pub open spec fn retry_log(k: nat) -> Seq<AcquireEvent>
+pub open spec fn retry_log(k: nat) -> Seq<AcquireStep>
     decreases k,
 {
     if k == 0 {
-        Seq::<AcquireEvent>::empty()
+        Seq::<AcquireStep>::empty()
     } else {
         retry_log((k - 1) as nat) + seq![
-            AcquireEvent::Create(Attempt::Contended),
-            AcquireEvent::Check(false, true),
-            AcquireEvent::Wait((k - 1) as usize),
+            AcquireStep::Create(Attempt::Contended),
+            AcquireStep::Check(false, true),
+            AcquireStep::Wait((k - 1) as usize),
         ]
     }
 }
 
-/// The events of the final attempt and what follows it.
-pub open spec fn final_log(retries: usize, end: AcquireEnd) -> Seq<AcquireEvent> {
+/// The steps of the final attempt and what follows it.
+pub open spec fn final_log(retries: usize, end: AcquireEnd) -> Seq<AcquireStep> {
     match end {
         AcquireEnd::Interrupted(a) => seq![
-            AcquireEvent::Create(a),
-            AcquireEvent::Check(a == Attempt::Created, false),
+            AcquireStep::Create(a),
+            AcquireStep::Check(a == Attempt::Created, false),
         ],
         AcquireEnd::Armed(ok) => seq![
-            AcquireEvent::Create(Attempt::Created),
-            AcquireEvent::Check(true, true),
-            AcquireEvent::Arm,
-            AcquireEvent::Check(true, ok),
+            AcquireStep::Create(Attempt::Created),
+            AcquireStep::Check(true, true),
+            AcquireStep::Arm,
+            AcquireStep::Check(true, ok),
         ],
         AcquireEnd::Locked(ok) => seq![
-            AcquireEvent::Create(Attempt::Contended),
-            AcquireEvent::Check(false, true),
-            AcquireEvent::GiveUp((retries + 1) as usize),
-            AcquireEvent::Disarm,
-            AcquireEvent::Check(false, ok),
+            AcquireStep::Create(Attempt::Contended),
+            AcquireStep::Check(false, true),
+            AcquireStep::GiveUp((retries + 1) as usize),
+            AcquireStep::Disarm,
+            AcquireStep::Check(false, ok),
         ],
         AcquireEnd::Failed(ok) => seq![
-            AcquireEvent::Create(Attempt::Failed),
-            AcquireEvent::Check(false, true),
-            AcquireEvent::Disarm,
-            AcquireEvent::Check(false, ok),
+            AcquireStep::Create(Attempt::Failed),
+            AcquireStep::Check(false, true),
+            AcquireStep::Disarm,
+            AcquireStep::Check(false, ok),
         ],
     }
 }
 
-/// The events of an acquisition whose last attempt is attempt `k`
+/// The steps of an acquisition whose last attempt is attempt `k`
 /// (counting from zero) and that ended as `end`.
-pub open spec fn acquire_log(retries: usize, k: nat, end: AcquireEnd) -> Seq<AcquireEvent> {
-    seq![AcquireEvent::Stage] + retry_log(k) + final_log(retries, end)
+pub open spec fn acquire_log(retries: usize, k: nat, end: AcquireEnd) -> Seq<AcquireStep> {
+    seq![AcquireStep::Stage] + retry_log(k) + final_log(retries, end)
+}
+
+proof fn lemma_steps_push<F, Er>(events: Seq<AcquireEvent<F, Er>>, e: AcquireEvent<F, Er>)
+    ensures
+        steps(events.push(e)) == steps(events).push(step_of(e)),
+{
+    assert(steps(events.push(e)) =~= steps(events).push(step_of(e)));
 }
 
 /// Take the lock: stage, then try `create_new` up to `retries + 1` times,
 /// checking for a deferred signal after every attempt; on success arm and
 /// check again, otherwise disarm and check again.
+///
+/// The result is `acquire_outcome` of the steps taken: the error of a
+/// final check that acted on a deferred signal, else the created file, the
+/// failed attempt's error, or the "locked" error.
 pub fn acquire<F, Er, O: AcquireOps<F, Er>>(o: &mut O, retries: usize) -> (r: Result<F, Er>)
     requires
         retries < usize::MAX,
     ensures
-        exists|k: nat, end: AcquireEnd|
+        exists|k: nat, end: AcquireEnd, events: Seq<AcquireEvent<F, Er>>|
             {
                 &&& k <= retries
                 &&& (end is Locked ==> k == retries)
-                &&& final(o).log() == old(o).log() + #[trigger] acquire_log(retries, k, end)
+                &&& final(o).log() == old(o).log() + events
+                &&& #[trigger] steps(events) == #[trigger] acquire_log(retries, k, end)
+                &&& acquire_outcome(events) == Some(r)
                 &&& (r is Ok <==> end == AcquireEnd::Armed(true))
             },
 {
     let ghost log0 = o.log();
     o.stage();
+    let ghost mut events: Seq<AcquireEvent<F, Er>> = seq![AcquireEvent::Stage];
     let mut attempt: usize = 0;
     proof {
-        assert(o.log() =~= log0 + seq![AcquireEvent::Stage] + retry_log(0));
+        assert(o.log() =~= log0 + events);
+        assert(steps(events) =~= seq![AcquireStep::Stage] + retry_log(0));
     }
     loop
         invariant
             attempt <= retries,
             retries < usize::MAX,
             log0 == old(o).log(),
-            o.log() == log0 + seq![AcquireEvent::Stage] + retry_log(attempt as nat),
+            o.log() == log0 + events,
+            steps(events) == seq![AcquireStep::Stage] + retry_log(attempt as nat),
         decreases retries - attempt,
     {
-        let ghost before = o.log();
         let created = o.try_create();
+        let ghost ev_create = AcquireEvent::Create(created);
         let holds_lock = match &created {
             CreateOutcome::Created(_) => true,
             CreateOutcome::Contended(_) => false,
@@ -739,9 +838,19 @@ pub fn acquire<F, Er, O: AcquireOps<F, Er>>(o: &mut O, retries: usize) -> (r: Re
         };
         let ghost a = attempt_of(created);
         let checked = o.check_deferred(holds_lock);
+        let ghost ev_check = AcquireEvent::<F, Er>::Check(holds_lock, checked);
+        let ghost e1 = events.push(ev_create);
+        let ghost e2 = e1.push(ev_check);
+        proof {
+            lemma_steps_push(events, ev_create);
+            lemma_steps_push(e1, ev_check);
+            assert(o.log() =~= log0 + e2);
+            assert(e2.drop_last() =~= e1);
+        }
         if let Err(interrupted) = checked {
             proof {
-                assert(o.log() =~= log0 + acquire_log(retries, attempt as nat, AcquireEnd::Interrupted(a)));
+                assert(steps(e2) =~= acquire_log(retries, attempt as nat, AcquireEnd::Interrupted(a)));
+                assert(acquire_outcome(e2) == Some(Err::<F, Er>(interrupted)));
             }
             return Err(interrupted);
         }
@@ -749,9 +858,21 @@ pub fn acquire<F, Er, O: AcquireOps<F, Er>>(o: &mut O, retries: usize) -> (r: Re
             CreateOutcome::Created(file) => {
                 o.arm();
                 let checked = o.check_deferred(true);
+                let ghost ev_last = AcquireEvent::<F, Er>::Check(true, checked);
+                let ghost e3 = e2.push(AcquireEvent::Arm);
+                let ghost e4 = e3.push(ev_last);
                 let ghost ok = checked is Ok;
                 proof {
-                    assert(o.log() =~= log0 + acquire_log(retries, attempt as nat, AcquireEnd::Armed(ok)));
+                    lemma_steps_push(e2, AcquireEvent::Arm);
+                    lemma_steps_push(e3, ev_last);
+                    assert(o.log() =~= log0 + e4);
+                    assert(steps(e4) =~= acquire_log(retries, attempt as nat, AcquireEnd::Armed(ok)));
+                    assert(e4.drop_last() =~= e3);
+                    assert(e3.drop_last() =~= e2);
+                    assert(ending_value(e1) == Some(Ok::<F, Er>(file)));
+                    assert(ending_value(e2) == ending_value(e1));
+                    assert(ending_value(e3) == ending_value(e2));
+                    assert(ending_value(e4) == ending_value(e3));
                 }
                 checked?;
                 return Ok(file);
@@ -760,33 +881,61 @@ pub fn acquire<F, Er, O: AcquireOps<F, Er>>(o: &mut O, retries: usize) -> (r: Re
                 if attempt < retries {
                     o.wait(attempt);
                     proof {
+                        let e3 = e2.push(AcquireEvent::Wait(attempt));
+                        lemma_steps_push(e2, AcquireEvent::Wait(attempt));
                         assert(retry_log((attempt + 1) as nat) == retry_log(attempt as nat) + seq![
-                            AcquireEvent::Create(Attempt::Contended),
-                            AcquireEvent::Check(false, true),
-                            AcquireEvent::Wait(attempt),
+                            AcquireStep::Create(Attempt::Contended),
+                            AcquireStep::Check(false, true),
+                            AcquireStep::Wait(attempt),
                         ]);
-                        assert(o.log() =~= log0 + seq![AcquireEvent::Stage] + retry_log((attempt + 1) as nat));
+                        assert(o.log() =~= log0 + e3);
+                        assert(steps(e3) =~= seq![AcquireStep::Stage] + retry_log((attempt + 1) as nat));
+                        events = e3;
                     }
                     attempt += 1;
                 } else {
                     let error = o.locked_error(retries + 1);
                     o.disarm();
                     let checked = o.check_deferred(false);
+                    let ghost ev_last = AcquireEvent::<F, Er>::Check(false, checked);
+                    let ghost e3 = e2.push(AcquireEvent::GiveUp((retries + 1) as usize, error));
+                    let ghost e4 = e3.push(AcquireEvent::Disarm);
+                    let ghost e5 = e4.push(ev_last);
                     let ghost ok = checked is Ok;
                     proof {
-                        assert(o.log() =~= log0 + acquire_log(retries, attempt as nat, AcquireEnd::Locked(ok)));
+                        lemma_steps_push(e2, AcquireEvent::GiveUp((retries + 1) as usize, error));
+                        lemma_steps_push(e3, AcquireEvent::Disarm);
+                        lemma_steps_push(e4, ev_last);
+                        assert(o.log() =~= log0 + e5);
+                        assert(steps(e5) =~= acquire_log(retries, attempt as nat, AcquireEnd::Locked(ok)));
+                        assert(e5.drop_last() =~= e4);
+                        assert(e4.drop_last() =~= e3);
+                        assert(ending_value(e3) == Some(Err::<F, Er>(error)));
+                        assert(ending_value(e4) == ending_value(e3));
+                        assert(ending_value(e5) == ending_value(e4));
                     }
                     checked?;
                     return Err(error);
                 }
             },
             CreateOutcome::Failed(error) => {
-                let error = o.create_error(error);
                 o.disarm();
                 let checked = o.check_deferred(false);
+                let ghost ev_last = AcquireEvent::<F, Er>::Check(false, checked);
+                let ghost e3 = e2.push(AcquireEvent::Disarm);
+                let ghost e4 = e3.push(ev_last);
                 let ghost ok = checked is Ok;
                 proof {
-                    assert(o.log() =~= log0 + acquire_log(retries, attempt as nat, AcquireEnd::Failed(ok)));
+                    lemma_steps_push(e2, AcquireEvent::Disarm);
+                    lemma_steps_push(e3, ev_last);
+                    assert(o.log() =~= log0 + e4);
+                    assert(steps(e4) =~= acquire_log(retries, attempt as nat, AcquireEnd::Failed(ok)));
+                    assert(e4.drop_last() =~= e3);
+                    assert(e3.drop_last() =~= e2);
+                    assert(ending_value(e1) == Some(Err::<F, Er>(error)));
+                    assert(ending_value(e2) == ending_value(e1));
+                    assert(ending_value(e3) == ending_value(e2));
+                    assert(ending_value(e4) == ending_value(e3));
                 }
                 checked?;
                 return Err(error);
@@ -949,7 +1098,7 @@ pub proof fn lemma_release_order(begun: bool, taken: i32, observed: u8)
 }
 
 /// Number of create attempts in an acquisition log.
-pub open spec fn count_creates(log: Seq<AcquireEvent>) -> nat
+pub open spec fn count_creates(log: Seq<AcquireStep>) -> nat
     decreases log.len(),
 {
     if log.len() == 0 {
@@ -965,13 +1114,13 @@ pub open spec fn count_creates(log: Seq<AcquireEvent>) -> nat
 
 /// Every attempt is immediately followed by a deferred-signal check whose
 /// `holds_lock` is whether that attempt created the file.
-pub open spec fn attempts_checked(log: Seq<AcquireEvent>) -> bool {
+pub open spec fn attempts_checked(log: Seq<AcquireStep>) -> bool {
     forall|j: int|
         0 <= j < log.len() && #[trigger] log[j] is Create ==> j + 1 < log.len() && log[j + 1] is Check
             && log[j + 1]->Check_0 == (log[j]->Create_0 == Attempt::Created)
 }
 
-proof fn lemma_count_creates_concat(a: Seq<AcquireEvent>, b: Seq<AcquireEvent>)
+proof fn lemma_count_creates_concat(a: Seq<AcquireStep>, b: Seq<AcquireStep>)
     ensures
         count_creates(a + b) == count_creates(a) + count_creates(b),
     decreases b.len(),
@@ -984,7 +1133,7 @@ proof fn lemma_count_creates_concat(a: Seq<AcquireEvent>, b: Seq<AcquireEvent>)
     }
 }
 
-proof fn lemma_count_creates_small(s: Seq<AcquireEvent>)
+proof fn lemma_count_creates_small(s: Seq<AcquireStep>)
     requires
         s.len() <= 5,
     ensures
@@ -1002,7 +1151,7 @@ proof fn lemma_count_creates_small(s: Seq<AcquireEvent>)
     }
 }
 
-proof fn lemma_attempts_checked_concat(a: Seq<AcquireEvent>, b: Seq<AcquireEvent>)
+proof fn lemma_attempts_checked_concat(a: Seq<AcquireStep>, b: Seq<AcquireStep>)
     requires
         attempts_checked(a),
         attempts_checked(b),
@@ -1035,9 +1184,9 @@ proof fn lemma_retry_log(k: nat)
     if k > 0 {
         let prev = retry_log((k - 1) as nat);
         let block = seq![
-            AcquireEvent::Create(Attempt::Contended),
-            AcquireEvent::Check(false, true),
-            AcquireEvent::Wait((k - 1) as usize),
+            AcquireStep::Create(Attempt::Contended),
+            AcquireStep::Check(false, true),
+            AcquireStep::Wait((k - 1) as usize),
         ];
         lemma_retry_log((k - 1) as nat);
         lemma_count_creates_concat(prev, block);
@@ -1102,7 +1251,7 @@ pub proof fn lemma_acquire_bounded_and_checked(retries: usize, k: nat, end: Acqu
             0 <= j < acquire_log(retries, k, end).len() && #[trigger] acquire_log(retries, k, end)[j] is GiveUp
                 ==> acquire_log(retries, k, end)[j]->GiveUp_0 == count_creates(acquire_log(retries, k, end)),
 {
-    let head = seq![AcquireEvent::Stage];
+    let head = seq![AcquireStep::Stage];
     let mid = retry_log(k);
     let tail = final_log(retries, end);
     let log = acquire_log(retries, k, end);
