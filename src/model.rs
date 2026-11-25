@@ -218,7 +218,16 @@ impl FileSnapshot {
     /// the equality forward as comparable data lets the publication path
     /// re-establish it instead of trusting a classification made earlier.
     pub(crate) fn content_matches(&self, other: &FileSnapshot) -> bool {
-        self.len == other.len && self.content_fingerprint == other.content_fingerprint
+        waft_verified::planner::entry::same_content(&self.content_key(), &other.content_key())
+    }
+
+    /// What identifies this snapshot's content for the verified planning
+    /// kernel: `(len, content_fingerprint)`.
+    pub(crate) fn content_key(&self) -> waft_verified::planner::entry::ContentKey {
+        waft_verified::planner::entry::ContentKey {
+            len: self.len,
+            fingerprint: self.content_fingerprint,
+        }
     }
 }
 
