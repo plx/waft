@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder, Glob};
 use waft_verified::rules::precedence::{self, MatchKind, RuleMatchOracle, Verdict};
+use waft_verified::selection::{self, RuleFileProbe};
 
 use crate::config::SymlinkPolicy;
 use crate::model::WorktreeincludeStatus;
@@ -128,11 +129,9 @@ pub fn explain_path(
     let mut contexts: Vec<FileMatchContext> = Vec::new();
     for dir in &dirs_to_check {
         let wti_path = dir.join(".worktreeinclude");
-        if !wti_path.is_file() {
-            continue;
-        }
-        if symlink_policy == SymlinkPolicy::Ignore && is_symlink(&wti_path) {
-            // Ignore policy: treat symlinked rule files as if absent.
+        // A rule file must resolve to a regular file; the Ignore policy
+        // treats symlinked rule files as if absent.
+        if !rule_file_consulted(&wti_path, symlink_policy) {
             continue;
         }
 
@@ -347,18 +346,33 @@ pub fn evaluate_root_only_path(
 /// engine never looks" — a distinction the repo-wide existence check in
 /// `GitBackend::worktreeinclude_exists_anywhere` cannot make.
 pub fn root_rule_file_is_consulted(repo_root: &Path, symlink_policy: SymlinkPolicy) -> bool {
-    let wti_path = repo_root.join(".worktreeinclude");
-    if !wti_path.is_file() {
-        return false;
-    }
-    !(symlink_policy == SymlinkPolicy::Ignore && is_symlink(&wti_path))
+    rule_file_consulted(&repo_root.join(".worktreeinclude"), symlink_policy)
 }
 
-/// True if `path` itself is a symlink (without following).
-fn is_symlink(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
+/// The per-path engines' consult gate for the rule file at `wti_path`,
+/// decided by the verified `selection::rule_file_consulted` kernel.
+fn rule_file_consulted(wti_path: &Path, symlink_policy: SymlinkPolicy) -> bool {
+    selection::rule_file_consulted(
+        &mut RuleFilePath(wti_path),
+        crate::worktreeinclude_engine::kernel_symlink_policy(symlink_policy),
+    )
+}
+
+/// The filesystem facts about one rule-file location (the consult gate's
+/// [`RuleFileProbe`] trust boundary).
+struct RuleFilePath<'a>(&'a Path);
+
+impl RuleFileProbe for RuleFilePath<'_> {
+    fn probe_is_file(&mut self) -> bool {
+        self.0.is_file()
+    }
+
+    /// True if the path itself is a symlink (without following).
+    fn probe_is_symlink(&mut self) -> bool {
+        fs::symlink_metadata(self.0)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]
