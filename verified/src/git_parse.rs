@@ -32,7 +32,10 @@
 //!   groups of four fields, with the line number read exactly as
 //!   `str::parse::<usize>` reads it (`usize_from_str`), and
 //!   `theorem_negation_never_ignores`: a negated or absent match never
-//!   ignores a path.
+//!   ignores a path. `theorem_check_ignore_match_contract`: on records of
+//!   Git's `-v -n` shape (source and line number both present or both
+//!   empty), a rule matched exactly when a source is named, and the path is
+//!   ignored exactly when that rule is not a negation.
 //! - Every returned span lies inside the output, so production slicing
 //!   cannot panic.
 //! - Round trips against Git's writers: `theorem_nul_terminated_fields`
@@ -1344,6 +1347,25 @@ pub proof fn theorem_negation_never_ignores(
             pattern,
             path,
         ).4 && !ignore_meaning(source, line_number, pattern, path).5,
+{
+}
+
+/// Git's `check-ignore -v -n` contract, stated without the parser: a match
+/// reports both its source and its line number, a non-match reports neither.
+/// On such records a rule matched exactly when a source is named, and the
+/// path is ignored exactly when a rule matched and it is not a negation.
+pub proof fn theorem_check_ignore_match_contract(
+    source: Seq<u8>,
+    line_number: Seq<u8>,
+    pattern: Seq<u8>,
+    path: Seq<u8>,
+)
+    requires
+        (source.len() == 0) == (line_number.len() == 0),
+    ensures
+        ignore_meaning(source, line_number, pattern, path).4 == (source.len() > 0),
+        ignore_meaning(source, line_number, pattern, path).5 == (source.len() > 0 && !(
+        pattern.len() > 0 && pattern[0] == b'!')),
 {
 }
 

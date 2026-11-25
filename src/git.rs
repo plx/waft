@@ -1206,34 +1206,66 @@ impl RepoStateCache {
     /// Return the cached state when the index file is still the one the state
     /// was built from, otherwise build a fresh state and cache that.
     ///
-    /// Both decisions are the verified [`git_policy::cached_state_is_current`]
-    /// and [`git_policy::may_cache_build`]; `git_policy` proves that over any
-    /// sequence of calls a served snapshot was built while the index carried
-    /// exactly the stamp observed at the start of the serving call.
+    /// The whole step is the verified [`git_policy::index_state`]; this only
+    /// supplies its effects ([`IndexStateEffects`]). The kernel stats the
+    /// index first and serves the cached state only when it was stored under
+    /// exactly that stamp. Otherwise it builds, and caches the build only when
+    /// a second `stat`, taken after the build and only when the first one
+    /// succeeded, sees the same stamp; otherwise the snapshot cannot be
+    /// attributed to either stamp. `git_policy` proves that over any sequence
+    /// of calls a served snapshot was built while the index carried exactly
+    /// the stamp observed at the start of the serving call.
     fn index_state(
         &self,
         source_root: &Path,
         index_path: &Path,
-        build: impl FnOnce() -> Result<RepoIndexState>,
+        build: impl FnMut() -> Result<RepoIndexState>,
     ) -> Result<Arc<RepoIndexState>> {
-        let before = index_fingerprint(index_path);
-        if let Some((stored, state)) = lock(&self.states).get(source_root)
-            && git_policy::cached_state_is_current(before, Some(*stored))
-        {
-            return Ok(Arc::clone(state));
-        }
+        git_policy::index_state(&mut IndexStateEffects {
+            states: &self.states,
+            source_root,
+            index_path,
+            build,
+        })
+    }
+}
 
-        let state = Arc::new(build()?);
-        // Only cache when the index did not change while it was being read;
-        // otherwise the snapshot cannot be attributed to either fingerprint.
-        // The second `stat` happens only when the first one succeeded.
-        let after = before.and_then(|_| index_fingerprint(index_path));
-        if git_policy::may_cache_build(before, after)
-            && let Some(stamp) = before
-        {
-            lock(&self.states).insert(source_root.to_path_buf(), (stamp, Arc::clone(&state)));
-        }
-        Ok(state)
+/// The effects of one [`RepoStateCache::index_state`] call, for the verified
+/// [`git_policy::index_state`] step.
+///
+/// Trusted glue: `observe_index` stats the index when called, `look_up` and
+/// `store` read and replace this repository's slot under the states lock, and
+/// `build` reads a fresh snapshot.
+struct IndexStateEffects<'a, B> {
+    states: &'a Mutex<HashMap<PathBuf, (git_policy::IndexStamp, Arc<RepoIndexState>)>>,
+    source_root: &'a Path,
+    index_path: &'a Path,
+    build: B,
+}
+
+impl<B> git_policy::IndexCacheIo<Arc<RepoIndexState>, Error> for IndexStateEffects<'_, B>
+where
+    B: FnMut() -> Result<RepoIndexState>,
+{
+    fn observe_index(&mut self) -> Option<git_policy::IndexStamp> {
+        index_fingerprint(self.index_path)
+    }
+
+    fn look_up(&mut self) -> Option<(git_policy::IndexStamp, Arc<RepoIndexState>)> {
+        lock(self.states)
+            .get(self.source_root)
+            .map(|(stamp, state)| (*stamp, Arc::clone(state)))
+    }
+
+    fn build(&mut self) -> Result<Arc<RepoIndexState>> {
+        (self.build)().map(Arc::new)
+    }
+
+    fn store(&mut self, stamp: git_policy::IndexStamp, snapshot: &Arc<RepoIndexState>) {
+        lock(self.states).insert(
+            self.source_root.to_path_buf(),
+            (stamp, Arc::clone(snapshot)),
+        );
     }
 }
 
@@ -1555,15 +1587,19 @@ pub(crate) fn case_folding_applies(configured: Option<bool>) -> bool {
 ///
 /// Every query is a hash lookup against the index names, plus — only when a
 /// query collides with a tracked name under Unicode case folding — a
-/// filesystem-identity check against the colliding index entries. Work per
-/// query is therefore bounded by the size of that one folded-name bucket,
-/// never by the size of the index.
+/// filesystem-identity check against the colliding index entries. The kernel
+/// keeps one hash bucket per index entry, so the expected work per query is
+/// one bucket's worth, not the size of the index; that bound is expected, not
+/// proved (see [`bucket_seed`]).
 ///
 /// The kernel proves the answer equals a naive scan of the index: an exact
 /// spelling is always tracked; otherwise a folded collision is tracked when
 /// the checkout folds case, and on a case-sensitive checkout only when the
 /// filesystem resolves the query and a colliding entry to the same object.
-/// It also proves which paths get `stat`ed, in which order.
+/// For both [`TrackedPathLookup::select`] and [`TrackedPathLookup::contains`]
+/// it also proves which paths get `stat`ed, in which order: per query, in
+/// query order, the query and then its colliding index entries, only on a
+/// case-sensitive checkout and only when needed.
 struct TrackedPathLookup {
     inner: TrackedLookup<UnicodeCaseFolding>,
 }
@@ -1604,9 +1640,12 @@ impl TrackedPathLookup {
 
 /// A per-process random seed for the lookup's hash buckets.
 ///
-/// The seed only spreads keys across buckets (no answer depends on it), and
-/// randomizing it keeps crafted index names from piling into one bucket, the
-/// same defense `std`'s `HashMap` uses.
+/// The seed only spreads keys across buckets (no answer depends on it; the
+/// kernel proves that). Randomizing it makes it harder to pile index names
+/// into one bucket, but it is weaker than `std`'s `HashMap` defense: the
+/// kernel hashes with seeded FNV-1a and a murmur finalizer, not a keyed PRF
+/// such as SipHash, so crafted names in an untrusted repository may still
+/// collide whatever the seed. Such collisions cost time, never correctness.
 fn bucket_seed() -> u64 {
     use std::hash::BuildHasher;
     std::collections::hash_map::RandomState::new().hash_one(0u8)
@@ -1946,6 +1985,48 @@ mod tests {
 
         cache.index_state(temp.path(), &index, build).unwrap();
         assert_eq!(builds.get(), 2, "a replaced index must be re-read");
+    }
+
+    #[test]
+    fn index_state_built_while_the_index_changes_is_not_cached() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let index = temp.path().join("index");
+        std::fs::write(&index, b"first").unwrap();
+
+        let cache = RepoStateCache::default();
+        let builds = std::cell::Cell::new(0);
+        // Git publishes a new index (rename over the old one) while this
+        // build is reading it.
+        let racing_build = || {
+            builds.set(builds.get() + 1);
+            let replacement = temp.path().join("index.lock");
+            std::fs::write(&replacement, b"second and longer").unwrap();
+            std::fs::rename(&replacement, &index).unwrap();
+            RepoIndexState::from_ls_files_stage_output(b"100644 a 0\tsecret.env\x00", false)
+        };
+        cache
+            .index_state(temp.path(), &index, racing_build)
+            .unwrap();
+        assert!(
+            lock(&cache.states).get(temp.path()).is_none(),
+            "a snapshot read while the index changed belongs to neither stamp"
+        );
+
+        // With the index stable again, the next build is cached under the
+        // stamp the index now carries, and reused.
+        let build = || {
+            builds.set(builds.get() + 1);
+            RepoIndexState::from_ls_files_stage_output(b"100644 a 0\tsecret.env\x00", false)
+        };
+        cache.index_state(temp.path(), &index, build).unwrap();
+        cache.index_state(temp.path(), &index, build).unwrap();
+        assert_eq!(builds.get(), 2);
+        assert_eq!(
+            lock(&cache.states)
+                .get(temp.path())
+                .map(|(stamp, _)| *stamp),
+            index_fingerprint(&index)
+        );
     }
 
     #[test]
