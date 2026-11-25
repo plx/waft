@@ -41,15 +41,27 @@
 //!   destination onto it — it is a fresh 128-bit random name nobody else has a
 //!   reason to create.
 //!
+//! `theorem_only_own_or_verified_lost` additionally assumes **A-link**
+//! (`link_window_quiet`): nothing else acts between a successful fallback
+//! hard link and the probe of the extra name right after it. Production
+//! defends that window (a re-pointed name is left alone and reported), so
+//! this axiom is only needed for the stronger conclusion, not for safety.
+//!
 //! # Theorems
 //!
 //! * `theorem_no_foreign_loss` (**T1**): for every safe trace and every
 //!   admissible schedule, any inode that one of waft's steps makes vanish from
 //!   the namespace is one the step's immediately preceding probe proved under
 //!   the name it unlinked, and that the run was `entitled` to remove there:
-//!   its own staging file, a second name its own hard link had just made
-//!   redundant, or the verified planned destination after the read-back that
-//!   followed moving it. A third writer's file is never destroyed by waft.
+//!   its own staging file, the verified planned destination after the
+//!   read-back that followed moving it, or the extra name of an inode waft's
+//!   own hard link had just published at the destination. In the last case the
+//!   inode only vanishes if another process removed it from the destination
+//!   in between — the hard-link fallback cannot do better than POSIX lets it.
+//! * `theorem_only_own_or_verified_lost` (**T1′**): with A-link as well,
+//!   the only inodes waft ever makes vanish are its own staging file and the
+//!   verified planned destination; a third writer's file never vanishes
+//!   through a waft step.
 //! * `theorem_dest_never_clobbered` (**T2**): whatever the destination name
 //!   holds right before any of waft's steps is still in the namespace right
 //!   after it — a waft step can move it aside or swap it out, never drop it.
@@ -262,6 +274,61 @@ pub proof fn theorem_no_foreign_loss(t: Seq<Ev>, pre: Seq<Fs>, r: Run)
                 lemma_present_witness(post, n, x);
             }
             assert(x == y);
+        }
+    }
+}
+
+/// Trigger wrapper: `e` is a successful hard link.
+pub open spec fn link_held(e: Ev) -> bool {
+    e matches Ev::Link { ok, .. } && ok
+}
+
+/// A-link: nothing else acts on the namespace between a successful fallback
+/// hard link and the waft step right after it.
+pub open spec fn link_window_quiet(t: Seq<Ev>, pre: Seq<Fs>) -> bool {
+    forall|i: int|
+        0 <= i && i + 1 < t.len() && #[trigger] link_held(t[i]) ==> pre[i + 1] == effect(
+            pre[i],
+            t[i],
+        )
+}
+
+/// **T1′**: with A-link as well, an inode one of waft's steps makes vanish is
+/// the run's own staging file or the verified planned destination — never
+/// anything else.
+pub proof fn theorem_only_own_or_verified_lost(t: Seq<Ev>, pre: Seq<Fs>, r: Run)
+    requires
+        safe(t, r),
+        admissible(t, pre),
+        link_window_quiet(t, pre),
+    ensures
+        forall|i: int, x: Ino|
+            0 <= i < t.len() && #[trigger] lost_at(t, pre, i, x) ==> r.own == Some(x)
+                || r.verified == Some(x),
+{
+    theorem_no_foreign_loss(t, pre, r);
+    assert forall|i: int, x: Ino| 0 <= i < t.len() && #[trigger] lost_at(t, pre, i, x) implies r.own
+        == Some(x) || r.verified == Some(x) by {
+        assert(removed_as_entitled(t, i, x, r));
+        let name = t[i]->Unlink_name;
+        let before = t.take(i - 1);
+        if r.own != Some(x) && r.verified != Some(x) {
+            // Only the link clause is left: the step two before is this
+            // name's own successful hard link onto the destination.
+            assert(before.len() > 0 && before.last() == (Ev::Link { from: name, ok: true }));
+            let j = i - 2;
+            assert(t[j] == before.last());
+            assert(link_held(t[j]));
+            assert(consistent(pre[j], t[j]));
+            assert(pre[j + 1] == effect(pre[j], t[j]));
+            assert(probe_held(t[i - 1]));
+            assert(consistent(pre[i - 1], t[i - 1]));
+            assert(pre[i] == effect(pre[i - 1], t[i - 1]));
+            // The link put the inode the name held onto the destination, the
+            // probe saw `x` under the name, and nothing moved in between: the
+            // destination still holds `x` when the name is unlinked.
+            assert(pre[i].at[Name::Dest] == x);
+            lemma_present_witness(effect(pre[i], t[i]), Name::Dest, x);
         }
     }
 }

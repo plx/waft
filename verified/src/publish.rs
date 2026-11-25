@@ -61,8 +61,10 @@
 //!   is proved last.
 //! * Filesystem level ([`model`]): T1 — under the A-window and A-fresh axioms,
 //!   any inode a waft step makes vanish is one it just proved and was entitled
-//!   to remove, never a third writer's file; T2 — whatever the destination
-//!   holds survives every waft step; NR5 — a no-clobber publication never
+//!   to remove; T1′ — with the A-link axiom as well, that inode is always the
+//!   run's own staging file or the verified planned destination, never a third
+//!   writer's file; T2 — whatever the destination holds survives every waft
+//!   step; NR5 — a no-clobber publication never
 //!   changes an occupied destination; T3 — a repair changes no name; plus a
 //!   witness that T1's hypotheses are satisfiable by a real replacement.
 //!
@@ -85,7 +87,7 @@
 //! * runs a guard's `Drop` on early return and unwinding (Verus does not model
 //!   unwinding);
 //! * and the POSIX semantics written as ghost definitions in [`model`], with
-//!   its two axioms (A-window, A-fresh).
+//!   its axioms (A-window, A-fresh; A-link for T1′ only).
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
