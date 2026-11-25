@@ -4,8 +4,10 @@
 //! with a severity. This kernel decides, from the severities alone:
 //!
 //! - whether the report has errors and how many ([`has_errors`],
-//!   [`error_count`]), which `ValidationReport::has_errors` and
-//!   `ValidationReport::error_count` in `src/model.rs` call;
+//!   [`error_count`]). [`validation_view`] computes every command's gate
+//!   with them. The public `ValidationReport::has_errors` and
+//!   `ValidationReport::error_count` methods in `src/model.rs` wrap them as
+//!   well, but no command decides through those methods;
 //! - what a command does with the report ([`validation_view`]): which issues
 //!   it prints and in what order, whether it stops with
 //!   `Error::Validation { error_count }`, and whether `waft validate` prints
@@ -57,7 +59,9 @@
 //!   is read only under `follow`, reported (without being read) exactly under
 //!   `error`, and skipped under `ignore`; a symlink with any other rule-file
 //!   name is never read or reported; and only regular files and followed
-//!   symlinks are ever read.
+//!   symlinks are ever read. This covers only rule files found by the
+//!   discovery walk: production opens `.git/info/exclude` and the global
+//!   excludes file by path, following symlinks under every policy.
 //!
 //! # Trust assumptions
 //!
@@ -595,8 +599,11 @@ pub fn rule_file_action(
     }
 }
 
-/// Symlinks reach a rule file's contents only through an explicit
-/// `follow` policy for `.worktreeinclude`. For a walk entry's file type,
+/// For rule files found by the discovery walk, symlinks reach a rule file's
+/// contents only through an explicit `follow` policy for `.worktreeinclude`.
+/// (`.git/info/exclude` and the global excludes file are not walk entries:
+/// production opens them by path, through any symlink, whatever the policy,
+/// and this theorem says nothing about them.) For a walk entry's file type,
 /// which describes the entry itself (a symlink is not also a regular file):
 /// a symlinked `.worktreeinclude` is read only under `Follow`, is reported
 /// (once, without reading) only under `Error`, and is silently skipped under

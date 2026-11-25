@@ -62,6 +62,9 @@ impl ValidationReport {
     ///
     /// Decided by the verified `waft_verified::validation::has_errors`, which
     /// is proven to hold exactly when [`Self::error_count`] is positive.
+    /// No command decides through this method: `copy`, `list`, `info` and
+    /// `validate` stop through `waft_verified::validation::validation_view`,
+    /// which computes the same answer with the same kernel functions.
     pub fn has_errors(&self) -> bool {
         waft_verified::validation::has_errors(&self.severities())
     }
