@@ -19,15 +19,20 @@
 //!
 //! # The planner model
 //!
-//! `spec_plan_outcome` restates, as a specification, the per-file decision
-//! `plan_with_overwrite_support` in `src/planner.rs` makes from its
-//! observations: the `lstat` source examination, the destination
-//! classification, the second parent-symlink check for a missing
-//! destination, the source and destination snapshots, `--overwrite`, and the
-//! platform's replacement support. It is a mirror kept here so the
-//! prediction theorems have something independent to agree with; the planner
-//! itself is verified (or not) separately, and a change to the planner's
-//! decision must be mirrored here.
+//! `spec_plan_outcome` restates, as a compact table, the per-file decision
+//! the planner makes from its observations: the `lstat` source
+//! examination, the destination classification, the second parent-symlink
+//! check for a missing destination, the source and destination snapshots,
+//! `--overwrite`, and the platform's replacement support. It is not a
+//! hand-kept copy: `theorem_model_is_planner` proves that, for every
+//! complete set of answers ([`crate::planner::entry::EntryWorld`]) and every
+//! flag, it is the outcome of the planner kernel's own decision table
+//! (`crate::planner::entry::plan_entry_spec`, the decision `src/planner.rs`
+//! executes), forgetting only which kind of copy or failure it is. A change
+//! to the planner kernel that changes any outcome therefore fails
+//! verification of this module. `theorem_names_are_one_to_one` proves the
+//! names this module uses for destination states, source examinations and
+//! skip reasons are a one-to-one, onto renaming of the planner kernel's.
 //!
 //! # Theorems
 //!
@@ -37,12 +42,18 @@
 //!   between the observations (the parent re-check agrees with the
 //!   classification and the source snapshot succeeds), whatever the
 //!   destination snapshot would have done.
-//! - `theorem_remedy_is_actionable`: the `--overwrite` remedy is named
-//!   exactly when re-running with `--overwrite` would plan a write (under the
-//!   same no-race conditions), so no output advertises a fix that would fail
-//!   or skip.
-//! - `theorem_tracked_destination_never_written`: neither the prediction nor
-//!   the planner ever writes a tracked, type-conflicting or unsafe
+//! - `theorem_remedy_is_actionable`: the predicted label carries the
+//!   `--overwrite` remedy flag exactly when re-running with `--overwrite`
+//!   would plan a write (under the same no-race conditions). The string
+//!   tables of `list -v` and `info` print a remedy only when the flag is
+//!   set, so neither advertises a fix that would fail or skip; they may leave
+//!   it out (`list -v` does for an untracked conflict, see the quirks below).
+//! - `theorem_prediction_is_planner_decision`: the two theorems above,
+//!   stated directly against the planner kernel's `plan_entry_spec` for every
+//!   complete set of answers.
+//! - `theorem_tracked_destination_never_written` and
+//!   `theorem_planner_never_writes_hard_conflicts`: neither the prediction
+//!   nor the planner kernel ever writes a tracked, type-conflicting or unsafe
 //!   destination, whatever the flags and observations.
 //! - `theorem_source_kind_matches_planner`: the `source_kind` label is
 //!   `file` exactly when the planner's `lstat` examination of the same
@@ -97,6 +108,13 @@
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
+
+#[cfg(verus_keep_ghost)]
+use crate::planner::destination::DestState as PlannerDestState;
+#[cfg(verus_keep_ghost)]
+use crate::planner::entry::{
+    Decision, EntryWorld, SkipKind as PlannerSkipKind, SourceAnswer, plan_entry_spec,
+};
 
 verus! {
 
@@ -180,8 +198,9 @@ pub enum PlanOutcome {
     Failure,
 }
 
-/// The planner's decision for one path, restated from
-/// `plan_with_overwrite_support` in `src/planner.rs`.
+/// The planner's decision for one path: the planner kernel's
+/// `plan_entry_spec` restated over this module's names, as
+/// `theorem_model_is_planner` proves.
 ///
 /// `recheck_unsafe` is the second parent-symlink check the planner makes for
 /// a missing destination; `source_snapshot_ok` and `dest_snapshot_ok` say
@@ -314,9 +333,11 @@ pub proof fn theorem_prediction_matches_planner(
 {
 }
 
-/// The `--overwrite` remedy is named exactly when re-running with
-/// `--overwrite` would plan a write for the same observations (both
-/// snapshots succeeding, the parent re-check agreeing).
+/// The predicted label carries the `--overwrite` remedy flag exactly when
+/// re-running with `--overwrite` would plan a write for the same
+/// observations (both snapshots succeeding, the parent re-check agreeing).
+/// This is about the flag: how `list -v` and `info` print it is
+/// production's string table, which may leave it out but never adds it.
 pub proof fn theorem_remedy_is_actionable(state: DestState, overwrite_supported: bool)
     ensures
         spec_predicted_action(state, overwrite_supported) matches ActionLabel::Skip {
@@ -366,6 +387,187 @@ pub proof fn theorem_tracked_destination_never_written(
             remedy,
         } && !remedy && !spec_overwrite_acts_on(reason),
 {
+}
+
+// ---------------------------------------------------------------------------
+// The planner model is the planner kernel's decision table.
+// ---------------------------------------------------------------------------
+
+/// This module's name for the planner kernel's destination state.
+pub open spec fn spec_dest_of(d: PlannerDestState) -> DestState {
+    match d {
+        PlannerDestState::Missing => DestState::Missing,
+        PlannerDestState::UpToDate => DestState::UpToDate,
+        PlannerDestState::PermissionsDiffer => DestState::PermissionsDiffer,
+        PlannerDestState::UntrackedConflict => DestState::UntrackedConflict,
+        PlannerDestState::TrackedConflict => DestState::TrackedConflict,
+        PlannerDestState::TypeConflict => DestState::TypeConflict,
+        PlannerDestState::UnsafePath => DestState::UnsafePath,
+    }
+}
+
+/// The planner kernel's destination state for this module's name of it.
+pub open spec fn spec_planner_dest(d: DestState) -> PlannerDestState {
+    match d {
+        DestState::Missing => PlannerDestState::Missing,
+        DestState::UpToDate => PlannerDestState::UpToDate,
+        DestState::PermissionsDiffer => PlannerDestState::PermissionsDiffer,
+        DestState::UntrackedConflict => PlannerDestState::UntrackedConflict,
+        DestState::TrackedConflict => PlannerDestState::TrackedConflict,
+        DestState::TypeConflict => PlannerDestState::TypeConflict,
+        DestState::UnsafePath => PlannerDestState::UnsafePath,
+    }
+}
+
+/// This module's name for the planner kernel's answer to the source query.
+pub open spec fn spec_exam_of(a: SourceAnswer) -> SourceExam {
+    match a {
+        SourceAnswer::RegularFile => SourceExam::Regular,
+        SourceAnswer::Symlink => SourceExam::Symlink,
+        SourceAnswer::Other => SourceExam::Other,
+        SourceAnswer::Error => SourceExam::Unreadable,
+    }
+}
+
+/// The planner kernel's answer to the source query for this module's name
+/// of it.
+pub open spec fn spec_planner_source(e: SourceExam) -> SourceAnswer {
+    match e {
+        SourceExam::Regular => SourceAnswer::RegularFile,
+        SourceExam::Symlink => SourceAnswer::Symlink,
+        SourceExam::Other => SourceAnswer::Other,
+        SourceExam::Unreadable => SourceAnswer::Error,
+    }
+}
+
+/// This module's name for the planner kernel's skip reason.
+pub open spec fn spec_skip_of(k: PlannerSkipKind) -> SkipKind {
+    match k {
+        PlannerSkipKind::UntrackedConflict => SkipKind::UntrackedConflict,
+        PlannerSkipKind::PermissionsDiffer => SkipKind::PermissionsDiffer,
+        PlannerSkipKind::TrackedConflict => SkipKind::TrackedConflict,
+        PlannerSkipKind::TypeConflict => SkipKind::TypeConflict,
+        PlannerSkipKind::UnsafePath => SkipKind::UnsafePath,
+        PlannerSkipKind::UnsupportedSourceType => SkipKind::UnsupportedSourceType,
+    }
+}
+
+/// The planner kernel's skip reason for this module's name of it.
+pub open spec fn spec_planner_skip(k: SkipKind) -> PlannerSkipKind {
+    match k {
+        SkipKind::UntrackedConflict => PlannerSkipKind::UntrackedConflict,
+        SkipKind::PermissionsDiffer => PlannerSkipKind::PermissionsDiffer,
+        SkipKind::TrackedConflict => PlannerSkipKind::TrackedConflict,
+        SkipKind::TypeConflict => PlannerSkipKind::TypeConflict,
+        SkipKind::UnsafePath => PlannerSkipKind::UnsafePath,
+        SkipKind::UnsupportedSourceType => PlannerSkipKind::UnsupportedSourceType,
+    }
+}
+
+/// The outcome a planner kernel decision announces: the decision without
+/// which kind of copy or which kind of failure it is.
+pub open spec fn spec_outcome_of(d: Decision) -> PlanOutcome {
+    match d {
+        Decision::Copy(_) => PlanOutcome::Copy,
+        Decision::NoOp => PlanOutcome::NoOp,
+        Decision::Skip(k) => PlanOutcome::Skip(spec_skip_of(k)),
+        Decision::Fail(_) => PlanOutcome::Failure,
+    }
+}
+
+/// The names are one to one and onto: each map above has the other as its
+/// inverse. So a statement about every state, examination or reason named
+/// here is a statement about every one the planner kernel has, and two
+/// planner skip reasons are never reported under the same name.
+pub proof fn theorem_names_are_one_to_one()
+    ensures
+        forall|d: PlannerDestState| #[trigger] spec_planner_dest(spec_dest_of(d)) == d,
+        forall|d: DestState| #[trigger] spec_dest_of(spec_planner_dest(d)) == d,
+        forall|a: SourceAnswer| #[trigger] spec_planner_source(spec_exam_of(a)) == a,
+        forall|e: SourceExam| #[trigger] spec_exam_of(spec_planner_source(e)) == e,
+        forall|k: PlannerSkipKind| #[trigger] spec_planner_skip(spec_skip_of(k)) == k,
+        forall|k: SkipKind| #[trigger] spec_skip_of(spec_planner_skip(k)) == k,
+{
+}
+
+/// The planner model is the planner kernel's decision table: for every
+/// complete set of answers the planner kernel can observe, under every
+/// `--overwrite` and platform setting, `spec_plan_outcome` of those answers
+/// is the outcome of `plan_entry_spec`. A change to the planner kernel that
+/// changes any outcome fails this proof until the model (and with it every
+/// prediction theorem in this module) is brought back in line.
+pub proof fn theorem_model_is_planner(w: EntryWorld, overwrite: bool, overwrite_supported: bool)
+    ensures
+        spec_outcome_of(plan_entry_spec(w, overwrite, overwrite_supported)) == spec_plan_outcome(
+            spec_exam_of(w.source),
+            spec_dest_of(w.destination),
+            w.parent_has_symlink,
+            !(w.source_snapshot is Error),
+            !(w.destination_snapshot is Error),
+            overwrite,
+            overwrite_supported,
+        ),
+{
+}
+
+/// The prediction theorems stated against the planner kernel itself. For a
+/// regular source whose parent re-check agrees with the classification and
+/// whose snapshot succeeds:
+///
+/// - the predicted label announces exactly the planner kernel's decision for
+///   `copy` without `--overwrite`, which is never a failure;
+/// - when the destination snapshot also succeeds, the label carries the
+///   `--overwrite` remedy exactly when the planner kernel plans a copy for
+///   `copy --overwrite`.
+pub proof fn theorem_prediction_is_planner_decision(w: EntryWorld, overwrite_supported: bool)
+    requires
+        w.source is RegularFile,
+        !w.parent_has_symlink,
+        !(w.source_snapshot is Error),
+    ensures
+        spec_label_outcome(spec_predicted_action(spec_dest_of(w.destination), overwrite_supported))
+            == spec_outcome_of(plan_entry_spec(w, false, overwrite_supported)),
+        !(plan_entry_spec(w, false, overwrite_supported) is Fail),
+        !(w.destination_snapshot is Error) ==> (spec_predicted_action(
+            spec_dest_of(w.destination),
+            overwrite_supported,
+        ) matches ActionLabel::Skip { reason: _, remedy } ==> (remedy <==> plan_entry_spec(
+            w,
+            true,
+            overwrite_supported,
+        ) is Copy)),
+{
+    let state = spec_dest_of(w.destination);
+    let dest_ok = !(w.destination_snapshot is Error);
+    theorem_model_is_planner(w, false, overwrite_supported);
+    theorem_model_is_planner(w, true, overwrite_supported);
+    theorem_prediction_matches_planner(state, overwrite_supported, dest_ok);
+    theorem_remedy_is_actionable(state, overwrite_supported);
+}
+
+/// A tracked, type-conflicting or unsafe destination is never planned for
+/// writing by the planner kernel, for any answers and flags.
+pub proof fn theorem_planner_never_writes_hard_conflicts(
+    w: EntryWorld,
+    overwrite: bool,
+    overwrite_supported: bool,
+)
+    requires
+        w.destination == PlannerDestState::TrackedConflict || w.destination
+            == PlannerDestState::TypeConflict || w.destination == PlannerDestState::UnsafePath,
+    ensures
+        !(plan_entry_spec(w, overwrite, overwrite_supported) is Copy),
+{
+    theorem_model_is_planner(w, overwrite, overwrite_supported);
+    theorem_tracked_destination_never_written(
+        spec_exam_of(w.source),
+        spec_dest_of(w.destination),
+        w.parent_has_symlink,
+        !(w.source_snapshot is Error),
+        !(w.destination_snapshot is Error),
+        overwrite,
+        overwrite_supported,
+    );
 }
 
 /// The file type one `lstat` reported.
