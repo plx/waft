@@ -4,5 +4,6 @@
 //!   verdict of the `git` engine (and of the root-only `claude-2026-04`
 //!   engine), including both negation caveats and the reported provenance.
 
+pub mod lines;
 pub mod precedence;
 pub mod reference;

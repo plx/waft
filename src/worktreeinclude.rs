@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder, Glob};
+use waft_verified::rules::lines;
 use waft_verified::rules::precedence::{self, MatchKind, RuleMatchOracle, Verdict};
 use waft_verified::selection::{self, RuleFileProbe};
 
@@ -50,19 +51,21 @@ fn build_file_match_context(
 
     for (line_num_0, line_text) in content.lines().enumerate() {
         let line_1based = line_num_0 + 1;
-        let pattern_text = line_text.trim_end();
 
         // Git only treats `#` in the first column as a comment. Leading
         // whitespace is significant and may be part of a valid filename.
-        if pattern_text.is_empty() || line_text.starts_with('#') {
+        // The verified kernel decides whether the line is a pattern and the
+        // length of its text without trailing whitespace.
+        let chars: Vec<char> = line_text.chars().collect();
+        let Some(pattern_len) = lines::rule_line_pattern_len(&chars) else {
             continue;
-        }
+        };
 
         if builder
             .add_line(Some(file_path.to_path_buf()), line_text)
             .is_ok()
         {
-            line_info.push((line_1based, pattern_text.to_string()));
+            line_info.push((line_1based, chars[..pattern_len].iter().collect()));
         }
     }
 
@@ -275,13 +278,16 @@ fn glob_line_info(
     line_info: &[(usize, String)],
 ) -> (usize, String) {
     let original = glob.original();
-    for (line, pattern) in line_info.iter().rev() {
-        if pattern == original {
-            return (*line, pattern.clone());
+    match lines::last_line_with_text(line_info, original) {
+        Some(index) => {
+            let (line, pattern) = &line_info[index];
+            (*line, pattern.clone())
         }
+        // Fallback — reached for a line ending in an escaped space, whose
+        // recorded text differs from the glob's original text (see
+        // `lines::lemma_quirk_escaped_trailing_space_loses_provenance`).
+        None => (0, original.to_string()),
     }
-    // Fallback — should not happen with well-formed input
-    (0, original.to_string())
 }
 
 /// Evaluate `rel_path` using ONLY the repo-root `.worktreeinclude` file.
@@ -841,6 +847,74 @@ mod tests {
             other => panic!("expected a whitelist match, got {other:?}"),
         }
         assert!(path_match_kind(matcher.matched("README.md", false)).is_none());
+    }
+
+    #[test]
+    fn rule_line_kernel_matches_trim_end_grammar() {
+        // Reference: the grammar the kernel replaced.
+        let reference = |line: &str| {
+            let pattern_text = line.trim_end();
+            if pattern_text.is_empty() || line.starts_with('#') {
+                None
+            } else {
+                Some(pattern_text.to_string())
+            }
+        };
+        let samples = [
+            "",
+            " ",
+            "\t",
+            "#x",
+            " #x",
+            "foo",
+            "foo  ",
+            "foo\t",
+            "foo\\ ",
+            "\u{a0}foo\u{a0}",
+            "\u{3000}",
+            "a b ",
+            "!x",
+            "\u{85}",
+            "#",
+            "x\u{2028}",
+            "\u{feff}x",
+        ];
+        for line in samples {
+            let chars: Vec<char> = line.chars().collect();
+            let actual = lines::rule_line_pattern_len(&chars)
+                .map(|len| chars[..len].iter().collect::<String>());
+            assert_eq!(actual, reference(line), "line {line:?}");
+        }
+    }
+
+    #[test]
+    fn line_lookup_returns_last_matching_entry() {
+        let info = vec![
+            (1, "a".to_string()),
+            (3, "b".to_string()),
+            (5, "a".to_string()),
+        ];
+        assert_eq!(lines::last_line_with_text(&info, "a"), Some(2));
+        assert_eq!(lines::last_line_with_text(&info, "b"), Some(1));
+        assert_eq!(lines::last_line_with_text(&info, "c"), None);
+        assert_eq!(lines::last_line_with_text(&[], "a"), None);
+    }
+
+    #[test]
+    fn quirk_escaped_trailing_space_reports_line_zero() {
+        // Pins current behavior (lines::
+        // lemma_quirk_escaped_trailing_space_loses_provenance).
+        let dir = setup_repo();
+        fs::write(dir.path().join(".worktreeinclude"), "foo\\ \n").unwrap();
+
+        let result = explain(dir.path(), "foo ", false, false, SymlinkPolicy::Follow);
+        match result {
+            WorktreeincludeStatus::Included { line, pattern, .. } => {
+                assert_eq!(line, 0);
+                assert_eq!(pattern, "foo\\ ");
+            }
+            other => panic!("expected the current Included at line 0, got {other:?}"),
+        }
     }
 
     // The next four tests pin current behavior that differs from Git; each
