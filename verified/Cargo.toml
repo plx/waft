@@ -1,0 +1,18 @@
+[package]
+name = "waft-verified"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+description = "Verus-verified decision kernels used by waft"
+license = "MIT"
+repository = "https://github.com/plx/waft"
+publish = false
+
+[dependencies]
+# Pinned to the exact Verus release in scripts/verus-verify.sh. Ordinary
+# builds compile the `verus!` blocks with all specifications and proofs
+# erased; `cargo verus verify -p waft-verified` checks them.
+vstd = { version = "=0.0.0-2026-11-22-0344", default-features = false, features = ["std"] }
+
+[package.metadata.verus]
+verify = true

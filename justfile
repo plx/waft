@@ -90,3 +90,7 @@ check-claude-worktree-smoke:
 check-worktrunk-parity-3way:
     just check-claude-worktree-smoke
     cargo test --test worktrunk_parity --locked -- --ignored --nocapture
+
+# Formally verify the waft-verified kernels with the pinned Verus release.
+check-verus:
+    bash scripts/verus-verify.sh
