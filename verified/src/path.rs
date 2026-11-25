@@ -15,7 +15,10 @@
 //! - [`containment::classify_containment`]: whether the normalized path is
 //!   outside the normalized root, is the root itself, or lies strictly
 //!   inside it with only names remaining (the former `strip_prefix`, empty
-//!   check, and `Normal`-only loop).
+//!   check, and `Normal`-only loop). Its component-prefix test,
+//!   [`containment::component_prefix`], is also the worktree-mapping
+//!   kernel's (`crate::worktree_map`), which production feeds through the
+//!   same lowering.
 //! - [`text::has_forbidden_text_char`]: whether a path string contains NUL,
 //!   CR or LF (`validate_text_path`).
 //! - [`text::classify_verbatim_prefix`]: how the Windows-only

@@ -16,8 +16,14 @@
 //! - **Inside(n)** otherwise: the first `n` components are the root and the
 //!   rest, which is non-empty, consists of names only.
 //!
+//! The component-prefix test itself, [`component_prefix`] (decided with
+//! `model::comp_eq`), is shared with the worktree-mapping kernel
+//! (`crate::worktree_map`), which needs `Path::strip_prefix`'s notion of
+//! containment without the names-only condition.
+//!
 //! Proven here:
 //!
+//! - `component_prefix` decides `is_component_prefix` of the views.
 //! - `theorem_inside_is_name_extension`: an `Inside(n)` decision means the
 //!   path is exactly the root followed by a non-empty list of names (no `.`,
 //!   no `..`, no root, no prefix).
@@ -83,6 +89,36 @@ pub open spec fn spec_containment(abs: Seq<CompView>, root: Seq<CompView>) -> Co
     }
 }
 
+/// Whether `root` is a component-wise prefix of `abs` (`Path::strip_prefix`
+/// succeeds), comparing components with `comp_eq`.
+pub fn component_prefix(root: &[Comp], abs: &[Comp]) -> (r: bool)
+    ensures
+        r == is_component_prefix(views(root@), views(abs@)),
+{
+    let ghost a = views(abs@);
+    let ghost rt = views(root@);
+    if root.len() > abs.len() {
+        return false;
+    }
+    let mut j: usize = 0;
+    while j < root.len()
+        invariant
+            a == views(abs@),
+            rt == views(root@),
+            j <= root@.len() <= abs@.len(),
+            forall|k: int| 0 <= k < j ==> a[k] == rt[k],
+        decreases root.len() - j,
+    {
+        if !comp_eq(&abs[j], &root[j]) {
+            assert(a.take(rt.len() as int)[j as int] != rt[j as int]);
+            return false;
+        }
+        j += 1;
+    }
+    assert(a.take(rt.len() as int) =~= rt);
+    true
+}
+
 /// The decision `RepoRelPath::normalize` makes for raw component lists: both
 /// are normalized, then compared.
 pub open spec fn spec_repo_relative(abs: Seq<CompView>, root: Seq<CompView>) -> Containment {
@@ -97,25 +133,9 @@ pub fn classify_containment(abs: &[Comp], root: &[Comp]) -> (r: Containment)
 {
     let ghost a = views(abs@);
     let ghost rt = views(root@);
-    if root.len() > abs.len() {
+    if !component_prefix(root, abs) {
         return Containment::Outside;
     }
-    let mut j: usize = 0;
-    while j < root.len()
-        invariant
-            a == views(abs@),
-            rt == views(root@),
-            j <= root@.len() <= abs@.len(),
-            forall|k: int| 0 <= k < j ==> a[k] == rt[k],
-        decreases root.len() - j,
-    {
-        if !comp_eq(&abs[j], &root[j]) {
-            assert(a.take(rt.len() as int)[j as int] != rt[j as int]);
-            return Containment::Outside;
-        }
-        j += 1;
-    }
-    assert(a.take(rt.len() as int) =~= rt);
     if abs.len() == root.len() {
         return Containment::RepoRoot;
     }

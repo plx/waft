@@ -203,6 +203,16 @@ fn kernel_components<'a>(components: &[Component<'a>]) -> Vec<Comp<'a>> {
     components.iter().map(kernel_component).collect()
 }
 
+/// Lower `path.components()` to the verified kernel's model, one `Comp` per
+/// component, with the same conversion `RepoRelPath::normalize` uses. The
+/// worktree-mapping kernel compares these with the path model's verified
+/// `comp_eq`, so kernel component equality is `Component` equality.
+pub(crate) fn kernel_path_components(path: &Path) -> Vec<Comp<'_>> {
+    path.components()
+        .map(|component| kernel_component(&component))
+        .collect()
+}
+
 /// Lower one `std` path component. Byte payloads are the components' encoded
 /// bytes, so kernel equality is `Component` equality.
 fn kernel_component<'a>(component: &Component<'a>) -> Comp<'a> {
@@ -440,11 +450,13 @@ mod tests {
         use std::ffi::OsStr;
 
         vec![
+            Prefix::Verbatim(OsStr::new("")),
             Prefix::Verbatim(OsStr::new("a")),
             Prefix::Verbatim(OsStr::new("b")),
             Prefix::VerbatimUNC(OsStr::new("a"), OsStr::new("b")),
             Prefix::VerbatimUNC(OsStr::new("a"), OsStr::new("c")),
             Prefix::VerbatimUNC(OsStr::new("ab"), OsStr::new("")),
+            Prefix::VerbatimUNC(OsStr::new(""), OsStr::new("ab")),
             Prefix::VerbatimDisk(b'C'),
             Prefix::VerbatimDisk(b'D'),
             Prefix::DeviceNS(OsStr::new("a")),
@@ -452,6 +464,7 @@ mod tests {
             Prefix::UNC(OsStr::new("a"), OsStr::new("b")),
             Prefix::UNC(OsStr::new("a"), OsStr::new("bc")),
             Prefix::UNC(OsStr::new("ab"), OsStr::new("c")),
+            Prefix::UNC(OsStr::new(""), OsStr::new("abc")),
             Prefix::Disk(b'C'),
             Prefix::Disk(b'D'),
         ]

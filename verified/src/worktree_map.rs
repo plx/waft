@@ -8,9 +8,14 @@
 //! (`Cli::map_worktree_path_to_source`) re-roots such a path at the source
 //! worktree by stripping the *deepest* known worktree that is a
 //! component-wise prefix of it. [`deepest_worktree_prefix`] makes that
-//! choice over component lists: every path is lowered to its sequence of
-//! components, and each component to an injective byte key, so component
-//! equality is byte-sequence equality.
+//! choice over component lists in the path kernel's model
+//! ([`crate::path::model::Comp`]): production lowers every path with the
+//! same conversion `RepoRelPath::normalize` uses (`kernel_path_components`
+//! in `src/path.rs`), and "worktree `w` contains the path" is the path
+//! kernel's own component prefix, `containment::is_component_prefix` of the
+//! [`CompView`] views, decided by the shared
+//! [`crate::path::containment::component_prefix`] with
+//! [`crate::path::model::comp_eq`] (proven to be view equality).
 //!
 //! When several worktrees of the same depth match (production's
 //! `Iterator::max_by_key` keeps the last of them), the kernel also returns
@@ -35,13 +40,19 @@
 //!   contains the path and no worktree is a strictly deeper prefix, the
 //!   mapping strips exactly `w` (for example, a path inside the source
 //!   worktree maps to itself when no nested worktree contains it).
+//! - `theorem_match_agrees_with_containment`: a worktree contains the path
+//!   with only names after it exactly when the repository-containment
+//!   decision `spec_containment(path, worktree)` is not `Outside`, and an
+//!   `Inside(n)` decision strips the same `n` components the mapping does.
+//!   The mapping alone also accepts a remainder with `..` or `.`, because
+//!   `strip_prefix` does not normalize it.
 //!
 //! # Trust assumptions
 //!
-//! - Production lowers `Path::components()` faithfully: one key per
-//!   component, and two keys are equal exactly when the components are equal
-//!   (`Component` equality, which compares parsed prefixes and the bytes of
-//!   normal components).
+//! - Production lowers `Path::components()` faithfully, one `Comp` per
+//!   component, with the conversion the path kernel already trusts (see
+//!   `crate::path`'s trust assumptions): kernel component equality is
+//!   `std::path::Component` equality.
 //! - `Path::strip_prefix(base)` succeeds exactly when `base`'s components
 //!   are a prefix of the path's components (the documented semantics), and
 //!   production re-runs it on the chosen worktree to obtain the remainder
@@ -50,89 +61,57 @@
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
+#[allow(unused_imports)]
+use crate::path::containment::*;
+#[allow(unused_imports)]
+use crate::path::model::*;
+#[cfg(verus_keep_ghost)]
+use crate::path::normalize::all_normal;
+
 verus! {
 
-/// A component list as byte sequences.
-pub open spec fn comps(c: Seq<Vec<u8>>) -> Seq<Seq<u8>> {
-    c.map_values(|x: Vec<u8>| x@)
-}
-
-/// Each worktree's component list as byte sequences.
-pub open spec fn worktree_comps(w: Seq<Vec<Vec<u8>>>) -> Seq<Seq<Seq<u8>>> {
-    w.map_values(|x: Vec<Vec<u8>>| comps(x@))
-}
-
-/// `base` is a component-wise prefix of `path` (`path.strip_prefix(base)`
-/// succeeds).
-pub open spec fn is_component_prefix(base: Seq<Seq<u8>>, path: Seq<Seq<u8>>) -> bool {
-    base.len() <= path.len() && path.subrange(0, base.len() as int) == base
+/// Each worktree's component list as views.
+pub open spec fn worktree_views<'a>(w: Seq<Vec<Comp<'a>>>) -> Seq<Seq<CompView>> {
+    w.map_values(|x: Vec<Comp<'a>>| views(x@))
 }
 
 /// Worktree `j` contains `path`.
-pub open spec fn matches_at(path: Seq<Seq<u8>>, wts: Seq<Seq<Seq<u8>>>, j: int) -> bool {
+pub open spec fn matches_at(path: Seq<CompView>, wts: Seq<Seq<CompView>>, j: int) -> bool {
     0 <= j < wts.len() && is_component_prefix(wts[j], path)
 }
 
 /// Worktree `i` contains `path` and no worktree containing it is deeper.
-pub open spec fn is_deepest(path: Seq<Seq<u8>>, wts: Seq<Seq<Seq<u8>>>, i: int) -> bool {
+pub open spec fn is_deepest(path: Seq<CompView>, wts: Seq<Seq<CompView>>, i: int) -> bool {
     &&& matches_at(path, wts, i)
     &&& forall|j: int| #[trigger] matches_at(path, wts, j) ==> wts[j].len() <= wts[i].len()
 }
 
 /// Worktree `i` is the deepest one containing `path`, and the last such one
 /// (`Iterator::max_by_key` keeps the last maximum).
-pub open spec fn is_chosen(path: Seq<Seq<u8>>, wts: Seq<Seq<Seq<u8>>>, i: int) -> bool {
+pub open spec fn is_chosen(path: Seq<CompView>, wts: Seq<Seq<CompView>>, i: int) -> bool {
     &&& is_deepest(path, wts, i)
     &&& forall|j: int| i < j && #[trigger] matches_at(path, wts, j) ==> wts[j].len() < wts[i].len()
-}
-
-/// Whether `base` is a component prefix of `path`.
-fn component_prefix(base: &[Vec<u8>], path: &[Vec<u8>]) -> (r: bool)
-    ensures
-        r == is_component_prefix(comps(base@), comps(path@)),
-{
-    if base.len() > path.len() {
-        return false;
-    }
-    let mut k: usize = 0;
-    while k < base.len()
-        invariant
-            base@.len() <= path@.len(),
-            k <= base@.len(),
-            forall|m: int| 0 <= m < k ==> (#[trigger] base@[m])@ == path@[m]@,
-        decreases base.len() - k,
-    {
-        if base[k].as_slice() != path[k].as_slice() {
-            assert(comps(path@).subrange(0, base@.len() as int)[k as int] != comps(base@)[k as int]);
-            return false;
-        }
-        assert(base@[k as int]@ =~= path@[k as int]@);
-        k += 1;
-    }
-    assert(comps(path@).subrange(0, base@.len() as int) =~= comps(base@));
-    true
 }
 
 /// The index of the deepest worktree whose components prefix `path`'s
 /// (the last one among equally deep matches), or `None` when no worktree
 /// contains `path`.
-pub fn deepest_worktree_prefix(path: &[Vec<u8>], worktrees: &[Vec<Vec<u8>>]) -> (r: Option<
-    usize,
->)
+pub fn deepest_worktree_prefix(path: &[Comp], worktrees: &[Vec<Comp>]) -> (r: Option<usize>)
     ensures
-        r is None <==> forall|j: int| !#[trigger] matches_at(comps(path@), worktree_comps(worktrees@), j),
-        r matches Some(i) ==> is_chosen(comps(path@), worktree_comps(worktrees@), i as int),
+        r is None <==> forall|j: int|
+            !#[trigger] matches_at(views(path@), worktree_views(worktrees@), j),
+        r matches Some(i) ==> is_chosen(views(path@), worktree_views(worktrees@), i as int),
 {
-    let ghost p = comps(path@);
-    let ghost w = worktree_comps(worktrees@);
+    let ghost p = views(path@);
+    let ghost w = worktree_views(worktrees@);
     let mut best: Option<usize> = None;
     let mut best_len: usize = 0;
     let mut i: usize = 0;
     while i < worktrees.len()
         invariant
             i <= worktrees@.len(),
-            p == comps(path@),
-            w == worktree_comps(worktrees@),
+            p == views(path@),
+            w == worktree_views(worktrees@),
             best is None ==> forall|j: int| 0 <= j < i ==> !#[trigger] matches_at(p, w, j),
             best matches Some(b) ==> {
                 &&& b < i
@@ -145,8 +124,8 @@ pub fn deepest_worktree_prefix(path: &[Vec<u8>], worktrees: &[Vec<Vec<u8>>]) -> 
             },
         decreases worktrees.len() - i,
     {
-        let candidate: &[Vec<u8>] = worktrees[i].as_slice();
-        assert(w[i as int] == comps(worktrees@[i as int]@));
+        let candidate: &[Comp] = worktrees[i].as_slice();
+        assert(w[i as int] == views(worktrees@[i as int]@));
         if component_prefix(candidate, path) {
             let depth = candidate.len();
             match best {
@@ -169,9 +148,9 @@ pub fn deepest_worktree_prefix(path: &[Vec<u8>], worktrees: &[Vec<Vec<u8>>]) -> 
 
 /// Two component prefixes of the same path with the same depth are equal.
 pub proof fn lemma_equal_depth_prefixes_are_equal(
-    path: Seq<Seq<u8>>,
-    a: Seq<Seq<u8>>,
-    b: Seq<Seq<u8>>,
+    path: Seq<CompView>,
+    a: Seq<CompView>,
+    b: Seq<CompView>,
 )
     requires
         is_component_prefix(a, path),
@@ -187,22 +166,19 @@ pub proof fn lemma_equal_depth_prefixes_are_equal(
 /// the worktree list: any deepest match in one list equals any deepest match
 /// in another list with the same members.
 pub proof fn theorem_choice_is_order_independent(
-    path: Seq<Seq<u8>>,
-    a: Seq<Seq<Seq<u8>>>,
-    b: Seq<Seq<Seq<u8>>>,
+    path: Seq<CompView>,
+    a: Seq<Seq<CompView>>,
+    b: Seq<Seq<CompView>>,
     i: int,
     j: int,
 )
     requires
-        forall|x: Seq<Seq<u8>>| a.contains(x) <==> b.contains(x),
+        forall|x: Seq<CompView>| a.contains(x) <==> b.contains(x),
         is_deepest(path, a, i),
         is_deepest(path, b, j),
     ensures
         a[i] == b[j],
-        path.subrange(a[i].len() as int, path.len() as int) == path.subrange(
-            b[j].len() as int,
-            path.len() as int,
-        ),
+        path.skip(a[i].len() as int) == path.skip(b[j].len() as int),
 {
     assert(a.contains(a[i]));
     assert(b.contains(b[j]));
@@ -216,8 +192,8 @@ pub proof fn theorem_choice_is_order_independent(
 /// If worktree `k` contains the path and no worktree is a strictly deeper
 /// prefix, the chosen worktree is `k`'s component sequence.
 pub proof fn theorem_deepest_containing_worktree_wins(
-    path: Seq<Seq<u8>>,
-    wts: Seq<Seq<Seq<u8>>>,
+    path: Seq<CompView>,
+    wts: Seq<Seq<CompView>>,
     k: int,
     i: int,
 )
@@ -227,10 +203,39 @@ pub proof fn theorem_deepest_containing_worktree_wins(
         is_chosen(path, wts, i),
     ensures
         wts[i] == wts[k],
-        path == wts[k] + path.subrange(wts[k].len() as int, path.len() as int),
+        path == wts[k] + path.skip(wts[k].len() as int),
 {
     lemma_equal_depth_prefixes_are_equal(path, wts[i], wts[k]);
-    assert(path =~= wts[k] + path.subrange(wts[k].len() as int, path.len() as int));
+    assert(path =~= wts[k] + path.skip(wts[k].len() as int));
+}
+
+/// The mapping and the repository-containment decision share one notion of
+/// "under": worktree `j` contains the path with only names after it exactly
+/// when `spec_containment(path, wts[j])` (the decision
+/// `classify_containment` makes) is not `Outside`, and an `Inside(n)`
+/// decision strips the same `n` components the mapping strips. The mapping
+/// additionally accepts a remainder that is not all names (for example one
+/// starting with `..`), which `strip_prefix` returns unnormalized.
+pub proof fn theorem_match_agrees_with_containment(
+    path: Seq<CompView>,
+    wts: Seq<Seq<CompView>>,
+    j: int,
+)
+    requires
+        0 <= j < wts.len(),
+    ensures
+        !(spec_containment(path, wts[j]) is Outside) <==> (matches_at(path, wts, j) && all_normal(
+            path.skip(wts[j].len() as int),
+        )),
+        spec_containment(path, wts[j]) is RepoRoot <==> (matches_at(path, wts, j) && path.len()
+            == wts[j].len()),
+        spec_containment(path, wts[j]) matches Containment::Inside(n) ==> n == wts[j].len() as usize
+            && matches_at(path, wts, j) && path.len() > wts[j].len(),
+{
+    theorem_classification_is_exact(path, wts[j]);
+    if matches_at(path, wts, j) && path.len() == wts[j].len() {
+        assert(path.skip(wts[j].len() as int).len() == 0);
+    }
 }
 
 } // verus!
