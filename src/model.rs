@@ -221,18 +221,6 @@ impl FileSnapshot {
         }
     }
 
-    /// Whether two snapshots describe the same bytes, ignoring permissions and
-    /// identity.
-    ///
-    /// This is what makes "content equal, permissions differ" checkable at
-    /// publication time: planning proves byte equality with a full comparison,
-    /// but the source and destination snapshots are separate reads. Carrying
-    /// the equality forward as comparable data lets the publication path
-    /// re-establish it instead of trusting a classification made earlier.
-    pub(crate) fn content_matches(&self, other: &FileSnapshot) -> bool {
-        waft_verified::planner::entry::same_content(&self.content_key(), &other.content_key())
-    }
-
     /// What identifies this snapshot's content for the verified planning
     /// kernel: `(len, content_fingerprint)`.
     pub(crate) fn content_key(&self) -> waft_verified::planner::entry::ContentKey {
