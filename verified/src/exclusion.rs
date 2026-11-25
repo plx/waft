@@ -11,7 +11,10 @@
 //! first level with a verdict decides; the candidate is dropped iff that
 //! verdict is a selecting (non-negated) pattern. This is exactly the walk of
 //! `ignore`'s `Gitignore::matched_path_or_any_parents`, now performed here so
-//! that its consequences can be proved.
+//! that its consequences can be proved. (When `ignore` could strip part of a
+//! level, which only a library caller can cause, for example with a relative
+//! source root, production keeps that call's walk and hands the kernel its
+//! verdict as a single level; see the trust assumptions.)
 //!
 //! [`exclusion_folds_case`] decides whether exclusion matching folds case.
 //!
@@ -42,9 +45,17 @@
 //!   matcher (glob semantics, last-match-wins within the pattern list and
 //!   ASCII-only case folding stay in `ignore`/`globset`). The levels are
 //!   `Path::parent` steps of the relative candidate, exactly the walk inside
-//!   `matched_path_or_any_parents`; asking `matched` per level is equivalent
-//!   because `ignore`'s prefix strip is the identity on a relative candidate
-//!   below an absolute matcher root (the source root is canonical).
+//!   `matched_path_or_any_parents`. Asking `matched` per level is equivalent
+//!   only because `ignore`'s prefix strip is the identity on every level of a
+//!   relative candidate below an absolute matcher root. The CLI always passes
+//!   a canonical, absolute source root. For any other matcher root (the
+//!   public `filter_paths` functions accept a relative one, which `ignore`
+//!   strips byte-wise from the whole candidate), and for a candidate with a
+//!   root or a leading `.` component, production reports a single level
+//!   answered by `matched_path_or_any_parents` itself. The verdict is then
+//!   that call's, as before this kernel existed, and the theorems below speak
+//!   about that one level only. Production checks the condition, and its
+//!   tests compare both cases with `matched_path_or_any_parents`.
 //! - Whether the path is a directory comes from the filesystem (`is_dir`).
 //! - Whether the platform may alias differently-cased names is a
 //!   compile-time platform fact supplied by production.
@@ -60,8 +71,12 @@ use crate::rules::precedence::MatchKind;
 ///
 /// Trusted: `query_level(l)` returns the compiled exclusion matcher's
 /// verdict for level `l` of the candidate (0 is the path itself, then each
-/// parent, the last being the empty path); the answers are a fixed function
-/// of `l`, and `queries` is a ghost log of the levels asked, in order.
+/// parent, the last being the empty path). When `ignore`'s prefix strip
+/// could change a level (the matcher root is not absolute, or the candidate
+/// has a root or starts with a `.` component), there is a single level 0,
+/// holding the matcher's own parent-walk verdict for the candidate. The
+/// answers are a fixed function of `l`, and `queries` is a ghost log of the
+/// levels asked, in order.
 pub trait LevelMatchOracle {
     /// Number of levels (the path, its parents, and the empty path).
     spec fn spec_levels(&self) -> usize;

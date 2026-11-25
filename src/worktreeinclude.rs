@@ -114,6 +114,28 @@ pub fn explain_path(
     case_insensitive: bool,
     symlink_policy: SymlinkPolicy,
 ) -> WorktreeincludeStatus {
+    let contexts = applicable_contexts(repo_root, rel_path, case_insensitive, symlink_policy);
+
+    // Evaluate each file, shallowest to deepest, last match wins, with the
+    // within-file and cross-file negation caveats. The decision is the
+    // verified `rules::precedence::explain` kernel; this module only answers
+    // its matcher queries and renders the verdict.
+    let full_path: PathBuf = repo_root.join(rel_path).components().collect();
+    let mut matchers = ContextMatchers::new(repo_root, &contexts, &full_path, rel_path, is_dir);
+    let verdict = precedence::explain(&mut matchers);
+    status_from_verdict(&contexts, verdict)
+}
+
+/// The matcher contexts of the `.worktreeinclude` files that apply to
+/// `rel_path`, shallowest first: one per directory from `repo_root` down to
+/// the path's parent whose rule file passes the consult gate, can be read,
+/// and compiles.
+fn applicable_contexts(
+    repo_root: &Path,
+    rel_path: &Path,
+    case_insensitive: bool,
+    symlink_policy: SymlinkPolicy,
+) -> Vec<FileMatchContext> {
     let path_within_repo = rel_path;
 
     // Collect directories from repo root to the path's parent
@@ -147,15 +169,7 @@ pub fn explain_path(
             contexts.push(ctx);
         }
     }
-
-    // Evaluate each file, shallowest to deepest, last match wins, with the
-    // within-file and cross-file negation caveats. The decision is the
-    // verified `rules::precedence::explain` kernel; this module only answers
-    // its matcher queries and renders the verdict.
-    let full_path: PathBuf = repo_root.join(rel_path).components().collect();
-    let mut matchers = ContextMatchers::new(repo_root, &contexts, &full_path, rel_path, is_dir);
-    let verdict = precedence::explain(&mut matchers);
-    status_from_verdict(&contexts, verdict)
+    contexts
 }
 
 /// The applicable rule files' matchers, answering the verified precedence
@@ -385,6 +399,7 @@ impl RuleFileProbe for RuleFilePath<'_> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use waft_verified::rules::precedence::By;
 
     fn setup_repo() -> TempDir {
         TempDir::new().unwrap()
@@ -917,8 +932,9 @@ mod tests {
         }
     }
 
-    // The next four tests pin current behavior that differs from Git; each
-    // is proved as a divergence lemma in `waft_verified::rules::reference`.
+    // The next five tests pin current behavior that differs from Git; each
+    // is proved as a divergence lemma in `waft_verified::rules::reference`,
+    // and `reference_tables_match_ignore` checks the lemmas' level tables.
 
     #[test]
     fn quirk_nested_file_reaches_outside_its_directory() {
@@ -938,6 +954,21 @@ mod tests {
             WorktreeincludeStatus::Included { pattern, .. } => assert_eq!(pattern, "*"),
             other => panic!("expected the current Included (*), got {other:?}"),
         }
+
+        // The selecting ancestor is the rule file's own directory
+        // `app/config` (ancestor 0), which `*` matches as the empty path.
+        let rel_path = Path::new("app/config/secret.key");
+        let contexts = applicable_contexts(dir.path(), rel_path, false, SymlinkPolicy::Follow);
+        let full_path: PathBuf = dir.path().join(rel_path).components().collect();
+        let mut matchers = ContextMatchers::new(dir.path(), &contexts, &full_path, rel_path, false);
+        assert!(matches!(
+            precedence::explain(&mut matchers),
+            Verdict::Included {
+                ctx: 0,
+                by: By::Ancestor(0),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1000,6 +1031,173 @@ mod tests {
             assert!(
                 matches!(result, WorktreeincludeStatus::Included { .. }),
                 "expected the current Included, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quirk_dir_only_wildcard_selects_root_files() {
+        // A directory-only wildcard matches the rule file's own directory
+        // (the empty path), so it selects the files directly in it. Git
+        // selects only paths inside a directory.
+        for wildcard in ["*/", "/*/", "**/"] {
+            let dir = setup_repo();
+            fs::write(dir.path().join(".worktreeinclude"), format!("{wildcard}\n")).unwrap();
+            for result in [
+                explain(dir.path(), ".env", false, false, SymlinkPolicy::Follow),
+                evaluate_root_only(dir.path(), ".env", false, false, SymlinkPolicy::Follow),
+            ] {
+                match result {
+                    WorktreeincludeStatus::Included { line, pattern, .. } => {
+                        assert_eq!((line, pattern.as_str()), (1, wildcard));
+                    }
+                    other => panic!("expected the current Included ({wildcard}), got {other:?}"),
+                }
+            }
+        }
+
+        let dir = setup_repo();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub").join(".worktreeinclude"), "*/\n").unwrap();
+        match explain(dir.path(), "sub/y", false, false, SymlinkPolicy::Follow) {
+            WorktreeincludeStatus::Included { pattern, .. } => assert_eq!(pattern, "*/"),
+            other => panic!("expected the current Included (*/), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reference_tables_match_ignore() {
+        // Each divergence lemma in `waft_verified::rules::reference` is
+        // proved over a hand-written table `own(i, k)`: rule file `i`'s
+        // verdict for level `k` of the path (the prefix of `k` components,
+        // asked as a directory below the path itself). Check every table
+        // against the real matchers, and check that the oracle answers the
+        // precedence kernel receives are the ones the model derives from
+        // the table (`model_pm`: the walk from the path up to the rule
+        // file's own directory; `model_ai`: ancestor `a` is level
+        // `len - 1 - a`).
+        const N: Option<MatchKind> = None;
+        const I: Option<MatchKind> = Some(MatchKind::Ignore);
+        const W: Option<MatchKind> = Some(MatchKind::Whitelist);
+        struct Case {
+            lemma: &'static str,
+            rule_files: &'static [(&'static str, &'static str)],
+            path: &'static str,
+            own: &'static [&'static [Option<MatchKind>]],
+            selected: bool,
+        }
+        let cases = [
+            Case {
+                lemma: "lemma_quirk_nested_file_reaches_outside_its_directory",
+                rule_files: &[("app/config", "*\n!secret.key\n")],
+                path: "app/config/secret.key",
+                own: &[&[I, I, I, W]],
+                selected: true,
+            },
+            Case {
+                lemma: "lemma_quirk_cross_file_caveat_ignores_deeper_reinclusion",
+                rule_files: &[("", "a/b/\n"), ("a", "!b/\n!b/x\n")],
+                path: "a/b/x",
+                own: &[&[N, N, I, N], &[N, N, W, W]],
+                selected: true,
+            },
+            Case {
+                lemma: "lemma_quirk_ancestor_negation_shadows_shallower_selection",
+                rule_files: &[("", "*.env\n"), ("sub", "!x/\n")],
+                path: "sub/x/a.env",
+                own: &[&[N, N, N, I], &[N, N, W, N]],
+                selected: false,
+            },
+            Case {
+                lemma: "lemma_quirk_bare_slash_selects_everything",
+                rule_files: &[("", "/\n")],
+                path: "deep/any/file.txt",
+                own: &[&[I, N, N, N]],
+                selected: true,
+            },
+            Case {
+                lemma: "lemma_quirk_dir_only_wildcard_selects_root_files (len 1)",
+                rule_files: &[("", "*/\n")],
+                path: ".env",
+                own: &[&[I, N]],
+                selected: true,
+            },
+            Case {
+                lemma: "lemma_quirk_dir_only_wildcard_selects_root_files (len 3)",
+                rule_files: &[("", "*/\n")],
+                path: "d/e/.env",
+                own: &[&[I, I, I, N]],
+                selected: true,
+            },
+        ];
+        for case in &cases {
+            let dir = setup_repo();
+            let root = dir.path();
+            for (rule_dir, content) in case.rule_files {
+                fs::create_dir_all(root.join(rule_dir)).unwrap();
+                fs::write(root.join(rule_dir).join(".worktreeinclude"), content).unwrap();
+            }
+            let rel_path = Path::new(case.path);
+            let components: Vec<_> = rel_path.components().collect();
+            let len = components.len();
+            let contexts = applicable_contexts(root, rel_path, false, SymlinkPolicy::Follow);
+            assert_eq!(contexts.len(), case.own.len(), "{}", case.lemma);
+            let full_path: PathBuf = root.join(rel_path).components().collect();
+            let mut matchers = ContextMatchers::new(root, &contexts, &full_path, rel_path, false);
+            assert_eq!(matchers.ancestors(), len - 1, "{}", case.lemma);
+            for (i, ctx) in contexts.iter().enumerate() {
+                let depth = ctx
+                    .file_path
+                    .parent()
+                    .unwrap()
+                    .strip_prefix(root)
+                    .unwrap()
+                    .components()
+                    .count();
+                assert_eq!(
+                    depth,
+                    case.rule_files[i]
+                        .0
+                        .split('/')
+                        .filter(|c| !c.is_empty())
+                        .count()
+                );
+                let own: Vec<Option<MatchKind>> = (0..=len)
+                    .map(|k| {
+                        let level: PathBuf = root
+                            .join(components[..k].iter().collect::<PathBuf>())
+                            .components()
+                            .collect();
+                        path_match_kind(ctx.matcher.matched(&level, k < len)).map(|(kind, _)| kind)
+                    })
+                    .collect();
+                assert_eq!(
+                    own, case.own[i],
+                    "{}: own table of rule file {i}",
+                    case.lemma
+                );
+                let walk = (depth..=len).rev().find_map(|k| case.own[i][k]);
+                assert_eq!(
+                    matchers.query_path(i).map(|(kind, _)| kind),
+                    walk,
+                    "{}: path query of rule file {i}",
+                    case.lemma
+                );
+                for a in 0..len - 1 {
+                    assert_eq!(
+                        matchers.query_ancestor(a, i).is_some(),
+                        case.own[i][len - 1 - a] == I,
+                        "{}: ancestor {a} of rule file {i}",
+                        case.lemma
+                    );
+                }
+            }
+            let verdict = precedence::explain(&mut matchers);
+            assert_eq!(
+                matches!(verdict, Verdict::Included { .. }),
+                case.selected,
+                "{}: {verdict:?}",
+                case.lemma
             );
         }
     }

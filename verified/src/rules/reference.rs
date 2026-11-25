@@ -24,27 +24,49 @@
 //! `Gitignore::matched`), not something the kernel relies on: it is used only
 //! to state the theorems below.
 //!
+//! # Matching the rule file's own directory
+//!
+//! A rule file's own directory is level `depth(i)`, which `ignore` sees as
+//! the empty path, asked as a directory. More lines match it than a bare
+//! `/`: `*`, `**` and the directory-only wildcards `*/` (anchored with a
+//! leading `/` or not) and `**/` all do. `*` and `**` also match every
+//! deeper level, so the path walk stops before it reaches the empty path. A
+//! directory-only wildcard does not match a file, so for a file directly in
+//! the rule file's directory the walk reaches the empty path, and the file
+//! is selected.
+//!
 //! # Results
 //!
-//! - `theorem_root_file_agrees_with_git`: with only the root rule file
-//!   (the `claude-2026-04` engine, or the `git` engine without nested
-//!   files) waft selects a path exactly when Git would, unless the root file
-//!   matches the repository root itself (a bare `/` line).
-//! - `theorem_without_negations_agrees_with_git`: with any number of
-//!   nested rule files, waft selects a path exactly when Git would, provided
-//!   no rule file has a negated verdict and none matches its own directory.
-//! - Four lemmas exhibit concrete inputs on which the current `git` engine
+//! - `theorem_root_file_divergence_is_the_empty_path`: with only the root
+//!   rule file (the `claude-2026-04` engine, or the `git` engine without
+//!   nested files), waft selects a path exactly when Git does, or when the
+//!   root file has no verdict for any level of the path but selects the
+//!   empty path. In the second case Git does not select the path.
+//!   `theorem_root_file_agrees_with_git` is the corollary for a root file
+//!   that does not select the empty path.
+//! - `theorem_without_negations_divergence_is_the_empty_path`: with any
+//!   number of nested rule files and no negated verdict, waft selects a path
+//!   exactly when Git does, or when some rule file selects its own
+//!   directory (the empty path). `theorem_without_negations_agrees_with_git`
+//!   is the corollary for rule files that do not.
+//! - Five lemmas exhibit concrete inputs on which the current `git` engine
 //!   and Git disagree. They document current behavior; they are not fixed:
 //!   `lemma_quirk_nested_file_reaches_outside_its_directory`,
 //!   `lemma_quirk_cross_file_caveat_ignores_deeper_reinclusion`,
-//!   `lemma_quirk_ancestor_negation_shadows_shallower_selection` and
-//!   `lemma_quirk_bare_slash_selects_everything`.
+//!   `lemma_quirk_ancestor_negation_shadows_shallower_selection`,
+//!   `lemma_quirk_bare_slash_selects_everything` and
+//!   `lemma_quirk_dir_only_wildcard_selects_root_files`.
+//!
+//! The level tables of the five lemmas are what `ignore` 0.4.33 computes
+//! for their inputs. The production test
+//! `worktreeinclude::tests::reference_tables_match_ignore` checks each
+//! table, and the oracle answers it induces, against the real matchers.
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
 #[cfg(verus_keep_ghost)]
-use super::precedence::MatchKind;
+use super::precedence::{By, MatchKind, Verdict};
 
 verus! {
 
@@ -198,18 +220,36 @@ pub open spec fn root_depth() -> spec_fn(usize) -> int {
     |i: usize| 0int
 }
 
-/// With only the repository-root rule file, waft's verdict selects a path
-/// exactly when Git would, provided the root file does not select the
-/// repository root itself (which only a bare `/` line does; see
-/// `lemma_quirk_bare_slash_selects_everything`). This covers the
-/// `claude-2026-04` engine, which reads only the root file, and the `git`
-/// engine for repositories without nested rule files.
-pub proof fn theorem_root_file_agrees_with_git(own: spec_fn(usize, int) -> Option<MatchKind>, len: int)
+/// Rule file `i` selects its own directory (the empty path, level
+/// `depth(i)`) and has no verdict for any deeper level of the path, so its
+/// path walk ends on the empty path. Git never asks a rule file about its
+/// own directory.
+pub open spec fn selects_only_own_directory(
+    own: spec_fn(usize, int) -> Option<MatchKind>,
+    depth: spec_fn(usize) -> int,
+    len: int,
+    i: usize,
+) -> bool {
+    &&& own(i, depth(i)) == Some(MatchKind::Ignore)
+    &&& forall|k: int| depth(i) < k <= len ==> #[trigger] own(i, k) is None
+}
+
+/// With only the repository-root rule file, waft selects a path exactly
+/// when Git does, or when the root file has no verdict for any level of the
+/// path but selects the empty path. Git does not select the path in the
+/// second case, so that is the whole divergence. A bare `/` line causes it
+/// for every path (`lemma_quirk_bare_slash_selects_everything`), and a
+/// directory-only wildcard such as `*/` causes it for every file directly in
+/// the root (`lemma_quirk_dir_only_wildcard_selects_root_files`). This
+/// covers the `claude-2026-04` engine, which reads only the root file, and
+/// the `git` engine for repositories without nested rule files.
+pub proof fn theorem_root_file_divergence_is_the_empty_path(own: spec_fn(usize, int) -> Option<MatchKind>, len: int)
     requires
         1 <= len <= usize::MAX,
-        own(0, 0) != Some(MatchKind::Ignore),
     ensures
-        waft_selects(own, root_depth(), 1, len) <==> git_selects(own, root_depth(), 1, len),
+        waft_selects(own, root_depth(), 1, len) <==> (git_selects(own, root_depth(), 1, len)
+            || selects_only_own_directory(own, root_depth(), len, 0)),
+        selects_only_own_directory(own, root_depth(), len, 0) ==> !git_selects(own, root_depth(), 1, len),
 {
     let depth = root_depth();
     let pm = model_pm(own, depth, len);
@@ -226,9 +266,14 @@ pub proof fn theorem_root_file_agrees_with_git(own: spec_fn(usize, int) -> Optio
             assert(i == 0);
         }
     }
+    if selects_only_own_directory(own, depth, len, 0) && git_selects(own, depth, 1, len) {
+        let k = choose|k: int| 1 <= k <= len && #[trigger] git_level_verdict(own, depth, 1, k) == Some(MatchKind::Ignore);
+        assert(own(0, k) is None);
+    }
     match walk_up(own, 0, len, 0) {
         None => {
             lemma_walk_up_none(own, 0, len, 0);
+            assert(own(0, 0) is None);
             if git_selects(own, depth, 1, len) {
                 let k = choose|k: int|
                     1 <= k <= len && #[trigger] git_level_verdict(own, depth, 1, k) == Some(MatchKind::Ignore);
@@ -240,11 +285,20 @@ pub proof fn theorem_root_file_agrees_with_git(own: spec_fn(usize, int) -> Optio
             let l = choose|l: int|
                 0 <= l <= len && #[trigger] own(0, l) == Some(MatchKind::Ignore) && forall|h: int|
                     l < h <= len ==> #[trigger] own(0, h) is None;
-            assert(1 <= l);
-            assert(git_level_verdict(own, depth, 1, l) == Some(MatchKind::Ignore));
+            if 1 <= l {
+                assert(git_level_verdict(own, depth, 1, l) == Some(MatchKind::Ignore));
+            } else {
+                assert(selects_only_own_directory(own, depth, len, 0));
+            }
         },
         Some(MatchKind::Whitelist) => {
             lemma_walk_up_some(own, 0, len, 0, MatchKind::Whitelist);
+            let l = choose|l: int|
+                0 <= l <= len && #[trigger] own(0, l) == Some(MatchKind::Whitelist) && forall|h: int|
+                    l < h <= len ==> #[trigger] own(0, h) is None;
+            if selects_only_own_directory(own, depth, len, 0) {
+                assert(own(0, l) is None);
+            }
             assert(own(0, len) != Some(MatchKind::Ignore));
             if git_selects(own, depth, 1, len) {
                 let k = choose|k: int|
@@ -264,6 +318,25 @@ pub proof fn theorem_root_file_agrees_with_git(own: spec_fn(usize, int) -> Optio
     }
 }
 
+/// With only the repository-root rule file, waft's verdict selects a path
+/// exactly when Git would, provided the root file does not select the empty
+/// path (the repository root, asked as a directory). A bare `/`, `*`, `**`
+/// and the directory-only wildcards `*/` (anchored or not) and `**/` all
+/// select it, so they fall outside this corollary. A root file with a `*`
+/// or `**` line still agrees with Git, because some line then decides the
+/// path itself (`theorem_root_file_divergence_is_the_empty_path`). This
+/// covers the `claude-2026-04` engine, which reads only the root file, and
+/// the `git` engine for repositories without nested rule files.
+pub proof fn theorem_root_file_agrees_with_git(own: spec_fn(usize, int) -> Option<MatchKind>, len: int)
+    requires
+        1 <= len <= usize::MAX,
+        own(0, 0) != Some(MatchKind::Ignore),
+    ensures
+        waft_selects(own, root_depth(), 1, len) <==> git_selects(own, root_depth(), 1, len),
+{
+    theorem_root_file_divergence_is_the_empty_path(own, len);
+}
+
 /// A walk over a range with a verdict finds one.
 pub proof fn lemma_walk_up_finds(own: spec_fn(usize, int) -> Option<MatchKind>, i: usize, k: int, lo: int, l: int)
     requires
@@ -277,12 +350,13 @@ pub proof fn lemma_walk_up_finds(own: spec_fn(usize, int) -> Option<MatchKind>, 
     }
 }
 
-/// Without negations, any number of nested rule files agrees with Git:
-/// when no rule file has a negated verdict at any level and none matches
-/// its own directory (no bare `/` line), the `git` engine selects a path
-/// exactly when Git would. The divergences below all need a negation or a
-/// bare `/`.
-pub proof fn theorem_without_negations_agrees_with_git(
+/// Without negations, nested rule files depart from Git only through the
+/// empty path. When no rule file has a negated verdict at any level, the
+/// `git` engine selects a path exactly when Git does, or when some
+/// applicable rule file selects its own directory (asked as the empty path,
+/// which a bare `/`, `*`, `**`, `*/` (anchored or not) and `**/` all
+/// match). Each divergence lemma below needs a negation or such a line.
+pub proof fn theorem_without_negations_divergence_is_the_empty_path(
     own: spec_fn(usize, int) -> Option<MatchKind>,
     depth: spec_fn(usize) -> int,
     n: usize,
@@ -292,9 +366,9 @@ pub proof fn theorem_without_negations_agrees_with_git(
         1 <= len <= usize::MAX,
         forall|i: usize, k: int| i < n ==> #[trigger] own(i, k) != Some(MatchKind::Whitelist),
         forall|i: usize| i < n ==> 0 <= #[trigger] depth(i) < len,
-        forall|i: usize| i < n ==> #[trigger] own(i, depth(i)) is None,
     ensures
-        waft_selects(own, depth, n, len) <==> git_selects(own, depth, n, len),
+        waft_selects(own, depth, n, len) <==> (git_selects(own, depth, n, len) || exists|i: usize|
+            i < n && #[trigger] own(i, depth(i)) == Some(MatchKind::Ignore)),
 {
     let pm = model_pm(own, depth, len);
     let ai = model_ai(own, len);
@@ -310,19 +384,19 @@ pub proof fn theorem_without_negations_agrees_with_git(
                 h,
             ) is None;
         assert(own(i, l) != Some(MatchKind::Whitelist));
-        assert(l != depth(i));
-        assert(exists|d: usize| is_git_decider(own, depth, n, l, d)) by {
-            lemma_git_decider_exists(own, depth, n, l, i);
+        if l == depth(i) {
+            assert(own(i, depth(i)) == Some(MatchKind::Ignore));
+        } else {
+            assert(exists|d: usize| is_git_decider(own, depth, n, l, d)) by {
+                lemma_git_decider_exists(own, depth, n, l, i);
+            }
+            let d = choose|d: usize| is_git_decider(own, depth, n, l, d);
+            assert(own(d, l) != Some(MatchKind::Whitelist));
+            assert(git_level_verdict(own, depth, n, l) == Some(MatchKind::Ignore));
         }
-        let d = choose|d: usize| is_git_decider(own, depth, n, l, d);
-        assert(own(d, l) != Some(MatchKind::Whitelist));
-        assert(git_level_verdict(own, depth, n, l) == Some(MatchKind::Ignore));
     }
-    if git_selects(own, depth, n, len) {
-        let k = choose|k: int| 1 <= k <= len && #[trigger] git_level_verdict(own, depth, n, k) == Some(MatchKind::Ignore);
-        let d = choose|d: usize| is_git_decider(own, depth, n, k, d);
-        lemma_walk_up_finds(own, d, len, depth(d), k);
-        assert(pm(d) is Some);
+    // A matching file is never deselected, because no file has a negation.
+    assert forall|d: usize| d < n && #[trigger] pm(d) is Some implies waft_selects(own, depth, n, len) by {
         let v = super::precedence::spec_explain(pm, ai, n, m);
         if v is ExcludedByNegation {
             let c = v->ExcludedByNegation_ctx;
@@ -331,6 +405,39 @@ pub proof fn theorem_without_negations_agrees_with_git(
             lemma_walk_up_some(own, c, len, depth(c), wv);
         }
     }
+    if exists|i: usize| i < n && #[trigger] own(i, depth(i)) == Some(MatchKind::Ignore) {
+        let i = choose|i: usize| i < n && #[trigger] own(i, depth(i)) == Some(MatchKind::Ignore);
+        lemma_walk_up_finds(own, i, len, depth(i), depth(i));
+        assert(pm(i) is Some);
+    }
+    if git_selects(own, depth, n, len) {
+        let k = choose|k: int| 1 <= k <= len && #[trigger] git_level_verdict(own, depth, n, k) == Some(MatchKind::Ignore);
+        let d = choose|d: usize| is_git_decider(own, depth, n, k, d);
+        lemma_walk_up_finds(own, d, len, depth(d), k);
+        assert(pm(d) is Some);
+    }
+}
+
+/// Without negations, any number of nested rule files agrees with Git:
+/// when no rule file has a negated verdict at any level and none matches
+/// its own directory as the empty path (none has a bare `/`, `*`, `**`,
+/// `*/` or `**/` line, for example), the `git` engine selects a path
+/// exactly when Git would.
+pub proof fn theorem_without_negations_agrees_with_git(
+    own: spec_fn(usize, int) -> Option<MatchKind>,
+    depth: spec_fn(usize) -> int,
+    n: usize,
+    len: int,
+)
+    requires
+        1 <= len <= usize::MAX,
+        forall|i: usize, k: int| i < n ==> #[trigger] own(i, k) != Some(MatchKind::Whitelist),
+        forall|i: usize| i < n ==> 0 <= #[trigger] depth(i) < len,
+        forall|i: usize| i < n ==> #[trigger] own(i, depth(i)) is None,
+    ensures
+        waft_selects(own, depth, n, len) <==> git_selects(own, depth, n, len),
+{
+    theorem_without_negations_divergence_is_the_empty_path(own, depth, n, len);
 }
 
 /// Some applicable rule file has a verdict at level `k`, so a deciding
@@ -363,15 +470,18 @@ pub proof fn lemma_git_decider_exists(
 // ---------------------------------------------------------------------------
 
 /// Quirk 1 table: `app/config/.worktreeinclude` containing `*` then
-/// `!secret.key`, path `app/config/secret.key` (levels: 1 `app`,
-/// 2 `app/config`, 3 the file). The file's own answer for the file is the
-/// negation; for the outer ancestor `app` its matcher sees the unstripped
-/// absolute path, whose basename `*` matches.
+/// `!secret.key`, path `app/config/secret.key` (levels: 0 the repository
+/// root, 1 `app`, 2 `app/config`, 3 the file). The file's own answer for
+/// the file is the negation. Its own directory `app/config` is stripped to
+/// the empty path, which `*` (unanchored, so compiled with a leading `**`)
+/// matches. The outer levels
+/// `app` and the root are passed through as unstripped absolute paths,
+/// which `*` matches too.
 pub open spec fn quirk1_own() -> spec_fn(usize, int) -> Option<MatchKind> {
     |i: usize, k: int|
         if k == 3 {
             Some(MatchKind::Whitelist)
-        } else if k == 1 {
+        } else if 0 <= k <= 2 {
             Some(MatchKind::Ignore)
         } else {
             None
@@ -384,13 +494,18 @@ pub open spec fn quirk1_depth() -> spec_fn(usize) -> int {
 }
 
 /// Quirk 1 (over-selection): a nested rule file's patterns are applied to
-/// ancestor directories outside its own directory, so "everything here
-/// except `secret.key`" still selects `secret.key`. Git consults
-/// `app/config/.worktreeinclude` only for paths below `app/config` and does
-/// not select the file; waft reports `Included` through ancestor `app`.
+/// ancestor directories at and above its own directory, outside the scope
+/// Git gives it, so "everything here except `secret.key`" still selects
+/// `secret.key`. Git consults `app/config/.worktreeinclude` only for paths
+/// below `app/config` and does not select the file. Waft reports `Included`
+/// through the deepest ancestor, `app/config` itself (ancestor 0), which
+/// the file's `*` matches as the empty path. Without that match the outer
+/// ancestor `app` would still select the file.
 pub proof fn lemma_quirk_nested_file_reaches_outside_its_directory()
     ensures
         waft_selects(quirk1_own(), quirk1_depth(), 1, 3),
+        super::precedence::spec_explain(model_pm(quirk1_own(), quirk1_depth(), 3), model_ai(quirk1_own(), 3), 1, 2)
+            == (Verdict::Included { ctx: 0, by: By::Ancestor(0), witness: () }),
         !git_selects(quirk1_own(), quirk1_depth(), 1, 3),
 {
     let own = quirk1_own();
@@ -399,7 +514,9 @@ pub proof fn lemma_quirk_nested_file_reaches_outside_its_directory()
     let ai = model_ai(own, 3);
     assert(walk_up(own, 0, 3, 2) == Some(MatchKind::Whitelist));
     super::precedence::theorem_single_file_explain(pm, ai, 2);
-    assert(super::precedence::is_first_ancestor_hit(ai, 2, 0, 1));
+    assert(super::precedence::is_first_ancestor_hit(ai, 2, 0, 0));
+    let a = choose|a: usize| super::precedence::is_first_ancestor_hit(ai, 2, 0, a);
+    assert(a == 0);
     assert forall|k: int| 1 <= k <= 3 implies #[trigger] git_level_verdict(own, depth, 1, k) != Some(
         MatchKind::Ignore,
     ) by {
@@ -507,8 +624,8 @@ pub proof fn lemma_quirk_ancestor_negation_shadows_shallower_selection()
 }
 
 /// Quirk 4 table: a root `.worktreeinclude` whose only line is `/`, which
-/// compiles to a glob matching the empty path, i.e. the rule file's own
-/// directory (level 0); any path of three components.
+/// compiles to a glob matching only the empty path, i.e. the rule file's
+/// own directory (level 0); any path.
 pub open spec fn quirk4_own() -> spec_fn(usize, int) -> Option<MatchKind> {
     |i: usize, k: int|
         if k == 0 {
@@ -519,31 +636,59 @@ pub open spec fn quirk4_own() -> spec_fn(usize, int) -> Option<MatchKind> {
 }
 
 /// Quirk 4 (over-selection): `matched_path_or_any_parents` also tests the
-/// empty path, so a bare `/` line selects every path for both the `git` and
-/// the `claude-2026-04` engine. Git selects nothing. (Eligibility still
-/// requires the path to be git-ignored, so the effect equals all-ignored
-/// mode.)
-pub proof fn lemma_quirk_bare_slash_selects_everything()
+/// empty path, so a bare `/` line selects every path, of any length, for
+/// both the `git` and the `claude-2026-04` engine. Git selects nothing.
+/// (Eligibility still requires the path to be git-ignored, so the effect
+/// equals all-ignored mode.)
+pub proof fn lemma_quirk_bare_slash_selects_everything(len: int)
+    requires
+        1 <= len <= usize::MAX,
     ensures
-        waft_selects(quirk4_own(), root_depth(), 1, 3),
-        !git_selects(quirk4_own(), root_depth(), 1, 3),
+        waft_selects(quirk4_own(), root_depth(), 1, len),
+        !git_selects(quirk4_own(), root_depth(), 1, len),
 {
-    let own = quirk4_own();
-    let depth = root_depth();
-    let pm = model_pm(own, depth, 3);
-    let ai = model_ai(own, 3);
-    assert(walk_up(own, 0, 0, 0) == Some(MatchKind::Ignore));
-    assert(walk_up(own, 0, 1, 0) == Some(MatchKind::Ignore));
-    assert(walk_up(own, 0, 2, 0) == Some(MatchKind::Ignore));
-    assert(walk_up(own, 0, 3, 0) == Some(MatchKind::Ignore));
-    super::precedence::theorem_single_file_explain(pm, ai, 2);
-    assert forall|k: int| 1 <= k <= 3 implies #[trigger] git_level_verdict(own, depth, 1, k) != Some(
-        MatchKind::Ignore,
-    ) by {
-        if exists|i: usize| is_git_decider(own, depth, 1, k, i) {
-            let i = choose|i: usize| is_git_decider(own, depth, 1, k, i);
-            assert(own(i, k) is None);
+    theorem_root_file_divergence_is_the_empty_path(quirk4_own(), len);
+    assert(selects_only_own_directory(quirk4_own(), root_depth(), len, 0));
+}
+
+/// Quirk 5 table: a root `.worktreeinclude` whose only line is `*/`, and a
+/// path of `len` components whose last one is a file (levels `0..len` are
+/// directories, level 0 being the repository root). `*/` compiles to an
+/// unanchored directory-only glob, which matches every directory, the empty
+/// path included, and no file.
+pub open spec fn quirk5_own(len: int) -> spec_fn(usize, int) -> Option<MatchKind> {
+    |i: usize, k: int|
+        if 0 <= k < len {
+            Some(MatchKind::Ignore)
+        } else {
+            None
         }
+}
+
+/// Quirk 5 (over-selection): a directory-only wildcard in the root rule
+/// file selects every file directly in the repository root, such as `.env`,
+/// for both the `git` and the `claude-2026-04` engine, because the walk of
+/// such a file reaches the empty path. Git selects only the paths inside a
+/// directory, and on those (`len >= 2`) the two agree. The anchored form of
+/// `*/` and `**/` behave the same on root-level files, and a nested rule
+/// file with such a line selects every file directly in its own directory.
+pub proof fn lemma_quirk_dir_only_wildcard_selects_root_files(len: int)
+    requires
+        1 <= len <= usize::MAX,
+    ensures
+        waft_selects(quirk5_own(len), root_depth(), 1, len),
+        git_selects(quirk5_own(len), root_depth(), 1, len) <==> 2 <= len,
+{
+    let own = quirk5_own(len);
+    let depth = root_depth();
+    theorem_root_file_divergence_is_the_empty_path(own, len);
+    if len == 1 {
+        assert(selects_only_own_directory(own, depth, len, 0));
+    } else {
+        assert(is_git_decider(own, depth, 1, 1, 0));
+        let i = choose|i: usize| is_git_decider(own, depth, 1, 1, i);
+        assert(i == 0);
+        assert(git_level_verdict(own, depth, 1, 1) == Some(MatchKind::Ignore));
     }
 }
 
