@@ -10,8 +10,6 @@ use std::ffi::{OsStr, OsString};
 use std::io::{Seek, SeekFrom};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
-#[cfg(unix)]
-use std::path::Component;
 
 use crate::config::CopyStrategy;
 use crate::model::{DestinationExpectation, FileSnapshot, PublishOutcome};
@@ -26,6 +24,18 @@ pub enum FileComparison {
     PermissionsDiffer,
     /// Differing content (length or bytes).
     ContentDiffers,
+}
+
+impl FileComparison {
+    /// The production verdict for the verified comparison kernel's verdict.
+    fn from_kernel(verdict: waft_verified::fs_checks::compare::Comparison) -> Self {
+        use waft_verified::fs_checks::compare::Comparison;
+        match verdict {
+            Comparison::Equal => Self::Equal,
+            Comparison::PermissionsDiffer => Self::PermissionsDiffer,
+            Comparison::ContentDiffers => Self::ContentDiffers,
+        }
+    }
 }
 
 /// What a source path turned out to be, from a single look that never follows
@@ -56,6 +66,21 @@ pub enum SourceKind {
 /// the same thing instead of advertising an action the platform cannot perform.
 pub(crate) fn overwrite_supported() -> bool {
     cfg!(unix)
+}
+
+/// Whether a copy with `strategy` first attempts a reflink (verified kernel
+/// `waft_verified::fs_checks::steps`): never for `SimpleCopy`, always for
+/// `CowCopy`, and for `Auto` only where the platform default is a reflink
+/// (macOS).
+fn attempts_reflink(strategy: CopyStrategy) -> bool {
+    use waft_verified::fs_checks::steps::{self, Strategy};
+
+    let strategy = match strategy {
+        CopyStrategy::Auto => Strategy::Auto,
+        CopyStrategy::SimpleCopy => Strategy::SimpleCopy,
+        CopyStrategy::CowCopy => Strategy::CowCopy,
+    };
+    steps::attempts_reflink(strategy, cfg!(target_os = "macos"))
 }
 
 /// Immutable inputs for one conditional file publication.
@@ -99,11 +124,11 @@ pub trait FileSystem {
     /// Content equality and permission equality are reported separately so
     /// callers can distinguish "needs a rewrite" from "needs a `chmod`".
     fn compare_files(&self, left: &Path, right: &Path) -> io::Result<FileComparison> {
-        if self.read(left)? == self.read(right)? {
-            Ok(FileComparison::Equal)
-        } else {
-            Ok(FileComparison::ContentDiffers)
-        }
+        let left = self.read(left)?;
+        let right = self.read(right)?;
+        Ok(FileComparison::from_kernel(
+            waft_verified::fs_checks::compare::compare_contents(&left, &right),
+        ))
     }
 
     /// Capture a bounded-memory snapshot used to detect destination changes
@@ -194,35 +219,38 @@ impl FileSystem for RealFs {
     }
 
     fn compare_files(&self, left: &Path, right: &Path) -> io::Result<FileComparison> {
+        use waft_verified::fs_checks::compare::{ChunkStep, StreamComparison};
+
         let (mut left_file, left_metadata) = open_stable_regular_file(left)?;
         let (mut right_file, right_metadata) = open_stable_regular_file(right)?;
 
-        let permissions_equal =
-            permission_signature(&left_metadata) == permission_signature(&right_metadata);
-        if left_metadata.len() != right_metadata.len() {
+        // The verified kernel decides; this loop only performs the reads.
+        let Some(mut comparison) = StreamComparison::begin(
+            left_metadata.len(),
+            right_metadata.len(),
+            permission_signature(&left_metadata),
+            permission_signature(&right_metadata),
+        ) else {
             return Ok(FileComparison::ContentDiffers);
-        }
+        };
 
         let mut left_buffer = [0u8; 64 * 1024];
         let mut right_buffer = [0u8; 64 * 1024];
-        loop {
+        let matched = loop {
             let left_read = left_file.read(&mut left_buffer)?;
             let right_read = right_file.read(&mut right_buffer)?;
-            if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
-                return Ok(FileComparison::ContentDiffers);
-            }
-            if left_read == 0 {
-                break;
-            }
-        }
+            comparison = match comparison
+                .compare_chunks(&left_buffer[..left_read], &right_buffer[..right_read])
+            {
+                ChunkStep::Differ => return Ok(FileComparison::ContentDiffers),
+                ChunkStep::More(next) => next,
+                ChunkStep::End(matched) => break matched,
+            };
+        };
 
         ensure_open_file_unchanged(left, &left_file, &left_metadata)?;
         ensure_open_file_unchanged(right, &right_file, &right_metadata)?;
-        Ok(if permissions_equal {
-            FileComparison::Equal
-        } else {
-            FileComparison::PermissionsDiffer
-        })
+        Ok(FileComparison::from_kernel(matched.verdict()))
     }
 
     fn file_snapshot(&self, path: &Path) -> io::Result<FileSnapshot> {
@@ -290,27 +318,26 @@ impl FileSystem for RealFs {
     }
 }
 
+/// The FNV-1a fingerprint of an in-memory buffer (verified kernel
+/// `waft_verified::fingerprint`).
 fn fingerprint_bytes(bytes: &[u8]) -> u64 {
-    let mut fingerprint = 0xcbf2_9ce4_8422_2325u64;
-    for byte in bytes {
-        fingerprint ^= u64::from(*byte);
-        fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    fingerprint
+    waft_verified::fingerprint::fingerprint(bytes)
 }
 
+/// The FNV-1a fingerprint of everything `reader` yields up to end of file.
+///
+/// The verified `Fingerprinter` consumes each chunk exactly as `read()`
+/// delivered it; the kernel proves the result equals [`fingerprint_bytes`] of
+/// the concatenated chunks, however short the reads were.
 fn fingerprint_reader(reader: &mut impl Read) -> io::Result<u64> {
-    let mut fingerprint = 0xcbf2_9ce4_8422_2325u64;
+    let mut fingerprint = waft_verified::fingerprint::Fingerprinter::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let count = reader.read(&mut buffer)?;
         if count == 0 {
-            return Ok(fingerprint);
+            return Ok(fingerprint.finish());
         }
-        for byte in &buffer[..count] {
-            fingerprint ^= u64::from(*byte);
-            fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        fingerprint.update(&buffer[..count]);
     }
 }
 
@@ -355,10 +382,11 @@ fn open_stable_regular_file(path: &Path) -> io::Result<(fs::File, fs::Metadata)>
     let file = open_regular_candidate(path)?;
     let file_metadata = file.metadata()?;
     let current_path_metadata = fs::symlink_metadata(path)?;
-    if !current_path_metadata.file_type().is_file()
-        || !same_file(&path_metadata, &file_metadata)
-        || !same_file(&file_metadata, &current_path_metadata)
-    {
+    if !waft_verified::fs_checks::stability::opened_stably(
+        &observation(&path_metadata),
+        &observation(&file_metadata),
+        &observation(&current_path_metadata),
+    ) {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
             "file changed while it was being opened",
@@ -394,12 +422,11 @@ fn ensure_open_file_unchanged(
 ) -> io::Result<()> {
     let handle_metadata = file.metadata()?;
     let path_metadata = fs::symlink_metadata(path)?;
-    if !path_metadata.file_type().is_file()
-        || !same_file(initial, &handle_metadata)
-        || !same_file(&handle_metadata, &path_metadata)
-        || !same_file_state(initial, &handle_metadata)
-        || !same_file_state(&handle_metadata, &path_metadata)
-    {
+    if !waft_verified::fs_checks::stability::unchanged_through_path(
+        &observation(initial),
+        &observation(&handle_metadata),
+        &observation(&path_metadata),
+    ) {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
             "file changed while it was being read",
@@ -408,22 +435,58 @@ fn ensure_open_file_unchanged(
     Ok(())
 }
 
-#[cfg(unix)]
-fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    left.dev() == right.dev() && left.ino() == right.ino()
+/// The verified stability kernel's view of one `stat`.
+///
+/// Every field is converted injectively, so kernel equality is exactly the
+/// equality the stability checks compared before: `(dev, ino)` on Unix (no
+/// identity elsewhere, where "same file" falls back to "same state"), the
+/// length, `modified()` as its signed distance from the Unix epoch (or
+/// unavailable when `modified()` fails), the raw change time, and the
+/// permission signature.
+fn observation(metadata: &fs::Metadata) -> waft_verified::fs_checks::stability::Observation {
+    use waft_verified::fs_checks::stability::{Identity, Observation, Stamp};
+
+    let identity = match file_identity(metadata) {
+        Some((dev, ino)) => Identity::Inode { dev, ino },
+        None => Identity::Unavailable,
+    };
+    let changed = match change_time_signature(metadata) {
+        Some((secs, nanos)) => Stamp::Raw { secs, nanos },
+        None => Stamp::Unavailable,
+    };
+    Observation {
+        is_file: metadata.file_type().is_file(),
+        identity,
+        len: metadata.len(),
+        modified: modified_stamp(metadata.modified().ok()),
+        changed,
+        permissions: permission_signature(metadata),
+    }
 }
 
-#[cfg(not(unix))]
-fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    same_file_state(left, right)
-}
+/// A modification time as its signed distance from the Unix epoch, which
+/// determines the `SystemTime` uniquely: two stamps are equal exactly when
+/// the times are.
+fn modified_stamp(
+    modified: Option<std::time::SystemTime>,
+) -> waft_verified::fs_checks::stability::Stamp {
+    use waft_verified::fs_checks::stability::Stamp;
 
-fn same_file_state(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    left.len() == right.len()
-        && left.modified().ok() == right.modified().ok()
-        && change_time_signature(left) == change_time_signature(right)
-        && permission_signature(left) == permission_signature(right)
+    match modified {
+        Some(time) => match time.duration_since(std::time::SystemTime::UNIX_EPOCH) {
+            Ok(after) => Stamp::Since {
+                before_epoch: false,
+                whole_secs: after.as_secs(),
+                subsec_nanos: after.subsec_nanos(),
+            },
+            Err(before) => Stamp::Since {
+                before_epoch: true,
+                whole_secs: before.duration().as_secs(),
+                subsec_nanos: before.duration().subsec_nanos(),
+            },
+        },
+        None => Stamp::Unavailable,
+    }
 }
 
 #[cfg(unix)]
@@ -788,11 +851,7 @@ fn copy_file_anchored_unix(
         return Ok(PublishOutcome::PermissionsRepaired);
     }
 
-    let try_reflink = match request.strategy {
-        CopyStrategy::SimpleCopy => false,
-        CopyStrategy::CowCopy => true,
-        CopyStrategy::Auto => cfg!(target_os = "macos"),
-    };
+    let try_reflink = attempts_reflink(request.strategy);
 
     let prepared = if try_reflink {
         try_reflink_anchored(&source, &destination_parent)?
@@ -1428,13 +1487,21 @@ fn same_inode(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
-/// Errnos that mean "this filesystem cannot exchange two names atomically".
+/// Raw errnos that mean "this filesystem cannot exchange two names
+/// atomically".
+#[cfg(unix)]
+const RENAME_FLAG_UNSUPPORTED: [i32; 4] = [
+    rustix::io::Errno::NOTSUP.raw_os_error(),
+    rustix::io::Errno::OPNOTSUPP.raw_os_error(),
+    rustix::io::Errno::INVAL.raw_os_error(),
+    rustix::io::Errno::NOSYS.raw_os_error(),
+];
+
+/// Errnos that mean "this filesystem cannot exchange two names atomically"
+/// (verified kernel `waft_verified::fs_checks::errno`).
 #[cfg(unix)]
 fn rename_flag_unsupported(error: rustix::io::Errno) -> bool {
-    error == rustix::io::Errno::NOTSUP
-        || error == rustix::io::Errno::OPNOTSUPP
-        || error == rustix::io::Errno::INVAL
-        || error == rustix::io::Errno::NOSYS
+    waft_verified::fs_checks::errno::is_listed(error.raw_os_error(), &RENAME_FLAG_UNSUPPORTED)
 }
 
 /// Test-only seams inside the publication window.
@@ -1654,55 +1721,62 @@ fn publish_forced_failure() -> bool {
     false
 }
 
+/// Open a canonical absolute directory one component at a time from `/`.
+///
+/// The verified kernel (`waft_verified::components::absolute_walk`) decides
+/// which names are opened, in `Path::components` order, and whether the walk
+/// then stops at a refused (`..`) component; this function performs exactly
+/// those `openat` calls.
 #[cfg(unix)]
 fn open_canonical_directory(path: &Path) -> io::Result<OwnedFd> {
-    if !path.is_absolute() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let Some(walk) = waft_verified::components::absolute_walk(path.as_os_str().as_bytes()) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "repository root did not resolve to an absolute path",
         ));
-    }
+    };
 
     let mut current = rustix::fs::open(Path::new("/"), DIRECTORY_FLAGS, rustix::fs::Mode::empty())?;
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(name) => {
-                current =
-                    rustix::fs::openat(&current, name, DIRECTORY_FLAGS, rustix::fs::Mode::empty())?;
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "canonical repository root contains an invalid component",
-                ));
-            }
-        }
+    for name in &walk.names {
+        current = rustix::fs::openat(
+            &current,
+            OsStr::from_bytes(name),
+            DIRECTORY_FLAGS,
+            rustix::fs::Mode::empty(),
+        )?;
+    }
+    if walk.refused {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "canonical repository root contains an invalid component",
+        ));
     }
     Ok(current)
 }
 
+/// The names an anchored walk of `rel_path` opens, in order.
+///
+/// The verified kernel (`waft_verified::components::relative_components`)
+/// proves every returned name is non-empty, contains no `/`, and is neither
+/// `.` nor `..`, and that at least one name is returned.
 #[cfg(unix)]
 fn relative_components(rel_path: &RepoRelPath) -> io::Result<Vec<OsString>> {
-    let mut result = Vec::new();
-    for component in Path::new(rel_path.as_str()).components() {
-        match component {
-            Component::Normal(name) => result.push(name.to_os_string()),
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "repository-relative path contains an unsafe component",
-                ));
-            }
-        }
-    }
-    if result.is_empty() {
-        return Err(io::Error::new(
+    use std::os::unix::ffi::OsStringExt;
+    use waft_verified::components::RelativeError;
+
+    match waft_verified::components::relative_components(rel_path.as_str().as_bytes()) {
+        Ok(names) => Ok(names.into_iter().map(OsString::from_vec).collect()),
+        Err(RelativeError::Unsafe) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "repository-relative path contains an unsafe component",
+        )),
+        Err(RelativeError::Empty) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "repository-relative path is empty",
-        ));
+        )),
     }
-    Ok(result)
 }
 
 #[cfg(unix)]
@@ -1711,7 +1785,11 @@ fn open_relative_parent(
     rel_path: &RepoRelPath,
     create: bool,
 ) -> io::Result<(OwnedFd, OsString)> {
+    use waft_verified::fs_checks::steps;
+
     let mut components = relative_components(rel_path)?;
+    // Unreachable: the kernel proves an accepted path has at least one name
+    // (`theorem_relative_names_are_safe`).
     let final_name = components
         .pop()
         .expect("relative_components rejects empty paths");
@@ -1725,16 +1803,23 @@ fn open_relative_parent(
             rustix::fs::Mode::empty(),
         ) {
             Ok(next) => current = next,
-            Err(error) if create && error == rustix::io::Errno::NOENT => {
-                let created = match rustix::fs::mkdirat(
+            Err(error)
+                if steps::creates_missing_directory(create, error == rustix::io::Errno::NOENT) =>
+            {
+                let answer = match rustix::fs::mkdirat(
                     &current,
                     &component,
                     rustix::fs::Mode::from_raw_mode(0o777),
                 ) {
-                    Ok(()) => true,
-                    Err(error) if error == rustix::io::Errno::EXIST => false,
-                    Err(error) => return Err(error.into()),
+                    Ok(()) => steps::MkdirAnswer::Created,
+                    Err(error) if error == rustix::io::Errno::EXIST => {
+                        steps::MkdirAnswer::AlreadyExists
+                    }
+                    Err(error) => steps::MkdirAnswer::Failed(error),
                 };
+                // Whatever `mkdirat` made is re-opened, never trusted; only a
+                // directory this run created is synced.
+                let created = steps::after_mkdir(answer)?;
                 let next = rustix::fs::openat(
                     &current,
                     &component,
@@ -1775,10 +1860,10 @@ fn ensure_same_relative_parent(
 #[cfg(unix)]
 fn ensure_open_handle_unchanged(file: &fs::File, initial: &fs::Metadata) -> io::Result<()> {
     let current = file.metadata()?;
-    if current.file_type().is_file()
-        && same_file(initial, &current)
-        && same_file_state(initial, &current)
-    {
+    if waft_verified::fs_checks::stability::unchanged_handle(
+        &observation(initial),
+        &observation(&current),
+    ) {
         Ok(())
     } else {
         Err(io::Error::new(
@@ -1820,7 +1905,9 @@ fn random_nonce() -> io::Result<String> {
 
 #[cfg(unix)]
 fn create_anchored_temp(parent: &OwnedFd) -> io::Result<(OsString, fs::File)> {
-    for _ in 0..128 {
+    // The verified budget grants at most 128 attempts; only `EEXIST` retries.
+    let mut attempts = waft_verified::fs_checks::steps::TempNameAttempts::new();
+    while attempts.try_another() {
         let name = next_temporary_name()?;
         match rustix::fs::openat(
             parent,
@@ -2083,11 +2170,7 @@ fn copy_file_path_fallback(
     create_dir_all_without_symlinks(parent)?;
     ensure_directory_without_symlink(parent)?;
 
-    let try_reflink = match strategy {
-        CopyStrategy::SimpleCopy => false,
-        CopyStrategy::CowCopy => true,
-        CopyStrategy::Auto => false,
-    };
+    let try_reflink = attempts_reflink(strategy);
     if try_reflink && let Some((tmp_path, source_permissions)) = try_reflink_to_temp(src, parent)? {
         fs::set_permissions(&tmp_path, source_permissions)?;
         fs::File::open(&tmp_path)?.sync_all()?;
@@ -2173,6 +2256,12 @@ fn try_reflink_to_temp(
         Err(_) => Ok(None),
     }
 }
+
+/// Glue tests for the verified `fingerprint`, `components` and `fs_checks`
+/// kernels: conversions, round trips, and differential checks against the
+/// std behaviour the kernels replaced.
+#[cfg(test)]
+mod kernel_tests;
 
 #[cfg(test)]
 mod tests {
