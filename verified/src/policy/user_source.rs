@@ -20,7 +20,9 @@
 //! variable it last queried, and appends `waft/config.toml` (XDG) or
 //! `.config/waft/config.toml` (HOME, USERPROFILE). The precedence of
 //! `--isolated`, `--config` and `WAFT_CONFIG_PATH` over this default is
-//! decided in `src/cli.rs`, outside this kernel.
+//! decided by the verified `context::cli_policy::user_config_source`
+//! kernel, not by this one; production consults this kernel only when that
+//! one selects the default location.
 //!
 //! Quirk (current behavior): being set is the only test, so an empty or
 //! relative value is used as is and the user layer can then resolve
