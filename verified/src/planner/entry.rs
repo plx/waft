@@ -521,7 +521,8 @@ pub open spec fn query_rank(q: EntryQuery) -> int {
 /// `q` is the first query of `qs` that `o` has not answered.
 pub open spec fn first_unanswered<S, E>(o: EntryObs<S, E>, qs: Seq<EntryQuery>, q: EntryQuery) -> bool {
     exists|i: int|
-        0 <= i < qs.len() && #[trigger] qs[i] == q && forall|j: int| 0 <= j < i ==> o.answered(#[trigger] qs[j])
+        0 <= i < qs.len()
+            && #[trigger] qs[i] == q && forall|j: int| 0 <= j < i ==> o.answered(#[trigger] qs[j])
 }
 
 /// Every query of `qs` has been answered.
@@ -599,7 +600,8 @@ pub fn plan_entry_step<S, E>(o: EntryObs<S, E>, overwrite: bool, overwrite_suppo
         },
         Some(Err(e)) => {
             proof {
-                assert forall|w: EntryWorld| #[trigger] o0.agrees(w) implies all_answered(o0, qs(w)) by {
+                assert forall|w: EntryWorld| #[trigger] o0.agrees(w)
+                    implies all_answered(o0, qs(w)) by {
                     assert(qs(w) =~= seq![EntryQuery::SourceKind]);
                 }
             }
@@ -611,7 +613,8 @@ pub fn plan_entry_step<S, E>(o: EntryObs<S, E>, overwrite: bool, overwrite_suppo
         SourceKindObs::RegularFile => {},
         SourceKindObs::Symlink | SourceKindObs::Other => {
             proof {
-                assert forall|w: EntryWorld| #[trigger] o0.agrees(w) implies all_answered(o0, qs(w)) by {
+                assert forall|w: EntryWorld| #[trigger] o0.agrees(w)
+                    implies all_answered(o0, qs(w)) by {
                     assert(qs(w) =~= seq![EntryQuery::SourceKind]);
                 }
             }
@@ -745,7 +748,8 @@ pub fn plan_entry_step<S, E>(o: EntryObs<S, E>, overwrite: bool, overwrite_suppo
         },
         DestState::UpToDate => {
             proof {
-                assert forall|w: EntryWorld| #[trigger] o0.agrees(w) implies all_answered(o0, qs(w)) by {
+                assert forall|w: EntryWorld| #[trigger] o0.agrees(w)
+                    implies all_answered(o0, qs(w)) by {
                     assert(qs(w).len() == 2);
                 }
             }
@@ -857,7 +861,8 @@ pub fn plan_entry_step<S, E>(o: EntryObs<S, E>, overwrite: bool, overwrite_suppo
                 Some(Ok(snapshot)) => snapshot,
             };
             proof {
-                assert forall|w: EntryWorld| #[trigger] o0.agrees(w) implies all_answered(o0, qs(w)) by {
+                assert forall|w: EntryWorld| #[trigger] o0.agrees(w)
+                    implies all_answered(o0, qs(w)) by {
                     assert(qs(w)[2] == EntryQuery::SourceSnapshot);
                     assert(qs(w)[3] == EntryQuery::DestinationSnapshot);
                 }
@@ -883,7 +888,8 @@ pub fn plan_entry_step<S, E>(o: EntryObs<S, E>, overwrite: bool, overwrite_suppo
         },
         DestState::TrackedConflict => {
             proof {
-                assert forall|w: EntryWorld| #[trigger] o0.agrees(w) implies all_answered(o0, qs(w)) by {
+                assert forall|w: EntryWorld| #[trigger] o0.agrees(w)
+                    implies all_answered(o0, qs(w)) by {
                     assert(qs(w).len() == 2);
                 }
             }
@@ -891,7 +897,8 @@ pub fn plan_entry_step<S, E>(o: EntryObs<S, E>, overwrite: bool, overwrite_suppo
         },
         DestState::TypeConflict => {
             proof {
-                assert forall|w: EntryWorld| #[trigger] o0.agrees(w) implies all_answered(o0, qs(w)) by {
+                assert forall|w: EntryWorld| #[trigger] o0.agrees(w)
+                    implies all_answered(o0, qs(w)) by {
                     assert(qs(w).len() == 2);
                 }
             }
@@ -899,7 +906,8 @@ pub fn plan_entry_step<S, E>(o: EntryObs<S, E>, overwrite: bool, overwrite_suppo
         },
         DestState::UnsafePath => {
             proof {
-                assert forall|w: EntryWorld| #[trigger] o0.agrees(w) implies all_answered(o0, qs(w)) by {
+                assert forall|w: EntryWorld| #[trigger] o0.agrees(w)
+                    implies all_answered(o0, qs(w)) by {
                     assert(qs(w).len() == 2);
                 }
             }
@@ -942,9 +950,8 @@ pub proof fn theorem_driver_follows_spec<S, E>(
 {
     let qs = entry_queries(w, overwrite, supported);
     // The spec order is strictly increasing in rank, so it has no repeats.
-    assert forall|i: int, j: int| 0 <= i < j < qs.len() implies query_rank(#[trigger] qs[i]) < query_rank(
-        #[trigger] qs[j],
-    ) by {}
+    assert forall|i: int, j: int| 0 <= i < j < qs.len()
+        implies query_rank(#[trigger] qs[i]) < query_rank(#[trigger] qs[j]) by {}
     match s {
         EntryStep::Query(o2, q) => {
             assert(first_unanswered(o, qs, q));

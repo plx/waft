@@ -337,7 +337,8 @@ pub proof fn lemma_real_run_accounting(kinds: Seq<EntryKind>, outcomes: Seq<RunO
 
 /// For a fixed plan, a failing dry run implies a failing real run with the
 /// same total and at least as many failures, for every assignment of
-/// execution outcomes to the plan's copies.
+/// execution outcomes to the plan's copies. (The real run's successes are
+/// passed as one counter: `report_failure_summary` only uses their sum.)
 pub proof fn theorem_real_run_fails_if_dry_run_fails(
     kinds: Seq<EntryKind>,
     outcomes: Seq<RunOutcome>,

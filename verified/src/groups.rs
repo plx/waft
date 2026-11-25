@@ -280,7 +280,8 @@ pub open spec fn in_set(set: Seq<&[u8]>, t: Seq<u8>) -> bool {
 
 /// `set` is strictly increasing.
 pub open spec fn sorted_strict(set: Seq<&[u8]>) -> bool {
-    forall|a: int, b: int| 0 <= a < b < set.len() ==> lex_cmp((#[trigger] set[a])@, (#[trigger] set[b])@)
+    forall|a: int, b: int| 0 <= a < b < set.len() ==>
+        lex_cmp((#[trigger] set[a])@, (#[trigger] set[b])@)
         == Ordering::Less
 }
 
@@ -435,7 +436,8 @@ pub trait PathKey {
 
 /// The keys of `s` are strictly increasing: sorted, with no key twice.
 pub open spec fn keys_strictly_increasing<T: PathKey>(s: Seq<T>) -> bool {
-    forall|i: int, j: int| 0 <= i < j < s.len() ==> lex_cmp((#[trigger] s[i]).key(), (#[trigger] s[j]).key())
+    forall|i: int, j: int| 0 <= i < j < s.len() ==>
+        lex_cmp((#[trigger] s[i]).key(), (#[trigger] s[j]).key())
         == Ordering::Less
 }
 
@@ -446,7 +448,8 @@ pub open spec fn has_key<T: PathKey>(s: Seq<T>, k: Seq<u8>) -> bool {
 
 /// `a` and `b` have the same set of keys.
 pub open spec fn same_keys<T: PathKey>(a: Seq<T>, b: Seq<T>) -> bool {
-    forall|k: Seq<u8>| #![trigger has_key(a, k)] #![trigger has_key(b, k)] has_key(a, k) <==> has_key(b, k)
+    forall|k: Seq<u8>| #![trigger has_key(a, k)] #![trigger has_key(b, k)] has_key(a, k)
+        <==> has_key(b, k)
 }
 
 /// Sort `v` by key and keep one element per key.
@@ -468,10 +471,8 @@ pub fn sort_unique<T: PathKey>(v: &mut Vec<T>)
         let s = v@;
         assert forall|x: &T, y: &T, o: Ordering| #[trigger] call_ensures(cmp, (x, y), o) implies o
             == lex_cmp(x.key(), y.key()) by {}
-        assert forall|i: int, j: int| #![trigger s[i], s[j]] 0 <= i < s.len() && 0 <= j < s.len() implies lex_cmp(
-            s[j].key(),
-            s[i].key(),
-        ) == flip(lex_cmp(s[i].key(), s[j].key())) by {
+        assert forall|i: int, j: int| #![trigger s[i], s[j]] 0 <= i < s.len() && 0 <= j < s.len()
+            implies lex_cmp(s[j].key(), s[i].key()) == flip(lex_cmp(s[i].key(), s[j].key())) by {
             lemma_lex_flip(s[i].key(), s[j].key());
         }
         assert forall|i: int, j: int, k: int| #![trigger s[i], s[j], s[k]]
@@ -490,7 +491,8 @@ pub fn sort_unique<T: PathKey>(v: &mut Vec<T>)
     proof {
         original.to_multiset_ensures();
         sorted.to_multiset_ensures();
-        assert forall|a: int, b: int| 0 <= a < b < sorted.len() implies compare_le(cmp, sorted[a], sorted[b]) by {
+        assert forall|a: int, b: int| 0 <= a < b < sorted.len()
+            implies compare_le(cmp, sorted[a], sorted[b]) by {
             assert(sorted_by_le(sorted, |x: T, y: T| compare_le(cmp, x, y)));
         }
     }
@@ -547,7 +549,8 @@ pub fn sort_unique<T: PathKey>(v: &mut Vec<T>)
             forall|a: int| 0 < a < n ==> lex_cmp((#[trigger] sorted[a - 1]).key(), sorted[a].key())
                 != Ordering::Greater,
             forall|k: int| r <= k < n ==> #[trigger] v@[k] == sorted[k],
-            forall|a: int, b: int| 0 <= a < b < w ==> lex_cmp((#[trigger] v@[a]).key(), (#[trigger] v@[b]).key())
+            forall|a: int, b: int| 0 <= a < b < w ==>
+                lex_cmp((#[trigger] v@[a]).key(), (#[trigger] v@[b]).key())
                 == Ordering::Less,
             v@[w - 1].key() == sorted[r - 1].key(),
             forall|a: int| 0 <= a < w ==> sorted.subrange(0, r as int).contains(#[trigger] v@[a]),
@@ -587,20 +590,24 @@ pub fn sort_unique<T: PathKey>(v: &mut Vec<T>)
                     #![trigger has_key(v@.subrange(0, w + 1), k)]
                     has_key(sorted.subrange(0, r + 1), k) <==> has_key(v@.subrange(0, w + 1), k) by {
                     if has_key(sorted.subrange(0, r + 1), k) && k != sorted[r as int].key() {
-                        let j = choose|j: int| 0 <= j < r + 1 && (#[trigger] sorted.subrange(0, r + 1)[j]).key() == k;
+                        let j = choose|j: int|
+                            0 <= j < r + 1 && (#[trigger] sorted.subrange(0, r + 1)[j]).key() == k;
                         assert(sorted.subrange(0, r as int)[j].key() == k);
                         assert(has_key(sorted.subrange(0, r as int), k));
-                        let m = choose|m: int| 0 <= m < w && (#[trigger] before.subrange(0, w as int)[m]).key() == k;
+                        let m = choose|m: int|
+                            0 <= m < w && (#[trigger] before.subrange(0, w as int)[m]).key() == k;
                         assert(v@.subrange(0, w + 1)[m].key() == k);
                     }
                     if has_key(sorted.subrange(0, r + 1), k) && k == sorted[r as int].key() {
                         assert(v@.subrange(0, w + 1)[w as int].key() == k);
                     }
                     if has_key(v@.subrange(0, w + 1), k) && k != sorted[r as int].key() {
-                        let m = choose|m: int| 0 <= m < w + 1 && (#[trigger] v@.subrange(0, w + 1)[m]).key() == k;
+                        let m = choose|m: int|
+                            0 <= m < w + 1 && (#[trigger] v@.subrange(0, w + 1)[m]).key() == k;
                         assert(before.subrange(0, w as int)[m].key() == k);
                         assert(has_key(before.subrange(0, w as int), k));
-                        let j = choose|j: int| 0 <= j < r && (#[trigger] sorted.subrange(0, r as int)[j]).key() == k;
+                        let j = choose|j: int|
+                            0 <= j < r && (#[trigger] sorted.subrange(0, r as int)[j]).key() == k;
                         assert(sorted.subrange(0, r + 1)[j].key() == k);
                     }
                     if has_key(v@.subrange(0, w + 1), k) && k == sorted[r as int].key() {
@@ -627,7 +634,8 @@ pub fn sort_unique<T: PathKey>(v: &mut Vec<T>)
                     #![trigger has_key(v@.subrange(0, w as int), k)]
                     has_key(sorted.subrange(0, r + 1), k) <==> has_key(v@.subrange(0, w as int), k) by {
                     if has_key(sorted.subrange(0, r + 1), k) && k != sorted[r as int].key() {
-                        let j = choose|j: int| 0 <= j < r + 1 && (#[trigger] sorted.subrange(0, r + 1)[j]).key() == k;
+                        let j = choose|j: int|
+                            0 <= j < r + 1 && (#[trigger] sorted.subrange(0, r + 1)[j]).key() == k;
                         assert(sorted.subrange(0, r as int)[j].key() == k);
                         assert(has_key(sorted.subrange(0, r as int), k));
                     }
@@ -635,7 +643,8 @@ pub fn sort_unique<T: PathKey>(v: &mut Vec<T>)
                         assert(v@.subrange(0, w as int)[w - 1].key() == k);
                     }
                     if has_key(v@.subrange(0, w as int), k) {
-                        let j = choose|j: int| 0 <= j < r && (#[trigger] sorted.subrange(0, r as int)[j]).key() == k;
+                        let j = choose|j: int|
+                            0 <= j < r && (#[trigger] sorted.subrange(0, r as int)[j]).key() == k;
                         assert(sorted.subrange(0, r + 1)[j].key() == k);
                     }
                 }
@@ -712,10 +721,8 @@ fn has_ancestor(dirs: &[&[u8]], sorted: bool, d: &[u8]) -> (r: bool)
         invariant
             k <= d@.len(),
             sorted ==> sorted_strict(dirs@),
-            forall|j: int| 0 <= j < dirs@.len() && (#[trigger] dirs@[j])@.len() < k ==> !is_dir_ancestor(
-                dirs@[j]@,
-                d@,
-            ),
+            forall|j: int| 0 <= j < dirs@.len() && (#[trigger] dirs@[j])@.len() < k ==>
+                !is_dir_ancestor(dirs@[j]@, d@),
         decreases d.len() - k,
     {
         if d[k] == 0x2Fu8 {
@@ -729,10 +736,8 @@ fn has_ancestor(dirs: &[&[u8]], sorted: bool, d: &[u8]) -> (r: bool)
                 return true;
             }
             proof {
-                assert forall|j: int| 0 <= j < dirs@.len() && (#[trigger] dirs@[j])@.len() < k + 1 implies !is_dir_ancestor(
-                    dirs@[j]@,
-                    d@,
-                ) by {
+                assert forall|j: int| 0 <= j < dirs@.len() && (#[trigger] dirs@[j])@.len() < k + 1
+                    implies !is_dir_ancestor(dirs@[j]@, d@) by {
                     if dirs@[j]@.len() == k && is_dir_ancestor(dirs@[j]@, d@) {
                         assert(dirs@[j]@ == prefix@);
                     }
@@ -749,7 +754,8 @@ fn has_ancestor(dirs: &[&[u8]], sorted: bool, d: &[u8]) -> (r: bool)
 pub fn outermost(dirs: &[&[u8]]) -> (keep: Vec<bool>)
     ensures
         keep@.len() == dirs@.len(),
-        forall|i: int| 0 <= i < dirs@.len() ==> #[trigger] keep@[i] == !has_ancestor_in(dirs@, dirs@[i]@),
+        forall|i: int| 0 <= i < dirs@.len() ==>
+            #[trigger] keep@[i] == !has_ancestor_in(dirs@, dirs@[i]@),
 {
     let sorted = is_strictly_sorted(dirs);
     let mut keep: Vec<bool> = Vec::new();
@@ -774,7 +780,8 @@ pub fn outermost(dirs: &[&[u8]]) -> (keep: Vec<bool>)
 pub fn uncovered(eligible: &[&[u8]], covered: &[&[u8]]) -> (r: Vec<bool>)
     ensures
         r@.len() == eligible@.len(),
-        forall|i: int| 0 <= i < eligible@.len() ==> #[trigger] r@[i] == !in_set(covered@, eligible@[i]@),
+        forall|i: int| 0 <= i < eligible@.len() ==>
+            #[trigger] r@[i] == !in_set(covered@, eligible@[i]@),
 {
     let sorted = is_strictly_sorted(covered);
     let mut r: Vec<bool> = Vec::new();

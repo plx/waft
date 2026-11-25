@@ -39,7 +39,10 @@
 //! matching field. `exists` is whatever `FileSystem::exists` reports; on the
 //! real filesystem that follows symlinks, so a dangling symlink at the
 //! destination is observed as "does not exist" and classified
-//! [`DestState::Missing`] (a known quirk this kernel mirrors faithfully).
+//! [`DestState::Missing`] (a known quirk this kernel mirrors faithfully; the
+//! real run then fails to publish over the symlink while `--dry-run` reported
+//! a copy). Likewise a comparison I/O error is classified an untracked
+//! conflict (`compared_state`), as production always did.
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
@@ -141,6 +144,10 @@ pub struct DestWorld {
 /// The state a comparison result decides for an existing regular file.
 /// `ContentDiffers` and a comparison error both mean "untracked conflict":
 /// waft never calls a destination up to date unless a comparison said so.
+///
+/// Quirk mirrored from production: because a comparison error is an
+/// untracked conflict, an unreadable destination is skipped (exit status 0)
+/// without `--overwrite` instead of being reported as a per-file failure.
 pub open spec fn compared_state(c: CompareObs) -> DestState {
     match c {
         CompareObs::Equal => DestState::UpToDate,
@@ -236,7 +243,8 @@ impl DestObs {
     /// Record world `w`'s answer to `q`.
     pub open spec fn answer(self, q: DestQuery, w: DestWorld) -> DestObs {
         match q {
-            DestQuery::ParentHasSymlink => DestObs { parent_has_symlink: Some(w.parent_has_symlink), ..self },
+            DestQuery::ParentHasSymlink =>
+                DestObs { parent_has_symlink: Some(w.parent_has_symlink), ..self },
             DestQuery::Exists => DestObs { exists: Some(w.exists), ..self },
             DestQuery::IsSymlink => DestObs { is_symlink: Some(w.is_symlink), ..self },
             DestQuery::IsFile => DestObs { is_file: Some(w.is_file), ..self },
@@ -275,7 +283,8 @@ pub open spec fn query_rank(q: DestQuery) -> int {
 /// `q` is the first query of `qs` that `o` has not answered.
 pub open spec fn first_unanswered(o: DestObs, qs: Seq<DestQuery>, q: DestQuery) -> bool {
     exists|i: int|
-        0 <= i < qs.len() && #[trigger] qs[i] == q && forall|j: int| 0 <= j < i ==> o.answered(#[trigger] qs[j])
+        0 <= i < qs.len()
+            && #[trigger] qs[i] == q && forall|j: int| 0 <= j < i ==> o.answered(#[trigger] qs[j])
 }
 
 /// Every query of `qs` has been answered.
@@ -439,7 +448,8 @@ pub proof fn theorem_driver_follows_spec(o: DestObs, w: DestWorld, k: int, s: De
         o.agrees(w),
         0 <= k <= dest_queries(w).len(),
         forall|i: int| 0 <= i < k ==> o.answered(#[trigger] dest_queries(w)[i]),
-        forall|q: DestQuery| #[trigger] o.answered(q) ==> exists|i: int| 0 <= i < k && dest_queries(w)[i] == q,
+        forall|q: DestQuery| #[trigger] o.answered(q) ==>
+            exists|i: int| 0 <= i < k && dest_queries(w)[i] == q,
         step_sound(o, s),
     ensures
         k < dest_queries(w).len() ==> s == DestStep::Query(dest_queries(w)[k]),
