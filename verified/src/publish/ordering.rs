@@ -12,20 +12,38 @@
 //! for a replacement). The permission-repair machine gates its `fchmod` the
 //! same way.
 //!
-//! Proven (O1–O4): no destination mutation of any kind — no-clobber
-//! publication, exchange, displacement, or `fchmod` — can be issued before
-//! the pre-publication callback has returned `Ok`, and the staging name is
-//! proved after the callback and the parent revalidation, immediately before
-//! publication; `Ready::trace` is exactly that sequence.
+//! The chain starts when the staging file is created: [`Staged::created`]
+//! returns both the first state and the staging name's guard, so production
+//! gets exactly one staging guard per check chain.
 //!
-//! Trust: production feeds each check's real result, and calls the callback
-//! once (the token for the next step is consumed by the step).
+//! What is enforced, and by whom:
+//!
+//! * **O1** the order is enforced by Rust: each step consumes its typestate
+//!   and is the only way to the next, so no destination mutation that needs a
+//!   [`Ready`] can be reached in the code without passing every step;
+//! * **O2** (Verus) each step passes an error through unchanged and is `Ok`
+//!   exactly when the check it is fed was `Ok`;
+//! * **O3** (Verus) each step records exactly its own check on top of the
+//!   checks before it (`next.trace() == self.trace().push(..)`), so a state's
+//!   trace is the sequence of steps actually taken to reach it — a step that
+//!   skipped or reordered a check would break its postcondition;
+//! * **O4** (Verus) hence `Ready::trace` is exactly the six checks in order:
+//!   the staging name is proved after the callback and the parent
+//!   revalidation, immediately before publication.
+//!
+//! Trust: the typestates fix the order in which results are fed back, not the
+//! syscalls themselves; that each result is the real outcome of the named
+//! check, run at that point, and that the callback is called once, is
+//! production's part.
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
+use crate::publish::removal::GuardState;
+#[cfg(verus_keep_ghost)]
+use crate::publish::trace::ino_of;
 #[allow(unused_imports)]
-use crate::publish::trace::Ev;
+use crate::publish::trace::{Ev, Identity, Name};
 
 verus! {
 
@@ -41,8 +59,8 @@ pub open spec fn staging_checks() -> Seq<Ev> {
     ]
 }
 
-/// A staging file has been created exclusively, filled, and guarded;
-/// production's next step is the source-unchanged check.
+/// A staging file has been created exclusively and guarded; production fills
+/// it, and its next step is the source-unchanged check.
 pub struct Staged {
     #[allow(dead_code)]
     trace: Ghost<Seq<Ev>>,
@@ -54,10 +72,27 @@ impl Staged {
         self.trace@ == staging_checks().take(0)
     }
 
-    /// Begin the checks for a freshly prepared and guarded staging file.
-    pub fn prepared() -> (r: Staged) {
+    /// The checks that have passed: none yet.
+    pub closed spec fn trace(&self) -> Seq<Ev> {
+        self.trace@
+    }
+
+    /// Begin the checks for a staging file this run has just created with
+    /// `O_EXCL`, whose identity is `identity` (`None` if it could not be
+    /// read), together with the guard of its name: armed, and entitled to
+    /// remove exactly that identity.
+    pub fn created<I: Identity>(identity: Option<I>) -> (r: (Staged, GuardState<I>))
+        ensures
+            r.0.trace() == Seq::<Ev>::empty(),
+            r.1.name() == Name::Staging,
+            r.1.ident() == ino_of(identity),
+            r.1.is_armed(),
+    {
         let ghost trace = staging_checks().take(0);
-        Staged { trace: Ghost(trace) }
+        proof {
+            assert(trace =~= Seq::<Ev>::empty());
+        }
+        (Staged { trace: Ghost(trace) }, GuardState::staging(identity))
     }
 
     /// Feed the source-unchanged check.
@@ -65,15 +100,27 @@ impl Staged {
         ensures
             r is Ok <==> checked is Ok,
             checked matches Err(e) ==> r == Err::<StagingCheck<2>, E>(e),
+            r matches Ok(next) ==> next.trace() == self.trace().push(Ev::SourceUnchanged),
     {
+        proof {
+            use_type_invariant(&self);
+        }
         match checked {
             Ok(()) => {
                 let ghost trace = staging_checks().take(1);
+                proof {
+                    assert(trace =~= self.trace@.push(Ev::SourceUnchanged));
+                }
                 Ok(StagingCheck { trace: Ghost(trace) })
             },
             Err(error) => Err(error),
         }
     }
+}
+
+/// The check number `n` (2 to 6) a staging file passes next.
+pub open spec fn staging_check(n: int) -> Ev {
+    staging_checks()[n - 1]
 }
 
 /// A staging file that has passed the first `N - 1` checks; the next is
@@ -104,6 +151,7 @@ impl<const N: u64> StagingCheck<N> {
         ensures
             r is Ok <==> checked is Ok,
             checked matches Err(e) ==> r == Err::<StagingCheck<M>, E>(e),
+            r matches Ok(next) ==> next.trace() == self.trace().push(staging_check(N as int)),
     {
         proof {
             use_type_invariant(&self);
@@ -111,6 +159,9 @@ impl<const N: u64> StagingCheck<N> {
         match checked {
             Ok(()) => {
                 let ghost trace = staging_checks().take(N as int);
+                proof {
+                    assert(trace =~= self.trace@.push(staging_check(N as int)));
+                }
                 Ok(StagingCheck { trace: Ghost(trace) })
             },
             Err(error) => Err(error),
@@ -124,6 +175,7 @@ impl StagingCheck<2> {
         ensures
             r is Ok <==> applied is Ok,
             applied matches Err(e) ==> r == Err::<StagingCheck<3>, E>(e),
+            r matches Ok(next) ==> next.trace() == self.trace().push(Ev::StagingMode),
     {
         self.advance(applied)
     }
@@ -135,6 +187,7 @@ impl StagingCheck<3> {
         ensures
             r is Ok <==> synced is Ok,
             synced matches Err(e) ==> r == Err::<StagingCheck<4>, E>(e),
+            r matches Ok(next) ==> next.trace() == self.trace().push(Ev::StagingSynced),
     {
         self.advance(synced)
     }
@@ -146,6 +199,7 @@ impl StagingCheck<4> {
         ensures
             r is Ok <==> called is Ok,
             called matches Err(e) ==> r == Err::<StagingCheck<5>, E>(e),
+            r matches Ok(next) ==> next.trace() == self.trace().push(Ev::BeforePublish),
     {
         self.advance(called)
     }
@@ -157,6 +211,7 @@ impl StagingCheck<5> {
         ensures
             r is Ok <==> checked is Ok,
             checked matches Err(e) ==> r == Err::<StagingCheck<6>, E>(e),
+            r matches Ok(next) ==> next.trace() == self.trace().push(Ev::ParentRevalidated),
     {
         self.advance(checked)
     }
@@ -168,14 +223,18 @@ impl StagingCheck<6> {
         ensures
             r is Ok <==> checked is Ok,
             checked matches Err(e) ==> r == Err::<Ready, E>(e),
+            r matches Ok(ready) ==> ready.trace() == self.trace().push(Ev::StagingIsPrepared),
             r matches Ok(ready) ==> ready.trace() == staging_checks(),
     {
+        proof {
+            use_type_invariant(&self);
+        }
         match checked {
             Ok(()) => {
-                proof {
-                    assert(staging_checks().take(6) =~= staging_checks());
-                }
                 let ghost trace = staging_checks();
+                proof {
+                    assert(trace =~= self.trace@.push(Ev::StagingIsPrepared));
+                }
                 Ok(Ready { trace: Ghost(trace) })
             },
             Err(error) => Err(error),
