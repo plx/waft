@@ -3,9 +3,9 @@
 //! `RepoRelPath::normalize` (production `src/path.rs`) is the final gate that
 //! decides whether a user, walker or rule-file path lies strictly inside the
 //! repository root, and which repository-relative names it denotes. This
-//! kernel makes every decision in that gate; production only lowers
-//! `std::path` values to the kernel model, joins the accepted names with `/`,
-//! and builds errors.
+//! kernel makes the gate's normalization, containment and text decisions
+//! (listed below). A few steps remain `std` behaviour or unverified glue in
+//! production; they are listed under "What production still decides".
 //!
 //! # What the kernel decides
 //!
@@ -20,6 +20,31 @@
 //!   CR or LF (`validate_text_path`).
 //! - [`text::classify_verbatim_prefix`]: how the Windows-only
 //!   `without_windows_verbatim_prefix` rewrites `\\?\` and `\\?\UNC\` paths.
+//!
+//! # What production still decides
+//!
+//! These steps of `RepoRelPath::normalize` are not kernel decisions:
+//!
+//! - whether the input is used as given (`Path::is_absolute`) or joined onto
+//!   the root (`Path::join`, which on Windows rewrites root-relative and
+//!   drive-relative inputs);
+//! - on Windows, whether verbatim stripping applies at all: a path that is
+//!   not valid UTF-8 (`Path::to_str` fails) keeps its `\\?\` prefix, and
+//!   `classify_verbatim_prefix` only decides how a UTF-8 path is rewritten;
+//! - the hand-off between the two kernels: the components
+//!   `logical_normalize` keeps are collected into a `PathBuf`, and
+//!   `classify_containment` is given the components `Path::components`
+//!   re-parses from that buffer, not the kept list itself (see the trust
+//!   assumptions below);
+//! - whether each accepted name is valid UTF-8 (`OsStr::to_str`, an error
+//!   otherwise), joining the names with `/`, and building the errors.
+//!
+//! The exec postconditions (`logical_normalize`, `classify_containment`,
+//! `has_forbidden_text_char`, `classify_verbatim_prefix`) hold for exactly
+//! the values production passes in. The composite theorems, stated over
+//! `spec_repo_relative` (containment of `spec_normalize` outputs), describe
+//! production only through the collect/re-parse assumption below, which
+//! holds on Unix.
 //!
 //! # Theorems
 //!
@@ -53,7 +78,11 @@
 //! - `theorem_escape_needs_nameless_root`: when the normalized root contains a
 //!   name, nothing but names can remain under it, so the former
 //!   `unreachable!("normalized path should only have Normal components")`
-//!   was only reachable for a root with no name (`/`, `C:\`, `""`, `.`).
+//!   was only reachable for a root whose normalized form has no name (`/`,
+//!   `C:\`, `""`, `.`, or only `..`s after those: `..`, `/..`, `/repo/../..`).
+//! - `theorem_nameless_root_escapes`: conversely, every such root reaches
+//!   that branch (with the path `root/..`), so it is reachable exactly for
+//!   nameless roots.
 //! - `theorem_escape_is_leading`: when a non-name remains, it is the first
 //!   remaining component, so the former loop panicked before converting any
 //!   name to UTF-8; classifying the case as Outside changes only the panic.
@@ -71,9 +100,10 @@
 //! # Behaviour change
 //!
 //! The only one: a path whose normalized remainder under the root starts with
-//! a non-name (for example `normalize("../x", "/")`, or any absolute path
-//! under the relative root `""` or `.`) used to panic at `unreachable!`; it is
-//! now the existing "path ... is outside the repository root ..." error.
+//! a non-name (for example `normalize("../x", "/")`, `normalize("../x",
+//! "..")`, or any absolute path under the relative root `""` or `.`) used to
+//! panic at `unreachable!`; it is now the existing "path ... is outside the
+//! repository root ..." error.
 //!
 //! # Trust assumptions (production glue)
 //!
@@ -88,9 +118,11 @@
 //!   old `strip_prefix` call did. On Unix this round trip is the identity on
 //!   normal forms, so the composite theorems (`spec_repo_relative`) describe
 //!   production exactly. On Windows `PathBuf::push` can rewrite some inputs
-//!   (it drops `..` after a verbatim root, and a name like `a:b` re-parses as
-//!   a drive prefix); production keeps that std behaviour unchanged, and the
-//!   containment theorems still hold for whatever component list std yields.
+//!   (it drops `..` after a verbatim root, and clears the buffer when a name
+//!   such as `a:b` or `//server/share` re-parses as a prefix); production
+//!   keeps that std behaviour unchanged. `classify_containment`'s own
+//!   postcondition still holds for whatever component list std yields, but
+//!   the composite theorems do not describe those inputs.
 //! - `Path::components` yields a prefix only first, `Normal` names that are
 //!   non-empty and never `.` or `..`, and `Component::as_os_str` of a `Normal`
 //!   is its name. The remainder production converts to UTF-8 is the list

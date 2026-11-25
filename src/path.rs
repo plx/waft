@@ -6,6 +6,13 @@
 //! shared with `RepoRelPath::from_git_bytes` are made by the Verus-verified
 //! kernel `waft_verified::path`. This module lowers `std::path` components to
 //! the kernel's model and turns its decisions into values and errors.
+//!
+//! Some steps stay unverified `std` glue here: using the input as given or
+//! joining it onto the root, the Windows `to_str` gate in front of the
+//! verbatim-prefix rule, collecting the kept components into a `PathBuf`
+//! and re-parsing it for the containment decision, and converting each
+//! accepted name to UTF-8. The kernel's module documentation lists them with
+//! the assumptions that connect its theorems to this code.
 
 use std::fmt;
 use std::path::{Component, Path, PathBuf, Prefix};
@@ -361,7 +368,9 @@ mod tests {
     #[test]
     fn reject_escape_above_filesystem_root_instead_of_panicking() {
         // These used to reach `unreachable!` because a `..` directly after
-        // the root survives normalization and the root `/` has no name.
+        // the root survives normalization and the normalized root has no
+        // name. Every such root lets some path escape this way
+        // (`theorem_nameless_root_escapes`), not only `/`.
         for (input, root) in [
             ("../x", "/"),
             ("/../x", "/"),
@@ -369,6 +378,9 @@ mod tests {
             ("..", ""),
             ("/", ""),
             ("/x", "."),
+            ("../x", ".."),
+            ("../x", "/.."),
+            ("../x", "/repo/../.."),
         ] {
             let err = RepoRelPath::normalize(Path::new(input), Path::new(root)).unwrap_err();
             assert_eq!(
@@ -639,8 +651,9 @@ mod tests {
         PathBuf::from(OsStr::from_bytes(&bytes))
     }
 
-    /// Path segments for the differential test. Roots draw from the first
-    /// four (plain names, `.`), paths from all of them.
+    /// Path segments for the differential test, used for both paths and
+    /// roots: names, `.`, `..`, empty segments, non-UTF-8 and forbidden
+    /// bytes, a backslash, and colon names that are prefixes on Windows.
     #[cfg(unix)]
     const SEGMENTS: &[&[u8]] = &[
         b"repo",
@@ -655,6 +668,10 @@ mod tests {
         b"x\ry",
         b"x\0y",
         b"\\x",
+        b"...",
+        b"a:b",
+        b"C:",
+        b"..\xff",
     ];
 
     #[cfg(unix)]
@@ -666,7 +683,7 @@ mod tests {
             path_absolute in proptest::prelude::any::<bool>(),
             path_segments in proptest::collection::vec(0..SEGMENTS.len(), 0..7),
             root_absolute in proptest::prelude::any::<bool>(),
-            root_segments in proptest::collection::vec(0..4usize, 0..4),
+            root_segments in proptest::collection::vec(0..SEGMENTS.len(), 0..4),
         ) {
             let path_parts: Vec<&[u8]> = path_segments.iter().map(|&i| SEGMENTS[i]).collect();
             let root_parts: Vec<&[u8]> = root_segments.iter().map(|&i| SEGMENTS[i]).collect();
