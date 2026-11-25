@@ -929,7 +929,8 @@ pub proof fn theorem_p2_one_removal_per_acquisition(
 
 /// P3 (no stale lock on signal death). When the lock path fits the
 /// signal-safe buffer: if a signal terminates the process, our lock is not on
-/// disk; and no acquisition ever ends with its lock left behind.
+/// disk; whenever no acquisition is in progress, our lock is not on disk; and
+/// no acquisition ever ends with its lock left behind.
 pub proof fn theorem_p3_no_stale_lock_on_signal_death(
     prev: Disposition,
     coop: bool,
@@ -939,6 +940,10 @@ pub proof fn theorem_p3_no_stale_lock_on_signal_death(
 )
     ensures
         run(init(prev, true, coop, retries, disk), steps).terminated ==> run(
+            init(prev, true, coop, retries, disk),
+            steps,
+        ).disk != Disk::Ours,
+        run(init(prev, true, coop, retries, disk), steps).pc == Pc::Idle ==> run(
             init(prev, true, coop, retries, disk),
             steps,
         ).disk != Disk::Ours,
