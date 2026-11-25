@@ -62,6 +62,15 @@
 //!   symlinks are ever read. This covers only rule files found by the
 //!   discovery walk: production opens `.git/info/exclude` and the global
 //!   excludes file by path, following symlinks under every policy.
+//! - `theorem_rule_file_action_agrees_with_existence` relates that decision
+//!   to the predicate selection and the existence walk share
+//!   (`selection::spec_wt_entry_consulted`, which defines
+//!   `git_policy::rule_file_counts_spec`), over the same
+//!   `policy::vocab::SymlinkPolicy`: discovery handles a `.worktreeinclude`
+//!   entry exactly when it exists for selection, validates every existing
+//!   one except a symlink under `error`, and rejects exactly that symlink
+//!   with an error-severity issue (the intended difference: selection would
+//!   read it, but validation stops the command first).
 //!
 //! # Trust assumptions
 //!
@@ -76,12 +85,21 @@
 //! - Production tags each problem with the scope it is validating
 //!   (`Repository` for in-repository rule files, `.git/info/exclude`, the
 //!   discovery walk and the gitlinks lookup; `GlobalExcludes` for the global
-//!   excludes file) and the kind of the failing step, and maps
-//!   `config::SymlinkPolicy` one to one onto [`RuleSymlinkPolicy`]. The walk
-//!   entry's file type comes from `walkdir`, which does not follow symlinks.
+//!   excludes file) and the kind of the failing step, and lowers
+//!   `config::SymlinkPolicy` to `policy::vocab::SymlinkPolicy` with the one
+//!   `From` conversion in `src/config.rs` that every kernel shares. The walk
+//!   entry's file type comes from `walkdir`, which does not follow symlinks;
+//!   production passes its `is_symlink()` and `is_file()`, which agree with
+//!   `walk::entry_kind`'s classification (the tests are mutually exclusive).
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
+
+#[cfg(verus_keep_ghost)]
+use crate::git_policy::rule_file_counts_spec;
+use crate::policy::vocab::SymlinkPolicy;
+#[cfg(verus_keep_ghost)]
+use crate::selection::{EntryKind, spec_wt_entry_consulted};
 
 verus! {
 
@@ -532,17 +550,6 @@ pub proof fn theorem_only_repository_problems_block(tags: Seq<(RuleScope, IssueK
     }
 }
 
-/// The `.worktreeinclude` symlink policy (`config::SymlinkPolicy`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RuleSymlinkPolicy {
-    /// A symlinked `.worktreeinclude` is an error.
-    Error,
-    /// A symlinked `.worktreeinclude` is treated as absent.
-    Ignore,
-    /// A symlinked `.worktreeinclude` is read through the link.
-    Follow,
-}
-
 /// What discovery does with one walked entry named like a rule file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleFileAction {
@@ -561,13 +568,13 @@ pub open spec fn spec_rule_file_action(
     is_worktreeinclude: bool,
     is_symlink: bool,
     is_file: bool,
-    policy: RuleSymlinkPolicy,
+    policy: SymlinkPolicy,
 ) -> RuleFileAction {
     if is_worktreeinclude && is_symlink {
         match policy {
-            RuleSymlinkPolicy::Error => RuleFileAction::RejectSymlink,
-            RuleSymlinkPolicy::Ignore => RuleFileAction::Skip,
-            RuleSymlinkPolicy::Follow => RuleFileAction::Validate,
+            SymlinkPolicy::Error => RuleFileAction::RejectSymlink,
+            SymlinkPolicy::Ignore => RuleFileAction::Skip,
+            SymlinkPolicy::Follow => RuleFileAction::Validate,
         }
     } else if is_file {
         RuleFileAction::Validate
@@ -581,16 +588,16 @@ pub fn rule_file_action(
     is_worktreeinclude: bool,
     is_symlink: bool,
     is_file: bool,
-    policy: RuleSymlinkPolicy,
+    policy: SymlinkPolicy,
 ) -> (r: RuleFileAction)
     ensures
         r == spec_rule_file_action(is_worktreeinclude, is_symlink, is_file, policy),
 {
     if is_worktreeinclude && is_symlink {
         match policy {
-            RuleSymlinkPolicy::Error => RuleFileAction::RejectSymlink,
-            RuleSymlinkPolicy::Ignore => RuleFileAction::Skip,
-            RuleSymlinkPolicy::Follow => RuleFileAction::Validate,
+            SymlinkPolicy::Error => RuleFileAction::RejectSymlink,
+            SymlinkPolicy::Ignore => RuleFileAction::Skip,
+            SymlinkPolicy::Follow => RuleFileAction::Validate,
         }
     } else if is_file {
         RuleFileAction::Validate
@@ -613,7 +620,7 @@ pub proof fn theorem_symlinks_read_only_when_followed(
     is_worktreeinclude: bool,
     is_symlink: bool,
     is_file: bool,
-    policy: RuleSymlinkPolicy,
+    policy: SymlinkPolicy,
 )
     requires
         !(is_symlink && is_file),
@@ -625,6 +632,44 @@ pub proof fn theorem_symlinks_read_only_when_followed(
             &&& !is_worktreeinclude && is_symlink ==> a is Skip
             &&& a is Validate ==> is_file || is_symlink
             &&& !is_symlink ==> (a is Validate <==> is_file)
+        }),
+{
+}
+
+/// Discovery handles a `.worktreeinclude` entry (validates it or rejects
+/// it) exactly when the entry exists for selection, and differs from the
+/// wt-0.39 walk only by rejecting a symlink under `error` instead of reading
+/// it. With `kind` the walk entry's no-follow type, so that `is_symlink` is
+/// `kind == Symlink` and `is_file` is `kind == File`:
+///
+/// - the action is not `Skip` exactly when `git_policy` counts the entry as
+///   an existing rule file, which is exactly when the wt walk reads it
+///   (`selection::spec_wt_entry_consulted`): validation never skips a rule
+///   file that selection uses, and never handles one that selection treats
+///   as absent;
+/// - the action is `RejectSymlink` exactly for an existing symlink under
+///   `error`. This is the one intended difference: selection would read that
+///   symlink, but the rejection is an error-severity issue in the repository
+///   scope, so `copy`, `list` and `info` stop at validation before selecting
+///   (`theorem_only_repository_problems_block`);
+/// - otherwise an existing entry is validated (read).
+pub proof fn theorem_rule_file_action_agrees_with_existence(kind: EntryKind, policy: SymlinkPolicy)
+    ensures
+        ({
+            let a = spec_rule_file_action(
+                true,
+                kind == EntryKind::Symlink,
+                kind == EntryKind::File,
+                policy,
+            );
+            &&& !(a is Skip) <==> rule_file_counts_spec(kind, true, policy)
+            &&& !(a is Skip) <==> spec_wt_entry_consulted(kind, policy)
+            &&& a is RejectSymlink <==> (spec_wt_entry_consulted(kind, policy) && kind
+                == EntryKind::Symlink && policy == SymlinkPolicy::Error)
+            &&& a is Validate <==> (spec_wt_entry_consulted(kind, policy) && !(kind
+                == EntryKind::Symlink && policy == SymlinkPolicy::Error))
+            &&& spec_issue_severity(RuleScope::Repository, IssueKind::SymlinkedWorktreeinclude)
+                is Error
         }),
 {
 }

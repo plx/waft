@@ -13,7 +13,11 @@
 //!   `root_rule_file_is_consulted`), probing the filesystem lazily through
 //!   [`RuleFileProbe`].
 //! - [`wt_entry_consulted`]: whether the wt-0.39 walk reads a
-//!   `.worktreeinclude` entry, from the walk's (no-follow) entry type.
+//!   `.worktreeinclude` entry, from the walk's (no-follow) entry type. The
+//!   same gate defines whether a rule file exists at all
+//!   (`git_policy::rule_file_counts_spec`, whose exec code calls it), and
+//!   `validation::theorem_rule_file_action_agrees_with_existence` relates
+//!   validation's discovery to it.
 //! - [`diagnose_empty_selection`]: which configuration cause, if any, to
 //!   report for an empty selection, probing lazily through
 //!   [`DiagnosisFacts`].
@@ -50,43 +54,19 @@
 //! - [`DiagnosisFacts`]: the root symlink check, `root_rule_file_is_consulted`
 //!   and `GitBackend::worktreeinclude_exists_anywhere(.., Follow)` report
 //!   what they claim.
-//! - Production converts its configuration enums with exhaustive matches.
+//! - The symlink policy, semantics and `when_missing` are
+//!   `policy::vocab`'s enums, the same types `git_policy` and `validation`
+//!   take, so no kernel has its own copy to convert into. Production lowers
+//!   its clap enums to them with the `From` conversions in `src/config.rs`
+//!   (exhaustive matches; a unit test pins each variant's clap name to its
+//!   vocabulary spelling, which `theorem_*_vocabulary` proves injective).
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
 
+use crate::policy::vocab::{SymlinkPolicy, WhenMissingWorktreeinclude, WorktreeincludeSemantics};
+
 verus! {
-
-/// How symlinked `.worktreeinclude` files are treated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, StructuralEq)]
-pub enum SymlinkPolicy {
-    /// Read the symlink's target as a rule file.
-    Follow,
-    /// Treat symlinked rule files as absent.
-    Ignore,
-    /// Reject symlinked rule files (enforced by validation).
-    Error,
-}
-
-/// The `.worktreeinclude` semantics profile.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, StructuralEq)]
-pub enum Semantics {
-    /// Git per-directory semantics (all applicable rule files).
-    Git,
-    /// Claude Code 2026-04: only the repository-root rule file.
-    Claude202604,
-    /// worktrunk 0.39: subtractive literal negations.
-    Wt039,
-}
-
-/// What to select when no rule file exists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, StructuralEq)]
-pub enum WhenMissing {
-    /// Select nothing.
-    Blank,
-    /// Select every git-ignored untracked file.
-    AllIgnored,
-}
 
 /// Where the candidate set comes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, StructuralEq)]
@@ -102,52 +82,65 @@ pub enum SelectionSource {
 }
 
 /// Choose the selection source.
-pub fn selection_source(rule_file_exists: bool, semantics: Semantics, when_missing: WhenMissing) -> (s:
-    SelectionSource)
+pub fn selection_source(
+    rule_file_exists: bool,
+    semantics: WorktreeincludeSemantics,
+    when_missing: WhenMissingWorktreeinclude,
+) -> (s: SelectionSource)
     ensures
-        rule_file_exists ==> s == (if semantics == Semantics::Wt039 {
+        rule_file_exists ==> s == (if semantics == WorktreeincludeSemantics::Wt039 {
             SelectionSource::WtSubtractive
         } else {
             SelectionSource::PerPathEngine
         }),
         !rule_file_exists ==> s == (match when_missing {
-            WhenMissing::Blank => SelectionSource::Blank,
-            WhenMissing::AllIgnored => SelectionSource::AllIgnored,
+            WhenMissingWorktreeinclude::Blank => SelectionSource::Blank,
+            WhenMissingWorktreeinclude::AllIgnored => SelectionSource::AllIgnored,
         }),
 {
     if rule_file_exists {
         match semantics {
-            Semantics::Wt039 => SelectionSource::WtSubtractive,
-            Semantics::Git | Semantics::Claude202604 => SelectionSource::PerPathEngine,
+            WorktreeincludeSemantics::Wt039 => SelectionSource::WtSubtractive,
+            WorktreeincludeSemantics::Git
+            | WorktreeincludeSemantics::Claude202604 => SelectionSource::PerPathEngine,
         }
     } else {
         match when_missing {
-            WhenMissing::Blank => SelectionSource::Blank,
-            WhenMissing::AllIgnored => SelectionSource::AllIgnored,
+            WhenMissingWorktreeinclude::Blank => SelectionSource::Blank,
+            WhenMissingWorktreeinclude::AllIgnored => SelectionSource::AllIgnored,
         }
     }
 }
 
 /// The selection source as a function (the ensures of
 /// [`selection_source`] determine it).
-pub open spec fn spec_selection_source(rule_file_exists: bool, semantics: Semantics, when_missing: WhenMissing) -> SelectionSource {
+pub open spec fn spec_selection_source(
+    rule_file_exists: bool,
+    semantics: WorktreeincludeSemantics,
+    when_missing: WhenMissingWorktreeinclude,
+) -> SelectionSource {
     if rule_file_exists {
-        if semantics == Semantics::Wt039 {
+        if semantics == WorktreeincludeSemantics::Wt039 {
             SelectionSource::WtSubtractive
         } else {
             SelectionSource::PerPathEngine
         }
     } else {
         match when_missing {
-            WhenMissing::Blank => SelectionSource::Blank,
-            WhenMissing::AllIgnored => SelectionSource::AllIgnored,
+            WhenMissingWorktreeinclude::Blank => SelectionSource::Blank,
+            WhenMissingWorktreeinclude::AllIgnored => SelectionSource::AllIgnored,
         }
     }
 }
 
 /// `when_missing` matters exactly when no rule file exists, and then the
 /// semantics does not.
-pub proof fn theorem_when_missing_only_without_rule_file(s1: Semantics, s2: Semantics, w1: WhenMissing, w2: WhenMissing)
+pub proof fn theorem_when_missing_only_without_rule_file(
+    s1: WorktreeincludeSemantics,
+    s2: WorktreeincludeSemantics,
+    w1: WhenMissingWorktreeinclude,
+    w2: WhenMissingWorktreeinclude,
+)
     ensures
         spec_selection_source(true, s1, w1) == spec_selection_source(true, s1, w2),
         spec_selection_source(false, s1, w1) == spec_selection_source(false, s2, w1),
@@ -157,11 +150,16 @@ pub proof fn theorem_when_missing_only_without_rule_file(s1: Semantics, s2: Sema
 
 /// A rule file always routes selection through the rules (wt's
 /// subtractive walk or the per-path engine), and its absence never does.
-pub proof fn theorem_rule_file_engages_rules(e: bool, s: Semantics, w: WhenMissing)
+pub proof fn theorem_rule_file_engages_rules(
+    e: bool,
+    s: WorktreeincludeSemantics,
+    w: WhenMissingWorktreeinclude,
+)
     ensures
         e <==> (spec_selection_source(e, s, w) == SelectionSource::WtSubtractive || spec_selection_source(e, s, w)
             == SelectionSource::PerPathEngine),
-        spec_selection_source(e, s, w) == SelectionSource::WtSubtractive <==> e && s == Semantics::Wt039,
+        spec_selection_source(e, s, w) == SelectionSource::WtSubtractive <==> e && s
+            == WorktreeincludeSemantics::Wt039,
 {
 }
 
@@ -406,15 +404,15 @@ pub trait DiagnosisFacts<E> {
 
 /// The diagnosis as a decision table over the observed facts.
 pub open spec fn spec_diagnosis<E>(
-    semantics: Semantics,
+    semantics: WorktreeincludeSemantics,
     policy: SymlinkPolicy,
-    when_missing: WhenMissing,
+    when_missing: WhenMissingWorktreeinclude,
     rule_file_found: bool,
     root_is_symlink: bool,
     root_consulted: bool,
     exists_under_follow: Result<bool, E>,
 ) -> Result<Option<EmptySelectionCause>, E> {
-    let root_only = semantics == Semantics::Claude202604;
+    let root_only = semantics == WorktreeincludeSemantics::Claude202604;
     let root_symlink_ignored = policy == SymlinkPolicy::Ignore && root_is_symlink;
     if rule_file_found {
         if root_only && root_symlink_ignored {
@@ -424,7 +422,7 @@ pub open spec fn spec_diagnosis<E>(
         } else {
             Ok(None)
         }
-    } else if when_missing != WhenMissing::Blank {
+    } else if when_missing != WhenMissingWorktreeinclude::Blank {
         Ok(None)
     } else if policy != SymlinkPolicy::Ignore {
         Ok(Some(EmptySelectionCause::NoRuleFile))
@@ -451,14 +449,14 @@ pub open spec fn spec_diagnosis<E>(
 /// `follow` walk only for a blank selection without rule files under the
 /// `ignore` policy.
 pub open spec fn diagnosis_trace(
-    semantics: Semantics,
+    semantics: WorktreeincludeSemantics,
     policy: SymlinkPolicy,
-    when_missing: WhenMissing,
+    when_missing: WhenMissingWorktreeinclude,
     rule_file_found: bool,
     root_is_symlink: bool,
 ) -> Seq<DiagnosisProbe> {
     let ignore = policy == SymlinkPolicy::Ignore;
-    let root_only = semantics == Semantics::Claude202604;
+    let root_only = semantics == WorktreeincludeSemantics::Claude202604;
     (if ignore {
         seq![DiagnosisProbe::RootIsSymlink]
     } else {
@@ -467,7 +465,7 @@ pub open spec fn diagnosis_trace(
         seq![DiagnosisProbe::RootConsulted]
     } else {
         Seq::empty()
-    }) + (if !rule_file_found && when_missing == WhenMissing::Blank && ignore {
+    }) + (if !rule_file_found && when_missing == WhenMissingWorktreeinclude::Blank && ignore {
         seq![DiagnosisProbe::ExistsUnderFollow]
     } else {
         Seq::empty()
@@ -477,9 +475,9 @@ pub open spec fn diagnosis_trace(
 /// Diagnose an empty selection.
 pub fn diagnose_empty_selection<E, F: DiagnosisFacts<E>>(
     f: &mut F,
-    semantics: Semantics,
+    semantics: WorktreeincludeSemantics,
     policy: SymlinkPolicy,
-    when_missing: WhenMissing,
+    when_missing: WhenMissingWorktreeinclude,
     rule_file_found: bool,
 ) -> (r: Result<Option<EmptySelectionCause>, E>)
     ensures
@@ -502,7 +500,7 @@ pub fn diagnose_empty_selection<E, F: DiagnosisFacts<E>>(
 {
     let ghost f0 = *f;
     let ghost trace = diagnosis_trace(semantics, policy, when_missing, rule_file_found, f0.root_is_symlink());
-    let root_only = semantics == Semantics::Claude202604;
+    let root_only = semantics == WorktreeincludeSemantics::Claude202604;
     let root_symlink_ignored = policy == SymlinkPolicy::Ignore && f.probe_root_is_symlink();
     if rule_file_found {
         if root_only {
@@ -518,7 +516,7 @@ pub fn diagnose_empty_selection<E, F: DiagnosisFacts<E>>(
         assert(f.probes() =~= f0.probes() + trace);
         return Ok(None);
     }
-    if when_missing != WhenMissing::Blank {
+    if when_missing != WhenMissingWorktreeinclude::Blank {
         assert(f.probes() =~= f0.probes() + trace);
         return Ok(None);
     }
@@ -547,9 +545,9 @@ pub fn diagnose_empty_selection<E, F: DiagnosisFacts<E>>(
 /// error can only come from the `follow` walk, and nothing is reported when
 /// a rule file was found and the semantics reads every rule file.
 pub proof fn theorem_diagnosis_soundness<E>(
-    semantics: Semantics,
+    semantics: WorktreeincludeSemantics,
     policy: SymlinkPolicy,
-    when_missing: WhenMissing,
+    when_missing: WhenMissingWorktreeinclude,
     rule_file_found: bool,
     root_is_symlink: bool,
     root_consulted: bool,
@@ -557,7 +555,7 @@ pub proof fn theorem_diagnosis_soundness<E>(
 )
     ensures
         ({
-            let root_only = semantics == Semantics::Claude202604;
+            let root_only = semantics == WorktreeincludeSemantics::Claude202604;
             let ignore = policy == SymlinkPolicy::Ignore;
             match spec_diagnosis(
                 semantics,
@@ -574,14 +572,15 @@ pub proof fn theorem_diagnosis_soundness<E>(
                     && !(ignore && root_is_symlink),
                 Ok(Some(EmptySelectionCause::NestedRuleFileSymlinkIgnored)) => root_only && ignore
                     && !rule_file_found && exists_under_follow == Ok::<bool, E>(true) && !root_is_symlink,
-                Ok(Some(EmptySelectionCause::NoRuleFile)) => !rule_file_found && when_missing == WhenMissing::Blank
+                Ok(Some(EmptySelectionCause::NoRuleFile)) => !rule_file_found
+                    && when_missing == WhenMissingWorktreeinclude::Blank
                     && !(ignore && exists_under_follow == Ok::<bool, E>(true)),
-                Ok(None) => rule_file_found || when_missing != WhenMissing::Blank,
-                Err(_) => !rule_file_found && when_missing == WhenMissing::Blank && ignore
+                Ok(None) => rule_file_found || when_missing != WhenMissingWorktreeinclude::Blank,
+                Err(_) => !rule_file_found && when_missing == WhenMissingWorktreeinclude::Blank && ignore
                     && exists_under_follow is Err,
             }
         }),
-        rule_file_found && semantics != Semantics::Claude202604 ==> spec_diagnosis(
+        rule_file_found && semantics != WorktreeincludeSemantics::Claude202604 ==> spec_diagnosis(
             semantics,
             policy,
             when_missing,

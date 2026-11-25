@@ -9,8 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ignore::gitignore::GitignoreBuilder;
+use waft_verified::policy::vocab;
 use waft_verified::validation::{
-    GateOutcome, IssueKind, ReportMode, RuleFileAction, RuleScope, RuleSymlinkPolicy, Severity,
+    GateOutcome, IssueKind, ReportMode, RuleFileAction, RuleScope, Severity,
 };
 
 use crate::config::SymlinkPolicy;
@@ -139,15 +140,6 @@ fn validation_severity(severity: Severity) -> ValidationSeverity {
     }
 }
 
-/// The kernel's view of the `.worktreeinclude` symlink policy.
-fn rule_symlink_policy(policy: SymlinkPolicy) -> RuleSymlinkPolicy {
-    match policy {
-        SymlinkPolicy::Follow => RuleSymlinkPolicy::Follow,
-        SymlinkPolicy::Ignore => RuleSymlinkPolicy::Ignore,
-        SymlinkPolicy::Error => RuleSymlinkPolicy::Error,
-    }
-}
-
 /// Walk the repo tree and validate all files named `filename`.
 fn discover_and_validate(
     root: &Path,
@@ -190,7 +182,7 @@ fn discover_and_validate(
             filename == ".worktreeinclude",
             file_type.is_symlink(),
             file_type.is_file(),
-            rule_symlink_policy(symlink_policy),
+            vocab::SymlinkPolicy::from(symlink_policy),
         ) {
             RuleFileAction::RejectSymlink => {
                 report.issues.push(ValidationIssue {
@@ -1140,22 +1132,6 @@ mod tests {
             };
             assert_eq!(report.severities(), vec![severity]);
         }
-    }
-
-    #[test]
-    fn symlink_policy_maps_to_its_namesake() {
-        assert_eq!(
-            rule_symlink_policy(SymlinkPolicy::Follow),
-            RuleSymlinkPolicy::Follow
-        );
-        assert_eq!(
-            rule_symlink_policy(SymlinkPolicy::Ignore),
-            RuleSymlinkPolicy::Ignore
-        );
-        assert_eq!(
-            rule_symlink_policy(SymlinkPolicy::Error),
-            RuleSymlinkPolicy::Error
-        );
     }
 
     #[test]

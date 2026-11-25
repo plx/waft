@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder, Glob};
+use waft_verified::policy::vocab;
 use waft_verified::rules::lines;
 use waft_verified::rules::precedence::{self, MatchKind, RuleMatchOracle, Verdict};
 use waft_verified::selection::{self, RuleFileProbe};
@@ -374,7 +375,7 @@ pub fn root_rule_file_is_consulted(repo_root: &Path, symlink_policy: SymlinkPoli
 fn rule_file_consulted(wti_path: &Path, symlink_policy: SymlinkPolicy) -> bool {
     selection::rule_file_consulted(
         &mut RuleFilePath(wti_path),
-        crate::worktreeinclude_engine::kernel_symlink_policy(symlink_policy),
+        vocab::SymlinkPolicy::from(symlink_policy),
     )
 }
 

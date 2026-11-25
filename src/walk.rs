@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use waft_verified::boundary::{self as kernel, BoundaryProbe, BoundaryProbes};
+use waft_verified::selection;
 
 use crate::path::RepoRelPath;
 
@@ -27,6 +28,26 @@ pub(crate) fn special_filename_matches(actual: &OsStr, expected: &str) -> bool {
         expected.as_bytes(),
         ALIASING_PLATFORM,
     )
+}
+
+/// The no-follow type of a walked entry, as kernel data.
+///
+/// Both `.worktreeinclude` walks classify entries here: the rule-file
+/// existence walk (`git_policy::rule_file_counts`) and the wt-0.39 walk
+/// (`selection::wt_entry_consulted`), so the two decide over the same
+/// classification. `is_dir`, `is_symlink` and `is_file` are mutually
+/// exclusive for a no-follow file type, so the order of the tests does not
+/// matter.
+pub(crate) fn entry_kind(file_type: std::fs::FileType) -> selection::EntryKind {
+    if file_type.is_dir() {
+        selection::EntryKind::Dir
+    } else if file_type.is_symlink() {
+        selection::EntryKind::Symlink
+    } else if file_type.is_file() {
+        selection::EntryKind::File
+    } else {
+        selection::EntryKind::Other
+    }
 }
 
 /// Decide how a repository-boundary comparison treats letter case.
@@ -122,6 +143,24 @@ fn read_dot_git_pointer(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn entry_kinds_classify_every_file_type_without_following_links() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("file"), "x").unwrap();
+        std::fs::create_dir(root.join("dir")).unwrap();
+        std::os::unix::fs::symlink("file", root.join("link")).unwrap();
+        std::os::unix::fs::symlink("dir", root.join("dirlink")).unwrap();
+        let kind = |path: &Path| entry_kind(std::fs::symlink_metadata(path).unwrap().file_type());
+        assert_eq!(kind(root), selection::EntryKind::Dir);
+        assert_eq!(kind(&root.join("file")), selection::EntryKind::File);
+        assert_eq!(kind(&root.join("dir")), selection::EntryKind::Dir);
+        assert_eq!(kind(&root.join("link")), selection::EntryKind::Symlink);
+        assert_eq!(kind(&root.join("dirlink")), selection::EntryKind::Symlink);
+        assert_eq!(kind(Path::new("/dev/null")), selection::EntryKind::Other);
+    }
 
     fn gitlinks(paths: &[&str]) -> HashSet<String> {
         paths.iter().map(|path| (*path).to_string()).collect()

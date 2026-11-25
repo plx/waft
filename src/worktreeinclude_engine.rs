@@ -14,6 +14,7 @@
 
 use std::path::Path;
 
+use waft_verified::policy::vocab;
 use waft_verified::rules::lines;
 use waft_verified::selection;
 
@@ -257,8 +258,8 @@ fn collect_wt_literal_negations(
             continue;
         }
         if !selection::wt_entry_consulted(
-            entry_kind(entry.file_type()),
-            kernel_symlink_policy(symlink_policy),
+            crate::walk::entry_kind(entry.file_type()),
+            vocab::SymlinkPolicy::from(symlink_policy),
         ) {
             continue;
         }
@@ -288,39 +289,6 @@ fn collect_wt_literal_negations(
     out
 }
 
-/// The no-follow type of a walked entry, as kernel data. `is_dir`,
-/// `is_symlink` and `is_file` are mutually exclusive, so the order of the
-/// tests does not matter.
-fn entry_kind(file_type: std::fs::FileType) -> selection::EntryKind {
-    if file_type.is_dir() {
-        selection::EntryKind::Dir
-    } else if file_type.is_symlink() {
-        selection::EntryKind::Symlink
-    } else if file_type.is_file() {
-        selection::EntryKind::File
-    } else {
-        selection::EntryKind::Other
-    }
-}
-
-/// The symlink policy as kernel data.
-pub(crate) fn kernel_symlink_policy(policy: SymlinkPolicy) -> selection::SymlinkPolicy {
-    match policy {
-        SymlinkPolicy::Follow => selection::SymlinkPolicy::Follow,
-        SymlinkPolicy::Ignore => selection::SymlinkPolicy::Ignore,
-        SymlinkPolicy::Error => selection::SymlinkPolicy::Error,
-    }
-}
-
-/// The semantics profile as kernel data.
-pub(crate) fn kernel_semantics(semantics: WorktreeincludeSemantics) -> selection::Semantics {
-    match semantics {
-        WorktreeincludeSemantics::Git => selection::Semantics::Git,
-        WorktreeincludeSemantics::Claude202604 => selection::Semantics::Claude202604,
-        WorktreeincludeSemantics::Wt039 => selection::Semantics::Wt039,
-    }
-}
-
 /// Construct the engine implementing the requested semantics.
 pub fn engine_for(s: WorktreeincludeSemantics) -> Box<dyn WorktreeincludeSemanticsEngine> {
     match s {
@@ -333,30 +301,6 @@ pub fn engine_for(s: WorktreeincludeSemantics) -> Box<dyn WorktreeincludeSemanti
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn kernel_enums_keep_their_variant() {
-        for policy in [
-            SymlinkPolicy::Follow,
-            SymlinkPolicy::Ignore,
-            SymlinkPolicy::Error,
-        ] {
-            assert_eq!(
-                format!("{:?}", kernel_symlink_policy(policy)),
-                format!("{policy:?}")
-            );
-        }
-        for semantics in [
-            WorktreeincludeSemantics::Git,
-            WorktreeincludeSemantics::Claude202604,
-            WorktreeincludeSemantics::Wt039,
-        ] {
-            assert_eq!(
-                format!("{:?}", kernel_semantics(semantics)),
-                format!("{semantics:?}")
-            );
-        }
-    }
 
     #[test]
     fn wt_kernel_matches_reference_grammar() {
@@ -405,20 +349,5 @@ mod tests {
                 .map(|(start, end)| chars[start..end].iter().collect::<String>());
             assert_eq!(actual, reference(line), "line {line:?}");
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn entry_kind_classifies_without_following_links() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let file = dir.path().join("file");
-        std::fs::write(&file, "x").unwrap();
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&file, &link).unwrap();
-        let kind = |path: &Path| entry_kind(std::fs::symlink_metadata(path).unwrap().file_type());
-        assert_eq!(kind(dir.path()), selection::EntryKind::Dir);
-        assert_eq!(kind(&file), selection::EntryKind::File);
-        assert_eq!(kind(&link), selection::EntryKind::Symlink);
-        assert_eq!(kind(Path::new("/dev/null")), selection::EntryKind::Other);
     }
 }
