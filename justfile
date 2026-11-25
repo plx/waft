@@ -29,7 +29,7 @@ check-doc-test:
     cargo test --doc --locked
 
 check-doc-build:
-    cargo doc --no-deps --locked
+    cargo doc --workspace --no-deps --locked
 
 check-audit:
     cargo audit --deny warnings
