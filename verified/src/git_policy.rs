@@ -12,7 +12,10 @@
 //! - Whether a `git` failure message reports a missing repository
 //!   ([`mentions_missing_repository`]).
 //! - Whether a walked entry counts as an existing `.worktreeinclude`, which
-//!   gates the `when_missing` behaviour ([`rule_file_counts`]).
+//!   gates the `when_missing` behaviour ([`rule_file_counts`]). Existence is
+//!   defined by the selection kernel's wt consult gate
+//!   (`selection::spec_wt_entry_consulted`) over the configuration's own
+//!   `policy::vocab::SymlinkPolicy`, and the exec code calls that gate.
 //!
 //! # Theorems
 //!
@@ -34,9 +37,15 @@
 //!   a served snapshot was built by an earlier call that observed the
 //!   serving call's first stamp both before and right after the build. A
 //!   missing index is never served from, or stored in, the cache.
-//! - `theorem_rule_file_existence`: directories and special files never
-//!   count as rule files, and under the `Ignore` symlink policy a symlinked
-//!   one never counts, so existence agrees with selection.
+//! - `theorem_rule_file_existence`: a name-matching regular file always
+//!   counts, a name-matching symlink counts exactly when the symlink policy
+//!   is not `Ignore`, and directories and special files never count.
+//! - `theorem_rule_file_existence_agrees_with_selection`: an entry exists
+//!   exactly when the wt-0.39 walk reads it, every rule file a per-path
+//!   engine reads exists, and an existing rule file the per-path engines do
+//!   not read is a symlink to a non-regular file under `follow`/`error`.
+//!   `validation::theorem_rule_file_action_agrees_with_existence` relates
+//!   validation's discovery to the same predicate.
 //! - `mentions_missing_repository` is exactly contiguous substring search
 //!   for `not a git repository`.
 //!
@@ -54,9 +63,19 @@
 //!   stored for the repository.
 //! - The discovery phrase is matched against the message production
 //!   lowercased with `str::to_lowercase`.
+//! - The rule-file existence walk passes walkdir's no-follow entry type
+//!   (`walk::entry_kind`, the classifier the wt walk also uses) and whether
+//!   the name matches `.worktreeinclude`; the symlink policy is the
+//!   configuration's `vocab::SymlinkPolicy`, lowered once by the `From`
+//!   conversion in `src/config.rs`.
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
+
+use crate::policy::vocab::SymlinkPolicy;
+use crate::selection::{EntryKind, wt_entry_consulted};
+#[cfg(verus_keep_ghost)]
+use crate::selection::{consistent_entry_facts, spec_rule_file_consulted, spec_wt_entry_consulted};
 
 verus! {
 
@@ -808,74 +827,73 @@ pub fn mentions_missing_repository(lowercased: &[u8]) -> (r: bool)
 // ---------------------------------------------------------------------------
 // Rule-file existence
 // ---------------------------------------------------------------------------
-/// What a walked directory entry is (without following symlinks).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, StructuralEq)]
-pub enum EntryKind {
-    /// A directory.
-    Dir,
-    /// A regular file.
-    File,
-    /// A symbolic link.
-    Symlink,
-    /// Anything else (socket, FIFO, device).
-    Other,
-}
-
-/// How symlinked rule files are treated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, StructuralEq)]
-pub enum RuleSymlinks {
-    /// Followed as rule files.
-    Follow,
-    /// Treated as absent.
-    Ignore,
-    /// Reported as errors later; they still exist.
-    Error,
-}
-
 /// Whether a walked entry counts as an existing `.worktreeinclude`: its
-/// name must match, and it must be a regular file, or a symlink when
-/// symlinked rule files are not ignored.
-pub open spec fn rule_file_counts_spec(kind: EntryKind, name_matches: bool, policy: RuleSymlinks) -> bool {
-    name_matches && (kind == EntryKind::File || (kind == EntryKind::Symlink && policy
-        != RuleSymlinks::Ignore))
+/// name must match, and it must be an entry the wt-0.39 walk reads
+/// ([`crate::selection::wt_entry_consulted`]: a regular file, or a symlink
+/// when the symlink policy is not `ignore`). Existence is defined by the
+/// consult gate itself, over the configuration's own [`SymlinkPolicy`], so
+/// "a rule file exists" and "its rules are consulted" cannot drift apart.
+pub open spec fn rule_file_counts_spec(kind: EntryKind, name_matches: bool, policy: SymlinkPolicy) -> bool {
+    name_matches && spec_wt_entry_consulted(kind, policy)
 }
 
-/// Decide `rule_file_counts_spec`.
-pub fn rule_file_counts(kind: EntryKind, name_matches: bool, policy: RuleSymlinks) -> (r: bool)
+/// Decide `rule_file_counts_spec`, through selection's consult gate.
+pub fn rule_file_counts(kind: EntryKind, name_matches: bool, policy: SymlinkPolicy) -> (r: bool)
     ensures
         r == rule_file_counts_spec(kind, name_matches, policy),
 {
-    if !name_matches {
-        return false;
-    }
-    match kind {
-        EntryKind::File => true,
-        EntryKind::Symlink => match policy {
-            RuleSymlinks::Ignore => false,
-            RuleSymlinks::Follow => true,
-            RuleSymlinks::Error => true,
-        },
-        EntryKind::Dir => false,
-        EntryKind::Other => false,
-    }
+    name_matches && wt_entry_consulted(kind, policy)
 }
 
-/// Directories and special files never count as rule files; under
-/// `Ignore` a symlinked rule file never counts, so existence agrees with
-/// selection, which treats it as absent.
-pub proof fn theorem_rule_file_existence(kind: EntryKind, name_matches: bool, policy: RuleSymlinks)
+/// The existence table: a name-matching regular file always counts, a
+/// name-matching symlink counts exactly when symlinked rule files are not
+/// ignored, and nothing else counts. In particular, under `Ignore` a
+/// symlinked rule file never counts, so existence agrees with selection,
+/// which treats it as absent.
+pub proof fn theorem_rule_file_existence(kind: EntryKind, name_matches: bool, policy: SymlinkPolicy)
     ensures
+        rule_file_counts_spec(kind, name_matches, policy) <==> name_matches && (kind == EntryKind::File
+            || (kind == EntryKind::Symlink && policy != SymlinkPolicy::Ignore)),
         kind == EntryKind::Dir || kind == EntryKind::Other ==> !rule_file_counts_spec(
             kind,
             name_matches,
             policy,
         ),
-        kind == EntryKind::Symlink && policy == RuleSymlinks::Ignore ==> !rule_file_counts_spec(
+        kind == EntryKind::Symlink && policy == SymlinkPolicy::Ignore ==> !rule_file_counts_spec(
             kind,
             name_matches,
             policy,
         ),
         !name_matches ==> !rule_file_counts_spec(kind, name_matches, policy),
+{
+}
+
+/// Existence agrees with the selection kernel's gates. A `.worktreeinclude`
+/// entry exists exactly when the wt-0.39 walk reads it; every rule file a
+/// per-path engine reads exists; and an entry that exists but is not read by
+/// the per-path engines is a symlink whose target is not a regular file under
+/// the `follow` or `error` policy (the quirk
+/// `selection::lemma_quirk_wt_reads_symlink_to_non_regular_file` records).
+pub proof fn theorem_rule_file_existence_agrees_with_selection(
+    kind: EntryKind,
+    regular_file: bool,
+    symlink: bool,
+    policy: SymlinkPolicy,
+)
+    requires
+        consistent_entry_facts(kind, regular_file, symlink),
+    ensures
+        rule_file_counts_spec(kind, true, policy) == spec_wt_entry_consulted(kind, policy),
+        spec_rule_file_consulted(regular_file, symlink, policy) ==> rule_file_counts_spec(
+            kind,
+            true,
+            policy,
+        ),
+        rule_file_counts_spec(kind, true, policy) && !spec_rule_file_consulted(
+            regular_file,
+            symlink,
+            policy,
+        ) ==> kind == EntryKind::Symlink && !regular_file && policy != SymlinkPolicy::Ignore,
 {
 }
 

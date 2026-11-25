@@ -21,6 +21,14 @@
 //! Some(x)`. Since `as_str` returns `name` and `parse` equals `spec_parse`,
 //! `parse(x.as_str()) == Some(x)` holds for the shipped code.
 //!
+//! These enums are also the only kernel copies of the knobs: the decision
+//! kernels take [`SymlinkPolicy`], [`WorktreeincludeSemantics`] and
+//! [`WhenMissingWorktreeinclude`] directly (`selection`, the rule-file
+//! existence walk in `git_policy`, and `validation`'s discovery), so the
+//! symlink policy reaches every kernel through one production conversion,
+//! and the kernels' symlink decisions are related by theorems over the same
+//! type. They derive `StructuralEq` so that `==` on them is specified.
+//!
 //! Trust: vstd's specification of `&str == &str` (view equality) and the
 //! string-literal axioms; production's variant-for-variant conversions.
 
@@ -169,7 +177,7 @@ pub proof fn theorem_profile_vocabulary()
 
 /// Behavior when no `.worktreeinclude` file exists (mirror of production
 /// `WhenMissingWorktreeinclude`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StructuralEq)]
 pub enum WhenMissingWorktreeinclude {
     /// Select nothing.
     Blank,
@@ -281,7 +289,7 @@ pub proof fn theorem_when_missing_vocabulary()
 
 /// Matcher semantics for `.worktreeinclude` evaluation (mirror of production
 /// `WorktreeincludeSemantics`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StructuralEq)]
 pub enum WorktreeincludeSemantics {
     /// Match observed Claude behavior as of 2026-04.
     Claude202604,
@@ -404,7 +412,7 @@ pub proof fn theorem_semantics_vocabulary()
 
 /// Policy for symlinked `.worktreeinclude` files (mirror of production
 /// `SymlinkPolicy`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, StructuralEq)]
 pub enum SymlinkPolicy {
     /// Follow the symlink target as a rule file.
     Follow,

@@ -12,16 +12,14 @@ mod validate;
 
 use std::path::Path;
 
+use waft_verified::policy::vocab;
 use waft_verified::selection::{self, DiagnosisFacts, SelectionSource};
 
-use crate::config::{
-    ResolvedPolicy, SymlinkPolicy, WhenMissingWorktreeinclude, WorktreeincludeSemantics,
-};
+use crate::config::{ResolvedPolicy, SymlinkPolicy, WorktreeincludeSemantics};
 use crate::error::{Error, Result};
 use crate::git::{GitBackend, IgnoreCheckRecord};
 use crate::model::WorktreeincludeStatus;
 use crate::path::RepoRelPath;
-use crate::worktreeinclude_engine::{kernel_semantics, kernel_symlink_policy};
 
 pub(crate) use copy::run_copy_with_context;
 pub use copy::{CopyArgs, run_copy};
@@ -64,8 +62,8 @@ pub(crate) fn select_candidates(
     // consulted only when no rule file exists.
     let source = selection::selection_source(
         rule_file_exists,
-        kernel_semantics(policy.semantics),
-        kernel_when_missing(policy.when_missing),
+        vocab::WorktreeincludeSemantics::from(policy.semantics),
+        vocab::WhenMissingWorktreeinclude::from(policy.when_missing),
     );
     let candidates = match source {
         SelectionSource::WtSubtractive => crate::worktreeinclude_engine::wt_collect_candidates(
@@ -82,14 +80,6 @@ pub(crate) fn select_candidates(
         SelectionSource::AllIgnored => git.list_ignored_untracked(source_root)?,
     };
     Ok((candidates, rule_file_exists))
-}
-
-/// The `when_missing` policy as kernel data.
-fn kernel_when_missing(when_missing: WhenMissingWorktreeinclude) -> selection::WhenMissing {
-    match when_missing {
-        WhenMissingWorktreeinclude::Blank => selection::WhenMissing::Blank,
-        WhenMissingWorktreeinclude::AllIgnored => selection::WhenMissing::AllIgnored,
-    }
 }
 
 /// Result of the shared eligibility pass.
@@ -122,9 +112,9 @@ fn diagnose_empty_selection(
     };
     selection::diagnose_empty_selection(
         &mut facts,
-        kernel_semantics(policy.semantics),
-        kernel_symlink_policy(policy.symlink_policy),
-        kernel_when_missing(policy.when_missing),
+        vocab::WorktreeincludeSemantics::from(policy.semantics),
+        vocab::SymlinkPolicy::from(policy.symlink_policy),
+        vocab::WhenMissingWorktreeinclude::from(policy.when_missing),
         rule_file_found,
     )
 }
@@ -305,23 +295,5 @@ pub(crate) fn format_worktreeinclude_status(
         } => format!("excluded ({}:{}: {})", file.display(), line, pattern),
         WorktreeincludeStatus::NoMatch if selected => "selected (effective policy)".to_string(),
         WorktreeincludeStatus::NoMatch => "no match".to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn kernel_when_missing_keeps_its_variant() {
-        for when_missing in [
-            WhenMissingWorktreeinclude::Blank,
-            WhenMissingWorktreeinclude::AllIgnored,
-        ] {
-            assert_eq!(
-                format!("{:?}", kernel_when_missing(when_missing)),
-                format!("{when_missing:?}")
-            );
-        }
     }
 }
