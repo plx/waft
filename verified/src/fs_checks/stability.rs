@@ -49,8 +49,9 @@
 //!   signed distance from the Unix epoch. These encodings are injective, so
 //!   kernel equality is exactly the equality production compared before
 //!   (`Option<SystemTime>`, `Option<(i64, i64)>`, `u32`, `u64`).
-//! - The kernel updates `ctime` on every data or metadata change; that is
-//!   what makes "unchanged state" imply "unchanged bytes" (`ASSURANCE.md`).
+//! - The operating system updates `ctime` on every data or metadata change;
+//!   that is what makes "unchanged state" imply "unchanged bytes". This is
+//!   an assumption about the OS, listed in `VERIFICATION.md`.
 
 #[allow(unused_imports)]
 use vstd::prelude::*;

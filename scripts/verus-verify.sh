@@ -67,4 +67,19 @@ fi
 
 export PATH="${VERUS_HOME}:${PATH}"
 cd "${repo_root}"
-exec cargo verus verify --locked -p waft-verified --fwd-verus-args-to roots -- --no-cheating "$@"
+
+# Verus artifacts live apart from ordinary builds unless CARGO_TARGET_DIR says
+# otherwise. Cargo skips a crate whose fingerprint says it is fresh, and Verus
+# then prints nothing, so remove waft-verified's fingerprint to make every run
+# verify the crate, and fail unless Verus reports a clean result: a gate that
+# silently verified nothing must not pass.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${repo_root}/target/verus}"
+rm -rf "${CARGO_TARGET_DIR}"/debug/.fingerprint/waft-verified-*
+log="$(mktemp)"
+trap 'rm -f "${log}"' EXIT
+cargo verus verify --locked -p waft-verified --fwd-verus-args-to roots -- --no-cheating "$@" 2>&1 |
+  tee "${log}"
+if ! grep -Eq '^verification results:: [0-9]+ verified, 0 errors' "${log}"; then
+  echo "verus-verify: Verus did not report a clean verification of waft-verified" >&2
+  exit 1
+fi

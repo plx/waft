@@ -522,7 +522,7 @@ pub proof fn lemma_positions_of_exact(keys: Seq<Seq<u8>>, n: nat, q: Seq<u8>)
 /// The case-folding key function, implemented by production.
 ///
 /// Trusted: `fold_key` is a deterministic function of the path bytes alone
-/// (the receiver-free [`FoldOracle::fold`] makes that structural: one type,
+/// (the receiver-free `FoldOracle::fold` makes that structural: one type,
 /// one function), so index entries and queries are folded identically.
 /// Nothing here trusts the fold to be *correct* Unicode case folding: exact
 /// index spellings are protected without consulting it.

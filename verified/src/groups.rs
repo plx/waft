@@ -432,6 +432,9 @@ fn member(set: &[&[u8]], sorted: bool, t: &[u8]) -> (r: bool)
 
 /// A value identified by a path: production implements it for
 /// `RepoRelPath` by returning the path's UTF-8 bytes.
+///
+/// Trusted: `key_bytes` returns the same bytes for the same value every time
+/// it is called, so sorting and deduplicating by key are well defined.
 pub trait PathKey {
     /// The path bytes that identify the value.
     spec fn key(&self) -> Seq<u8>;

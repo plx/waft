@@ -41,8 +41,8 @@
 //! Trust: production runs each named check and feeds back its real result,
 //! applies exactly the modes this machine hands out to the pinned
 //! descriptor, and reads the descriptor back faithfully. `fchmod` applying
-//! exactly the requested bits is a filesystem assumption (see the report on
-//! setgid and FAT-like mounts).
+//! exactly the requested bits is a filesystem assumption; `VERIFICATION.md`
+//! records where it fails (setgid clearing, FAT-like mounts).
 
 #[allow(unused_imports)]
 use vstd::prelude::*;

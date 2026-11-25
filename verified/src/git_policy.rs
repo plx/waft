@@ -840,7 +840,7 @@ pub open spec fn rule_file_counts_spec(kind: EntryKind, name_matches: bool, poli
         != RuleSymlinks::Ignore))
 }
 
-/// Decide [`rule_file_counts_spec`].
+/// Decide `rule_file_counts_spec`.
 pub fn rule_file_counts(kind: EntryKind, name_matches: bool, policy: RuleSymlinks) -> (r: bool)
     ensures
         r == rule_file_counts_spec(kind, name_matches, policy),
