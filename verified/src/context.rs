@@ -53,7 +53,13 @@
 //!   a family member other than the main worktree.
 //! - `theorem_copy_context_is_safe`: composed with [`select_main`], a
 //!   resolved `copy` reads from the first main record, which is not bare,
-//!   and writes into a different record of the same `git worktree list`.
+//!   and writes into a record of the same `git worktree list` whose key
+//!   differs from that first main record's. Scope: it does not say the
+//!   destination record is itself unflagged (neither main nor bare). Both
+//!   production backends flag only the first record as main
+//!   (`git_parse::parse_worktree_list` proves this for the CLI backend), and
+//!   Git does not report a linked worktree as bare, so the gap concerns
+//!   malformed input only; the kernel then behaves as the former code did.
 //! - `theorem_non_copy_has_no_copy_errors`: `list`, `info` and `validate`
 //!   never report a copy-only error.
 //! - `theorem_auto_detect_from_linked_worktree` and
@@ -687,7 +693,9 @@ pub proof fn theorem_copy_resolves_main_to_linked<P>(
 
 /// End to end with [`select_main`]: a resolved `copy` reads from the first
 /// record flagged as main, which is not bare, and writes into a different
-/// record of the same worktree list.
+/// record of the same worktree list (one whose key differs from the first
+/// main record's; the theorem says nothing about that record's own `is_main`
+/// or `is_bare` flags, see the module documentation).
 pub proof fn theorem_copy_context_is_safe<P>(
     records: Seq<WorktreeRecord>,
     i: int,

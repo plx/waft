@@ -208,21 +208,23 @@ impl Cli {
         let invocation_dir = self.effective_directory()?;
 
         // Verified precedence: `--isolated`, then `--config`, then a non-empty
-        // Unicode `WAFT_CONFIG_PATH`, then the default location. The variable
-        // is read only when neither flag decides.
-        let user = match cli_policy::user_config_step(self.isolated, self.config.as_deref()) {
-            cli_policy::UserConfigStep::Skip => None,
-            cli_policy::UserConfigStep::Flag(p) => {
+        // Unicode `WAFT_CONFIG_PATH`, then the default location. The kernel
+        // reads the variable itself, through `ProcessConfigPath`, and proves it
+        // does so exactly once when neither flag decides and never otherwise.
+        let user = match cli_policy::user_config_source(
+            self.isolated,
+            self.config.as_deref(),
+            &mut ProcessConfigPath,
+        ) {
+            cli_policy::UserConfigSource::Skipped => None,
+            cli_policy::UserConfigSource::Flag(p) => {
                 load_user_layer(Some(resolve_from(p, &invocation_dir).as_path()))?
             }
-            cli_policy::UserConfigStep::ConsultEnv => {
-                let user_path = match cli_policy::env_config_choice(waft_config_path_var()) {
-                    cli_policy::EnvConfigChoice::Path(p) => {
-                        Some(resolve_from(Path::new(&p), &invocation_dir))
-                    }
-                    cli_policy::EnvConfigChoice::DefaultLocation => user_config_path(),
-                };
-                load_user_layer(user_path.as_deref())?
+            cli_policy::UserConfigSource::Env(p) => {
+                load_user_layer(Some(resolve_from(Path::new(&p), &invocation_dir).as_path()))?
+            }
+            cli_policy::UserConfigSource::DefaultLocation => {
+                load_user_layer(user_config_path().as_deref())?
             }
         };
 
@@ -331,32 +333,7 @@ fn component_keys(path: &Path) -> Vec<Vec<u8>> {
 
 fn component_key(component: Component<'_>) -> Vec<u8> {
     match component {
-        Component::Prefix(prefix) => {
-            let mut key = vec![0];
-            match prefix.kind() {
-                Prefix::Verbatim(name) => {
-                    key.push(0);
-                    push_length_prefixed(&mut key, name);
-                }
-                Prefix::VerbatimUNC(server, share) => {
-                    key.push(1);
-                    push_length_prefixed(&mut key, server);
-                    push_length_prefixed(&mut key, share);
-                }
-                Prefix::VerbatimDisk(drive) => key.extend_from_slice(&[2, drive]),
-                Prefix::DeviceNS(device) => {
-                    key.push(3);
-                    push_length_prefixed(&mut key, device);
-                }
-                Prefix::UNC(server, share) => {
-                    key.push(4);
-                    push_length_prefixed(&mut key, server);
-                    push_length_prefixed(&mut key, share);
-                }
-                Prefix::Disk(drive) => key.extend_from_slice(&[5, drive]),
-            }
-            key
-        }
+        Component::Prefix(prefix) => prefix_key(prefix.kind()),
         Component::RootDir => vec![1],
         Component::CurDir => vec![2],
         Component::ParentDir => vec![3],
@@ -368,21 +345,61 @@ fn component_key(component: Component<'_>) -> Vec<u8> {
     }
 }
 
+/// The key of a Windows path prefix (tag 0), from its parsed value: a tag
+/// per `Prefix` variant, then its parts, length-prefixed. `PrefixComponent`
+/// equality compares exactly this parsed value (std uppercases the drive
+/// letter of `Disk` and `VerbatimDisk` while parsing), so two prefix keys are
+/// equal exactly when the prefix components are. Kept separate so the
+/// encoding is tested on every platform, not only where paths have prefixes.
+fn prefix_key(prefix: Prefix<'_>) -> Vec<u8> {
+    let mut key = vec![0];
+    match prefix {
+        Prefix::Verbatim(name) => {
+            key.push(0);
+            push_length_prefixed(&mut key, name);
+        }
+        Prefix::VerbatimUNC(server, share) => {
+            key.push(1);
+            push_length_prefixed(&mut key, server);
+            push_length_prefixed(&mut key, share);
+        }
+        Prefix::VerbatimDisk(drive) => key.extend_from_slice(&[2, drive]),
+        Prefix::DeviceNS(device) => {
+            key.push(3);
+            push_length_prefixed(&mut key, device);
+        }
+        Prefix::UNC(server, share) => {
+            key.push(4);
+            push_length_prefixed(&mut key, server);
+            push_length_prefixed(&mut key, share);
+        }
+        Prefix::Disk(drive) => key.extend_from_slice(&[5, drive]),
+    }
+    key
+}
+
 fn push_length_prefixed(key: &mut Vec<u8>, part: &OsStr) {
     let bytes = part.as_encoded_bytes();
     key.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     key.extend_from_slice(bytes);
 }
 
-/// Classify `WAFT_CONFIG_PATH` for the verified user-config choice.
-fn waft_config_path_var() -> cli_policy::ConfigPathVar<String> {
-    match std::env::var("WAFT_CONFIG_PATH") {
-        Ok(value) => {
-            let empty = value.is_empty();
-            cli_policy::ConfigPathVar::Set { value, empty }
+/// Process-environment reader of `WAFT_CONFIG_PATH` for the verified
+/// user-config choice, which decides whether to call it.
+struct ProcessConfigPath;
+
+impl cli_policy::ConfigPathReader<String> for ProcessConfigPath {
+    /// Classify `std::env::var("WAFT_CONFIG_PATH")` (trusted: exhaustive over
+    /// `VarError`, with `empty` equal to `value.is_empty()`).
+    fn read_config_path_var(&mut self) -> cli_policy::ConfigPathVar<String> {
+        match std::env::var("WAFT_CONFIG_PATH") {
+            Ok(value) => {
+                let empty = value.is_empty();
+                cli_policy::ConfigPathVar::Set { value, empty }
+            }
+            Err(std::env::VarError::NotPresent) => cli_policy::ConfigPathVar::Unset,
+            Err(std::env::VarError::NotUnicode(_)) => cli_policy::ConfigPathVar::NotUnicode,
         }
-        Err(std::env::VarError::NotPresent) => cli_policy::ConfigPathVar::Unset,
-        Err(std::env::VarError::NotUnicode(_)) => cli_policy::ConfigPathVar::NotUnicode,
     }
 }
 
@@ -535,6 +552,111 @@ mod mapping_tests {
         ];
         for (args, expected) in cases {
             assert_eq!(Cli::parse_from(args).command_kind(), expected, "{args:?}");
+        }
+    }
+
+    /// Windows prefix keys are equal exactly when the parsed prefixes are,
+    /// and never equal a non-prefix component's key. `Prefix` values are
+    /// built directly, so this runs on every platform.
+    #[test]
+    fn prefix_keys_agree_with_prefix_equality() {
+        let prefixes = [
+            Prefix::Verbatim(OsStr::new("")),
+            Prefix::Verbatim(OsStr::new("a")),
+            Prefix::Verbatim(OsStr::new("ab")),
+            Prefix::Verbatim(OsStr::new("\u{2}C")),
+            Prefix::VerbatimUNC(OsStr::new("a"), OsStr::new("b")),
+            Prefix::VerbatimUNC(OsStr::new("ab"), OsStr::new("")),
+            Prefix::VerbatimUNC(OsStr::new(""), OsStr::new("ab")),
+            Prefix::VerbatimUNC(OsStr::new("a\u{1}\0\0\0\0\0\0\0b"), OsStr::new("")),
+            Prefix::VerbatimDisk(b'C'),
+            Prefix::VerbatimDisk(b'D'),
+            Prefix::DeviceNS(OsStr::new("a")),
+            Prefix::DeviceNS(OsStr::new("ab")),
+            Prefix::UNC(OsStr::new("a"), OsStr::new("b")),
+            Prefix::UNC(OsStr::new("ab"), OsStr::new("")),
+            Prefix::UNC(OsStr::new(""), OsStr::new("ab")),
+            Prefix::UNC(OsStr::new("a\u{1}\0\0\0\0\0\0\0b"), OsStr::new("")),
+            Prefix::Disk(b'C'),
+            Prefix::Disk(b'D'),
+        ];
+        for a in prefixes {
+            for b in prefixes {
+                assert_eq!(prefix_key(a) == prefix_key(b), a == b, "{a:?} vs {b:?}");
+            }
+        }
+        let others = [
+            component_key(Component::RootDir),
+            component_key(Component::CurDir),
+            component_key(Component::ParentDir),
+            component_key(Component::Normal(OsStr::new(""))),
+            component_key(Component::Normal(OsStr::new("\0\0C"))),
+        ];
+        for prefix in prefixes {
+            for other in &others {
+                assert_ne!(&prefix_key(prefix), other, "{prefix:?}");
+            }
+        }
+    }
+
+    /// Answers `WAFT_CONFIG_PATH` reads from a fixed case and counts them.
+    struct ScriptedConfigPath {
+        case: usize,
+        reads: usize,
+    }
+
+    impl cli_policy::ConfigPathReader<String> for ScriptedConfigPath {
+        fn read_config_path_var(&mut self) -> cli_policy::ConfigPathVar<String> {
+            self.reads += 1;
+            match self.case {
+                0 => cli_policy::ConfigPathVar::Unset,
+                1 => cli_policy::ConfigPathVar::NotUnicode,
+                2 => cli_policy::ConfigPathVar::Set {
+                    value: String::new(),
+                    empty: true,
+                },
+                _ => cli_policy::ConfigPathVar::Set {
+                    value: "env.toml".to_string(),
+                    empty: false,
+                },
+            }
+        }
+    }
+
+    /// The user-config choice follows `--isolated` > `--config` >
+    /// non-empty Unicode `WAFT_CONFIG_PATH` > default, and reads the
+    /// variable exactly once when neither flag decides, never otherwise.
+    #[test]
+    fn user_config_source_reads_variable_only_when_no_flag_decides() {
+        for isolated in [false, true] {
+            for flag in [None, Some(Path::new("flag.toml"))] {
+                for case in 0..4 {
+                    let mut reader = ScriptedConfigPath { case, reads: 0 };
+                    let source = cli_policy::user_config_source(isolated, flag, &mut reader);
+                    let got = match source {
+                        cli_policy::UserConfigSource::Skipped => "skipped".to_string(),
+                        cli_policy::UserConfigSource::Flag(p) => format!("flag {}", p.display()),
+                        cli_policy::UserConfigSource::Env(s) => format!("env {s}"),
+                        cli_policy::UserConfigSource::DefaultLocation => "default".to_string(),
+                    };
+                    let expected = if isolated {
+                        "skipped"
+                    } else if flag.is_some() {
+                        "flag flag.toml"
+                    } else if case == 3 {
+                        "env env.toml"
+                    } else {
+                        "default"
+                    };
+                    let context = format!("isolated {isolated} flag {flag:?} case {case}");
+                    assert_eq!(got, expected, "{context}");
+                    assert_eq!(
+                        reader.reads,
+                        usize::from(!isolated && flag.is_none()),
+                        "{context}"
+                    );
+                }
+            }
         }
     }
 
