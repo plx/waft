@@ -6,6 +6,10 @@ and build tools may also be active. It is not a multi-file transaction, a
 backup system, or protection against an unrestricted hostile process running
 as the same user.
 
+The decision logic behind these behaviors is also machine-checked with Verus;
+[VERIFICATION.md](VERIFICATION.md) records what those proofs cover and what
+they assume. This file records tested behavior and operational limits.
+
 The September 6 review covered `src/fs.rs`, `src/executor.rs`, `src/git.rs`, and
 the planner/model interfaces. It preserved profile selection, skip exit codes,
 no-clobber by default, and tracked-name protection. It corrected two reproduced

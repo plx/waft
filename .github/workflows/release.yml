@@ -150,7 +150,7 @@ jobs:
           mkdir -p "staging/${{ matrix.archive }}" dist
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" \
             "staging/${{ matrix.archive }}/"
-          cp README.md LICENSE CHANGELOG.md SECURITY.md THIRD_PARTY_LICENSES.md ASSURANCE.md INSTALL.md \
+          cp README.md LICENSE CHANGELOG.md SECURITY.md THIRD_PARTY_LICENSES.md ASSURANCE.md VERIFICATION.md INSTALL.md \
             "staging/${{ matrix.archive }}/"
           tar -C staging -czf "dist/${{ matrix.archive }}.tar.gz" \
             "${{ matrix.archive }}"

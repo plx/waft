@@ -378,7 +378,9 @@ to make those two steps one.
 
 
 See [ASSURANCE.md](ASSURANCE.md) for the tested scope, platform coverage, and
-remaining concurrency and recovery limits.
+remaining concurrency and recovery limits, and
+[VERIFICATION.md](VERIFICATION.md) for the decision logic that is formally
+verified with Verus and what those proofs assume.
 
 ## Website development
 
