@@ -91,29 +91,22 @@ pub(crate) fn plan_with_overwrite_support(
         }
     };
 
-    let mut all_manifest_files = groups.remaining_files.clone();
-    for dir in &groups.full_dirs {
-        all_manifest_files.extend(dir.files.iter().cloned());
-    }
-    all_manifest_files.sort();
-    all_manifest_files.dedup();
-
-    // Check which manifest paths are tracked in the destination worktree.
-    let dest_tracked = git.tracked_paths(dest_root, &all_manifest_files)?;
-
-    let mut entries: Vec<PlannedEntry> = Vec::new();
-    let mut per_file_paths = groups.remaining_files;
-
     // Always execute the selected manifest as individual checked file
     // operations. A whole-directory clone observes the live source tree and
     // can therefore copy files that appeared after candidate selection.
+    let mut per_file_paths = groups.remaining_files;
     for dir in groups.full_dirs {
         per_file_paths.extend(dir.files);
     }
+    // Verified: afterwards the paths are strictly increasing in byte order,
+    // so each destination is planned at most once, and the set of paths is
+    // exactly the selected manifest.
+    waft_verified::groups::sort_unique(&mut per_file_paths);
 
-    per_file_paths.sort();
-    per_file_paths.dedup();
+    // Check which manifest paths are tracked in the destination worktree.
+    let dest_tracked = git.tracked_paths(dest_root, &per_file_paths)?;
 
+    let mut entries: Vec<PlannedEntry> = Vec::new();
     for rel_path in per_file_paths {
         let src_abs = rel_path.to_path(&ctx.source_root);
         let dst_abs = rel_path.to_path(dest_root);
