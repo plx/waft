@@ -11,6 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
+use waft_verified::context as kernel;
+
 use crate::error::{Error, Result};
 use crate::git::GitBackend;
 use crate::model::RepoContext;
@@ -69,90 +71,108 @@ pub fn resolve_context(
 
     let toplevel = git.show_toplevel(probe_path)?;
 
-    // List all worktrees
+    // List all worktrees. From here on every path also gets an identity key
+    // (see `PathIdentities`), so the verified kernel decides on plain data.
     let worktrees = git.list_worktrees(&toplevel)?;
-    let main_record = worktrees
+    let mut identities = PathIdentities::default();
+    let records: Vec<kernel::WorktreeRecord> = worktrees
         .iter()
-        .find(|w| w.is_main)
-        .ok_or_else(|| Error::Git {
-            message: "no main worktree found".to_string(),
-        })?;
-    if main_record.is_bare && command == CommandKind::Copy {
-        return Err(Error::Context {
-            message: "copy is unsupported when the repository's main worktree is bare; use a non-bare main worktree as the copy source".to_string(),
-        });
-    }
-    let main_wt = main_record.path.clone();
+        .map(|w| kernel::WorktreeRecord {
+            key: identities.key(&w.path),
+            is_main: w.is_main,
+            is_bare: w.is_bare,
+        })
+        .collect();
+    let kernel_command = kernel_command_kind(command);
+    let main_index = match kernel::select_main(kernel_command, &records) {
+        kernel::MainSelection::Main(index) => index,
+        kernel::MainSelection::NoMain => {
+            return Err(Error::Git {
+                message: "no main worktree found".to_string(),
+            });
+        }
+        kernel::MainSelection::BareMainCopy => {
+            return Err(Error::Context {
+                message: "copy is unsupported when the repository's main worktree is bare; use a non-bare main worktree as the copy source".to_string(),
+            });
+        }
+    };
+    // The kernel proves `main_index` is the first record flagged as main, so
+    // it indexes both `records` and `worktrees`.
+    let main_wt = worktrees[main_index].path.clone();
+    let main = kernel::Observed {
+        key: records[main_index].key,
+        path: main_wt.clone(),
+    };
 
     let known_worktrees: Vec<PathBuf> = worktrees.iter().map(|w| w.path.clone()).collect();
 
-    // Determine source and destination
-    let (source_root, dest_root) = if let Some(src) = source_path {
+    // Ask Git for the toplevel of each root argument, in the same order and
+    // with the same error propagation as always.
+    let toplevels = if let Some(src) = source_path {
         let src_toplevel = git.show_toplevel(&src)?;
-        (
-            src_toplevel,
-            dest_path.map(|d| git.show_toplevel(&d)).transpose()?,
-        )
+        let dst_toplevel = dest_path.map(|d| git.show_toplevel(&d)).transpose()?;
+        kernel::Toplevels::Explicit {
+            source: identities.observe(src_toplevel),
+            dest: dst_toplevel.map(|d| identities.observe(d)),
+        }
     } else if let Some(dst) = dest_path {
-        // No explicit source, use main worktree as source
+        // No explicit source: the kernel uses the main worktree as source
         let dst_toplevel = git.show_toplevel(&dst)?;
-        (main_wt.clone(), Some(dst_toplevel))
+        kernel::Toplevels::DestOnly {
+            dest: identities.observe(dst_toplevel),
+        }
     } else {
         // No explicit source or dest — auto-detect from cwd
         let cwd_toplevel = git.show_toplevel(&cwd)?;
-        if cwd_toplevel == main_wt {
-            // We're in the main worktree
-            (cwd_toplevel, None)
-        } else {
-            // We're in a linked worktree — source is main, dest is current
-            (main_wt.clone(), Some(cwd_toplevel))
+        kernel::Toplevels::FromCwd {
+            cwd: identities.observe(cwd_toplevel),
         }
     };
 
-    // For copy, destination is required
-    if command == CommandKind::Copy && dest_root.is_none() {
-        return Err(Error::Context {
-            message:
-                "copy requires a destination worktree (use --dest or run from a linked worktree)"
-                    .to_string(),
-        });
-    }
-
-    // For copy, enforce source must be the main worktree
-    if command == CommandKind::Copy && source_root != main_wt {
-        return Err(Error::Context {
-            message: format!(
-                "copy source must be the main worktree ({}), got {}",
-                main_wt.display(),
-                source_root.display()
-            ),
-        });
-    }
-
-    // Validate: source must not equal dest
-    if let Some(ref dest) = dest_root {
-        if source_root == *dest {
-            return Err(Error::SameSourceAndDest {
-                path: source_root.clone(),
+    // Choose source and destination and enforce the copy rules. The kernel
+    // (`waft_verified::context`) proves the precedence order and that a
+    // resolved copy reads from main and writes into another family member.
+    let verdict = kernel::resolve_roots(kernel_command, &records, main, toplevels);
+    let (source_root, dest_root) = match verdict {
+        kernel::RootsVerdict::Resolved { source, dest } => {
+            (source.path, dest.map(|dest| dest.path))
+        }
+        kernel::RootsVerdict::CopyNeedsDest => {
+            return Err(Error::Context {
+                message:
+                    "copy requires a destination worktree (use --dest or run from a linked worktree)"
+                        .to_string(),
             });
         }
-
-        // For copy, dest must be a linked worktree (not the main one)
-        if command == CommandKind::Copy && *dest == main_wt {
+        kernel::RootsVerdict::CopySourceNotMain { source } => {
+            return Err(Error::Context {
+                message: format!(
+                    "copy source must be the main worktree ({}), got {}",
+                    main_wt.display(),
+                    source.path.display()
+                ),
+            });
+        }
+        kernel::RootsVerdict::SameSourceAndDest { source } => {
+            return Err(Error::SameSourceAndDest { path: source.path });
+        }
+        // Proven unreachable (`theorem_copy_dest_is_main_unreachable`):
+        // for copy, "source must be main" and "source must differ from
+        // dest" are checked first. Kept so the rule stays explicit.
+        kernel::RootsVerdict::CopyDestIsMain => {
             return Err(Error::Context {
                 message: "copy destination must be a linked worktree, not the main worktree"
                     .to_string(),
             });
         }
-
-        // Validate: dest must be in the same worktree family
-        if !known_worktrees.iter().any(|w| w == dest) {
+        kernel::RootsVerdict::NotInFamily { source, dest } => {
             return Err(Error::NotInWorktreeFamily {
-                src: source_root.clone(),
-                dest: dest.clone(),
+                src: source.path,
+                dest: dest.path,
             });
         }
-    }
+    };
 
     // Ask the backend whether this checkout folds case. Every decision about
     // whether two *repository paths* are the same path — tracked-path
@@ -172,6 +192,56 @@ pub fn resolve_context(
         known_worktrees,
         core_ignore_case,
     })
+}
+
+/// Convert a command kind into the verified kernel's mirror of it.
+fn kernel_command_kind(command: CommandKind) -> kernel::CommandKind {
+    match command {
+        CommandKind::Copy => kernel::CommandKind::Copy,
+        CommandKind::List => kernel::CommandKind::List,
+        CommandKind::Info => kernel::CommandKind::Info,
+        CommandKind::Validate => kernel::CommandKind::Validate,
+    }
+}
+
+/// Convert the verified kernel's command kind back into this crate's.
+pub(crate) fn command_kind_from_kernel(command: kernel::CommandKind) -> CommandKind {
+    match command {
+        kernel::CommandKind::Copy => CommandKind::Copy,
+        kernel::CommandKind::List => CommandKind::List,
+        kernel::CommandKind::Info => CommandKind::Info,
+        kernel::CommandKind::Validate => CommandKind::Validate,
+    }
+}
+
+/// Identity keys for paths under `Path` equality.
+///
+/// `Path` equality compares component sequences, so it is an equivalence
+/// relation, and interning by linear search gives two paths the same key
+/// exactly when they compare equal. The verified context kernel relies on
+/// this: it compares keys where this module used to compare `PathBuf`s.
+#[derive(Default)]
+struct PathIdentities {
+    seen: Vec<PathBuf>,
+}
+
+impl PathIdentities {
+    /// The key of `path`: the index of the first interned path equal to it.
+    fn key(&mut self, path: &Path) -> usize {
+        if let Some(index) = self.seen.iter().position(|seen| seen.as_path() == path) {
+            return index;
+        }
+        self.seen.push(path.to_path_buf());
+        self.seen.len() - 1
+    }
+
+    /// Pair an owned path with its key.
+    fn observe(&mut self, path: PathBuf) -> kernel::Observed<PathBuf> {
+        kernel::Observed {
+            key: self.key(&path),
+            path,
+        }
+    }
 }
 
 fn resolve_abs(path: &Path, cwd: &Path) -> PathBuf {
@@ -394,5 +464,80 @@ mod tests {
         let err =
             resolve_context(&git, Some(&main), Some(&linked), None, CommandKind::Copy).unwrap_err();
         assert!(err.to_string().contains("main worktree is bare"));
+    }
+
+    #[test]
+    fn kernel_command_kind_maps_each_variant_to_its_mirror() {
+        let pairs = [
+            (CommandKind::Copy, kernel::CommandKind::Copy),
+            (CommandKind::List, kernel::CommandKind::List),
+            (CommandKind::Info, kernel::CommandKind::Info),
+            (CommandKind::Validate, kernel::CommandKind::Validate),
+        ];
+        for (command, mirror) in pairs {
+            assert_eq!(kernel_command_kind(command), mirror);
+            assert_eq!(command_kind_from_kernel(mirror), command);
+        }
+        // Distinct commands stay distinct.
+        for (a, _) in pairs {
+            for (b, _) in pairs {
+                assert_eq!(a == b, kernel_command_kind(a) == kernel_command_kind(b));
+            }
+        }
+    }
+
+    #[test]
+    fn path_identities_follow_path_equality() {
+        let mut ids = PathIdentities::default();
+        let a = ids.key(Path::new("/repo/main"));
+        // `Path` equality is component-wise: these spell the same path.
+        assert_eq!(ids.key(Path::new("/repo/main/")), a);
+        assert_eq!(ids.key(Path::new("/repo/./main")), a);
+        assert_eq!(ids.key(Path::new("/repo//main")), a);
+        let b = ids.key(Path::new("/repo/linked"));
+        assert_ne!(a, b);
+        assert_ne!(ids.key(Path::new("/repo/main/..")), a);
+        assert_eq!(ids.key(Path::new("/repo/linked")), b);
+        let observed = ids.observe(PathBuf::from("/repo/main/"));
+        assert_eq!(observed.key, a);
+        // The observation keeps the exact spelling it was given.
+        assert_eq!(observed.path.as_os_str(), "/repo/main/");
+    }
+
+    #[test]
+    fn no_main_worktree_is_reported_before_any_root_check() {
+        let linked = linked_repo_path();
+        let git = MockGit::new(vec![WorktreeRecord {
+            path: linked.clone(),
+            is_main: false,
+            is_bare: false,
+        }]);
+        let err = resolve_context(&git, Some(&linked), Some(&linked), None, CommandKind::Copy)
+            .unwrap_err();
+        assert!(err.to_string().contains("no main worktree found"));
+    }
+
+    #[test]
+    fn copy_rejects_linked_source_before_same_or_family_checks() {
+        let main = main_repo_path();
+        let linked = linked_repo_path();
+        let git = MockGit::new(main_and_linked());
+        let err =
+            resolve_context(&git, Some(&linked), Some(&main), None, CommandKind::Copy).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("copy source must be the main worktree"));
+        assert!(message.contains(&main.display().to_string()));
+        assert!(message.contains(&linked.display().to_string()));
+    }
+
+    #[test]
+    fn dest_only_uses_main_as_source() {
+        let main = main_repo_path();
+        let linked = linked_repo_path();
+        let git = MockGit::new(main_and_linked());
+        let ctx = resolve_context(&git, None, Some(&linked), None, CommandKind::Copy).unwrap();
+        assert_eq!(ctx.source_root, main);
+        assert_eq!(ctx.dest_root, Some(linked));
+        assert_eq!(ctx.main_worktree, main);
     }
 }
