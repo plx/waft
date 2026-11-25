@@ -99,8 +99,9 @@ pub(crate) fn plan_with_overwrite_support(
         per_file_paths.extend(dir.files);
     }
     // Verified: afterwards the paths are strictly increasing in byte order,
-    // so each destination is planned at most once, and the set of paths is
-    // exactly the selected manifest.
+    // so each repository-relative path is planned at most once, and the set
+    // of paths is exactly the selected manifest. (Distinct byte strings can
+    // still name one file on a case-insensitive destination filesystem.)
     waft_verified::groups::sort_unique(&mut per_file_paths);
 
     // Check which manifest paths are tracked in the destination worktree.
@@ -385,7 +386,12 @@ fn entry_kinds(entries: &[PlannedEntry]) -> Vec<EntryKind> {
 /// This mirrors [`crate::executor::report_has_failures`] so a dry run reports
 /// and exits exactly like the run it is describing: a file that planning could
 /// not describe is a failure whether or not anything is written. The verified
-/// `tally` kernel proves the pair agrees with the executor's dry-run counters.
+/// `tally` kernel computes the pair with the executor kernel's own
+/// `failure_summary` (the decision behind `report_has_failures`), and proves
+/// the counters it passes are exactly the ones the executor kernel's
+/// `run_plan` counts when it dry-runs the same plan. That the plan the
+/// executor kernel sees has these kinds (`entry_kind` agrees with
+/// `executor::kernel_entry`) is glue, pinned by a unit test.
 pub fn planning_failures(plan: &CopyPlan) -> Option<(usize, usize)> {
     tally::planning_failures(&entry_kinds(&plan.entries))
 }
@@ -1308,8 +1314,17 @@ mod tests {
         assert_eq!(kernel.payload, snapshot);
     }
 
-    #[test]
-    fn entry_kind_maps_each_planned_entry_shape() {
+    const ALL_ENTRY_KINDS: [EntryKind; 6] = [
+        EntryKind::CopyMissing,
+        EntryKind::CopyReplace,
+        EntryKind::CopyRepair,
+        EntryKind::NoOp,
+        EntryKind::Skip,
+        EntryKind::Failure,
+    ];
+
+    /// A planned entry of the given shape.
+    fn planned_entry_of_kind(kind: EntryKind) -> PlannedEntry {
         let snapshot = || FileSnapshot::new(1, 1, 0, None);
         let copy = |expected_destination| {
             PlannedEntry::Copy(CopyOp {
@@ -1320,53 +1335,92 @@ mod tests {
                 expected_destination,
             })
         };
-        let cases = [
-            (
-                copy(DestinationExpectation::Missing),
-                EntryKind::CopyMissing,
-            ),
-            (
-                copy(DestinationExpectation::ReplaceExisting(snapshot())),
-                EntryKind::CopyReplace,
-            ),
-            (
-                copy(DestinationExpectation::RepairPermissions(snapshot())),
-                EntryKind::CopyRepair,
-            ),
-            (
-                PlannedEntry::NoOp(NoOpEntry {
-                    rel_path: rel("a"),
-                    reason: NoOpReason::UpToDate,
-                }),
-                EntryKind::NoOp,
-            ),
-            (
-                PlannedEntry::Skip(SkipEntry {
-                    rel_path: rel("a"),
-                    reason: SkipReason::TypeConflict,
-                }),
-                EntryKind::Skip,
-            ),
-            (
-                PlannedEntry::Failure(FailureEntry {
-                    rel_path: rel("a"),
-                    message: "x".to_string(),
-                }),
-                EntryKind::Failure,
-            ),
-        ];
-        for (entry, kind) in cases {
+        match kind {
+            EntryKind::CopyMissing => copy(DestinationExpectation::Missing),
+            EntryKind::CopyReplace => copy(DestinationExpectation::ReplaceExisting(snapshot())),
+            EntryKind::CopyRepair => copy(DestinationExpectation::RepairPermissions(snapshot())),
+            EntryKind::NoOp => PlannedEntry::NoOp(NoOpEntry {
+                rel_path: rel("a"),
+                reason: NoOpReason::UpToDate,
+            }),
+            EntryKind::Skip => PlannedEntry::Skip(SkipEntry {
+                rel_path: rel("a"),
+                reason: SkipReason::TypeConflict,
+            }),
+            EntryKind::Failure => PlannedEntry::Failure(FailureEntry {
+                rel_path: rel("a"),
+                message: "x".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn entry_kind_maps_each_planned_entry_shape() {
+        for kind in ALL_ENTRY_KINDS {
+            let entry = planned_entry_of_kind(kind);
             assert_eq!(entry_kind(&entry), kind, "{entry:?}");
         }
     }
 
+    /// The `tally` kernel proves `planning_failures` and the dry-run counters
+    /// agree with the executor kernel's dry run of a plan with these kinds.
+    /// That the executor sees those kinds (`executor::kernel_entry` agrees
+    /// with `entry_kind`) is glue; dry-running a plan of every kind, each a
+    /// different number of times, through `executor::execute` pins it.
+    #[test]
+    fn dry_run_accounting_agrees_with_the_executor_dry_run() {
+        for (failures, expected) in [(0, None), (2, Some((2, 8)))] {
+            let mut entries = Vec::new();
+            for (kind, n) in ALL_ENTRY_KINDS.into_iter().zip([1, 2, 3, 4, 5, failures]) {
+                entries.extend((0..n).map(|_| planned_entry_of_kind(kind)));
+            }
+            let plan = CopyPlan {
+                context: test_ctx(),
+                validation: ValidationReport::default(),
+                entries,
+                dry_run: true,
+            };
+            let fs = MockFs::new();
+            let git = MockPlannerGit::new(vec![]);
+            let report =
+                crate::executor::execute(&plan, &fs, &git, crate::config::CopyStrategy::SimpleCopy);
+            let counts = tally::tally(&entry_kinds(&plan.entries));
+            assert_eq!(
+                (
+                    report.copied,
+                    report.replaced,
+                    report.permissions_repaired,
+                    report.up_to_date,
+                    report.skipped,
+                    report.failed,
+                ),
+                (
+                    counts.copies,
+                    counts.replacements,
+                    counts.repairs,
+                    counts.noops,
+                    counts.skips,
+                    counts.failures,
+                )
+            );
+            assert_eq!(planning_failures(&plan), expected);
+            assert_eq!(
+                crate::executor::report_has_failures(&report),
+                planning_failures(&plan)
+            );
+        }
+    }
+
     /// A filesystem that records which queries planning makes, in order, and
-    /// can be told what a comparison and the destination snapshot report.
+    /// can be told what a comparison and the destination snapshot report, and
+    /// to fail the comparison or a snapshot.
     struct RecordingFs {
         inner: MockFs,
         log: RefCell<Vec<&'static str>>,
         comparison: Option<FileComparison>,
         dest_snapshot: Option<crate::model::FileSnapshot>,
+        compare_fails: bool,
+        failing_snapshot: Option<&'static str>,
     }
 
     impl RecordingFs {
@@ -1376,6 +1430,8 @@ mod tests {
                 log: RefCell::new(Vec::new()),
                 comparison: None,
                 dest_snapshot: None,
+                compare_fails: false,
+                failing_snapshot: None,
             }
         }
 
@@ -1406,19 +1462,38 @@ mod tests {
         }
         fn compare_files(&self, left: &Path, right: &Path) -> io::Result<FileComparison> {
             self.log.borrow_mut().push("compare_files");
+            if self.compare_fails {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "unreadable",
+                ));
+            }
             match self.comparison {
                 Some(comparison) => Ok(comparison),
                 None => self.inner.compare_files(left, right),
             }
         }
         fn file_snapshot(&self, path: &Path) -> io::Result<crate::model::FileSnapshot> {
-            if path.starts_with("/dest") {
-                self.log.borrow_mut().push("file_snapshot(dest)");
-                if let Some(snapshot) = &self.dest_snapshot {
-                    return Ok(snapshot.clone());
-                }
+            let side = if path.starts_with("/dest") {
+                "dest"
             } else {
-                self.log.borrow_mut().push("file_snapshot(source)");
+                "source"
+            };
+            self.log.borrow_mut().push(if side == "dest" {
+                "file_snapshot(dest)"
+            } else {
+                "file_snapshot(source)"
+            });
+            if self.failing_snapshot == Some(side) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "unreadable",
+                ));
+            }
+            if side == "dest"
+                && let Some(snapshot) = &self.dest_snapshot
+            {
+                return Ok(snapshot.clone());
             }
             self.inner.file_snapshot(path)
         }
@@ -1440,6 +1515,15 @@ mod tests {
     }
 
     fn plan_one(fs: &RecordingFs, tracked: Vec<&str>, overwrite: bool) -> PlannedEntry {
+        plan_one_where(fs, tracked, overwrite, true)
+    }
+
+    fn plan_one_where(
+        fs: &RecordingFs,
+        tracked: Vec<&str>,
+        overwrite: bool,
+        overwrite_supported: bool,
+    ) -> PlannedEntry {
         let git = MockPlannerGit::new(tracked);
         let mut plan = plan_with_overwrite_support(
             &test_ctx(),
@@ -1449,7 +1533,7 @@ mod tests {
             fs,
             overwrite,
             false,
-            true,
+            overwrite_supported,
         )
         .unwrap();
         assert_eq!(plan.entries.len(), 1);
@@ -1528,6 +1612,162 @@ mod tests {
             fs.take_log(),
             ["source_kind", "parent_has_symlink", "exists", "is_symlink",]
         );
+    }
+
+    /// The remaining paths of `entry_queries` and `dest_queries`: where each
+    /// one stops asking, and what it asks before stopping.
+    #[test]
+    fn planning_stops_querying_where_the_specification_says() {
+        const CLASSIFY_EXISTING: [&str; 6] = [
+            "source_kind",
+            "parent_has_symlink",
+            "exists",
+            "is_symlink",
+            "is_file",
+            "compare_files",
+        ];
+        let with_log = |tail: &[&'static str]| {
+            let mut log = CLASSIFY_EXISTING.to_vec();
+            log.extend_from_slice(tail);
+            log
+        };
+        let source_only = || {
+            let fs = RecordingFs::new(MockFs::new());
+            fs.inner.add_file("/source/.env", b"x");
+            fs
+        };
+        let existing = |dest: &[u8]| {
+            let fs = source_only();
+            fs.inner.add_file("/dest/.env", dest);
+            fs
+        };
+        fn is_skip(entry: &PlannedEntry, expected: SkipReason) -> bool {
+            match entry {
+                PlannedEntry::Skip(skip) => skip.reason == expected,
+                _ => false,
+            }
+        }
+
+        // A symlinked destination parent stops classification at once, even
+        // under `--overwrite`.
+        let fs = source_only();
+        fs.inner.add_symlink("/dest");
+        assert!(is_skip(
+            &plan_one(&fs, vec![], true),
+            SkipReason::UnsafePath
+        ));
+        assert_eq!(fs.take_log(), ["source_kind", "parent_has_symlink"]);
+
+        // A destination that is not a regular file stops after `is_file`.
+        let fs = source_only();
+        fs.inner.add_dir("/dest/.env");
+        assert!(is_skip(
+            &plan_one(&fs, vec![], true),
+            SkipReason::TypeConflict
+        ));
+        assert_eq!(
+            fs.take_log(),
+            [
+                "source_kind",
+                "parent_has_symlink",
+                "exists",
+                "is_symlink",
+                "is_file",
+            ]
+        );
+
+        // A comparison that fails is an untracked conflict: skipped without
+        // `--overwrite`, replaced (after both snapshots) with it.
+        let mut fs = existing(b"x");
+        fs.compare_fails = true;
+        assert!(is_skip(
+            &plan_one(&fs, vec![], false),
+            SkipReason::UntrackedConflict
+        ));
+        assert_eq!(fs.take_log(), CLASSIFY_EXISTING);
+        assert!(matches!(
+            plan_one(&fs, vec![], true),
+            PlannedEntry::Copy(CopyOp {
+                expected_destination: DestinationExpectation::ReplaceExisting(_),
+                ..
+            })
+        ));
+        assert_eq!(
+            fs.take_log(),
+            with_log(&["file_snapshot(source)", "file_snapshot(dest)"])
+        );
+
+        // An up-to-date destination is never snapshotted, even under
+        // `--overwrite`.
+        let fs = existing(b"x");
+        assert!(matches!(plan_one(&fs, vec![], true), PlannedEntry::NoOp(_)));
+        assert_eq!(fs.take_log(), CLASSIFY_EXISTING);
+
+        // Where replacement is unsupported, an `--overwrite` conflict fails
+        // without snapshotting either file.
+        let fs = existing(b"y");
+        assert!(matches!(
+            plan_one_where(&fs, vec![], true, false),
+            PlannedEntry::Failure(_)
+        ));
+        assert_eq!(fs.take_log(), CLASSIFY_EXISTING);
+
+        // A failed source snapshot stops before the destination snapshot.
+        let mut fs = existing(b"y");
+        fs.failing_snapshot = Some("source");
+        assert!(matches!(
+            plan_one(&fs, vec![], true),
+            PlannedEntry::Failure(_)
+        ));
+        assert_eq!(fs.take_log(), with_log(&["file_snapshot(source)"]));
+
+        // A failed destination snapshot is a failure after both snapshots.
+        let mut fs = existing(b"y");
+        fs.failing_snapshot = Some("dest");
+        assert!(matches!(
+            plan_one(&fs, vec![], true),
+            PlannedEntry::Failure(_)
+        ));
+        assert_eq!(
+            fs.take_log(),
+            with_log(&["file_snapshot(source)", "file_snapshot(dest)"])
+        );
+
+        // A missing destination whose source snapshot fails.
+        let mut fs = source_only();
+        fs.failing_snapshot = Some("source");
+        assert!(matches!(
+            plan_one(&fs, vec![], false),
+            PlannedEntry::Failure(_)
+        ));
+        assert_eq!(
+            fs.take_log(),
+            [
+                "source_kind",
+                "parent_has_symlink",
+                "exists",
+                "parent_has_symlink",
+                "file_snapshot(source)",
+            ]
+        );
+
+        // A source that is not a regular file, or cannot be examined, never
+        // looks at the destination.
+        let fs = RecordingFs::new(MockFs::new());
+        fs.inner.add_symlink("/source/.env");
+        fs.inner.add_file("/dest/.env", b"y");
+        assert!(is_skip(
+            &plan_one(&fs, vec![], true),
+            SkipReason::UnsupportedSourceType
+        ));
+        assert_eq!(fs.take_log(), ["source_kind"]);
+        let fs = RecordingFs::new(MockFs::new());
+        fs.inner.add_file("/dest/.env", b"y");
+        assert!(matches!(
+            plan_one(&fs, vec![], true),
+            PlannedEntry::Failure(_)
+        ));
+        assert_eq!(fs.take_log(), ["source_kind"]);
     }
 
     /// A permission-only difference is repaired only while the pinned

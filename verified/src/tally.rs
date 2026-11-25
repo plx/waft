@@ -18,16 +18,23 @@
 //! * [`planning_failures`]: `None` exactly when no entry is a failure;
 //!   otherwise `(failed, total)` with `failed` the number of failures,
 //!   `total` the failures plus the copies of every kind, and
-//!   `1 <= failed <= total <= entries`.
-//! * `theorem_dry_run_agrees_with_executor`: the pair equals what
-//!   `executor::report_has_failures` computes from the counters the
-//!   executor's dry-run branch produces for the same plan (modelled by
-//!   `dry_run_report`). This is the invariant `planning_failures` documents:
-//!   a dry run reports and exits exactly like the run it describes.
-//! * `theorem_real_run_fails_if_dry_run_fails`: for *every* assignment of
-//!   execution outcomes to the plan's copies, the real run's total equals
-//!   the dry run's total and its failure count is at least the dry run's. So
-//!   for a fixed plan, a failing dry run implies a failing real run.
+//!   `1 <= failed <= total <= entries`. The pair is computed by
+//!   [`crate::execute::failure_summary`], the same verified function behind
+//!   `executor::report_has_failures` and so behind a real run's exit status.
+//! * `theorem_dry_run_agrees_with_executor` (and the last `ensures` of
+//!   [`planning_failures`]): the counters handed to `failure_summary` are
+//!   exactly the counters [`crate::execute::run_plan`] returns when it
+//!   dry-runs the same plan (`executor_counts` is `run_plan`'s counter
+//!   postcondition), whatever the destination root and publication results.
+//!   So `planning_failures` returns exactly what the executor kernel's own
+//!   exit decision returns for the executor kernel's own dry run of the plan.
+//!   (A real run can fail more often, when a publication fails; see the next
+//!   theorem.)
+//! * `theorem_real_run_fails_if_dry_run_fails`: for *every* real run of the
+//!   executor kernel over the same plan (every publication result, with or
+//!   without a destination root), the run's total equals the dry run's total
+//!   and its failure count is at least the dry run's. So for a fixed plan, a
+//!   failing dry run implies a failing real run.
 //! * [`shows_entry`]: `--quiet` hides every line except failures, and never
 //!   hides a failure. [`dry_run_summary`]: the summary is printed exactly
 //!   when not quiet, with the replace, repair and failed clauses exactly
@@ -37,13 +44,17 @@
 //!
 //! * Production maps each `PlannedEntry` (with its `DestinationExpectation`)
 //!   to its [`EntryKind`] one-to-one (an exhaustive match, unit-tested).
-//! * The executor model (`dry_run_report`, `real_run_failed`,
-//!   `real_run_succeeded`, `report_failure_summary`) describes
-//!   `executor::execute` and `executor::report_has_failures`, which another
-//!   kernel verifies; this module only relies on the counting they document.
+//! * The executor theorems hold for the plan the executor kernel sees, which
+//!   `executor.rs` builds from the same `PlannedEntry` values. That the two
+//!   conversions agree (`executor_kind` of `planner::entry_kind` is the shape
+//!   of `executor::kernel_entry`) is glue: two exhaustive matches, pinned by
+//!   a unit test that dry-runs a plan of every kind through
+//!   `executor::execute`.
 
 #[allow(unused_imports)]
 use vstd::prelude::*;
+
+use crate::execute;
 
 verus! {
 
@@ -175,20 +186,46 @@ pub fn tally(kinds: &[EntryKind]) -> (t: Tally)
 }
 
 /// Whether a dry run of these entries fails, as `(failed, total)`.
+///
+/// The pair is the executor kernel's own exit decision
+/// ([`execute::failure_summary`]) applied to the executor kernel's own
+/// dry-run counters for the same plan: the last `ensures` holds for every
+/// tally [`execute::run_plan`] can return from a dry run of this plan.
 pub fn planning_failures(kinds: &[EntryKind]) -> (r: Option<(usize, usize)>)
     ensures
         r is None <==> planning_failures_spec(kinds@) is None,
         r matches Some((f, t)) ==> planning_failures_spec(kinds@) == Some((f as nat, t as nat)),
         r matches Some((f, t)) ==> 1 <= f <= t <= kinds@.len(),
+        forall|et: execute::Tally, has_root: bool, pubs: Seq<execute::Counter>|
+            #[trigger] executor_counts(et, kinds@, true, has_root, pubs) ==> {
+                &&& (r is Some <==> et.failed > 0)
+                &&& r matches Some(p) ==> p.0 == et.failed && p.1 == et.copied + et.replaced
+                    + et.permissions_repaired + et.failed
+            },
 {
     let t = tally(kinds);
     // The counters sum to the number of entries, which fits in usize.
     let _n = kinds.len();
-    if t.failures == 0 {
-        None
-    } else {
-        Some((t.failures, t.failures + t.copies + t.replacements + t.repairs))
+    let dry_run = execute::Tally {
+        copied: t.copies,
+        replaced: t.replacements,
+        permissions_repaired: t.repairs,
+        failed: t.failures,
+        skipped: t.skips,
+        up_to_date: t.noops,
+    };
+    let r = execute::failure_summary(&dry_run);
+    proof {
+        assert forall|et: execute::Tally, has_root: bool, pubs: Seq<execute::Counter>|
+            #[trigger] executor_counts(et, kinds@, true, has_root, pubs) implies {
+                &&& (r is Some <==> et.failed > 0)
+                &&& r matches Some(p) ==> p.0 == et.failed && p.1 == et.copied + et.replaced
+                    + et.permissions_repaired + et.failed
+            } by {
+            theorem_dry_run_agrees_with_executor(kinds@, has_root, pubs, et);
+        }
     }
+    r
 }
 
 /// Whether a dry run prints the line for an entry of kind `kind`.
@@ -220,142 +257,287 @@ pub fn dry_run_summary(t: &Tally, quiet: bool) -> (r: Option<DryRunSummary>)
 }
 
 // ---------------------------------------------------------------------------
-// The executor's counting, as documented by `executor::execute`.
+// Agreement with the executor kernel (`crate::execute`).
 // ---------------------------------------------------------------------------
 
-/// What executing one planned copy did in a real run.
-pub enum RunOutcome {
-    /// Published to a missing destination.
-    Created,
-    /// Replaced an existing destination.
-    Replaced,
-    /// Repaired an existing destination's permissions.
-    Repaired,
-    /// Failed.
-    Failed,
-}
-
-/// The executor's dry-run counters for a plan, in the order
-/// `(copied, replaced, permissions_repaired, failed, skipped, up_to_date)`:
-/// each copy is counted by its expectation, each other entry by its kind.
-pub open spec fn dry_run_report(kinds: Seq<EntryKind>) -> (nat, nat, nat, nat, nat, nat) {
-    (
-        count(kinds, EntryKind::CopyMissing),
-        count(kinds, EntryKind::CopyReplace),
-        count(kinds, EntryKind::CopyRepair),
-        count(kinds, EntryKind::Failure),
-        count(kinds, EntryKind::Skip),
-        count(kinds, EntryKind::NoOp),
-    )
-}
-
-/// `executor::report_has_failures`: `(failed, succeeded + failed)` when
-/// anything failed, where `succeeded = copied + replaced +
-/// permissions_repaired` (`CopyReport::succeeded`).
-pub open spec fn report_failure_summary(
-    copied: nat,
-    replaced: nat,
-    repaired: nat,
-    failed: nat,
-) -> Option<(nat, nat)> {
-    if failed > 0 {
-        Some((failed, copied + replaced + repaired + failed))
-    } else {
-        None
-    }
-}
-
-/// Whether an entry kind is a planned copy of any kind.
-pub open spec fn is_copy(k: EntryKind) -> bool {
-    k == EntryKind::CopyMissing || k == EntryKind::CopyReplace || k == EntryKind::CopyRepair
-}
-
-/// Real-run failures: every planning failure, plus every copy whose
-/// execution failed. `outcomes[i]` is the outcome of entry `i` when it is a
-/// copy and is ignored otherwise.
-pub open spec fn real_run_failed(kinds: Seq<EntryKind>, outcomes: Seq<RunOutcome>) -> nat
-    decreases kinds.len(),
-{
-    if kinds.len() == 0 || outcomes.len() != kinds.len() {
-        0
-    } else {
-        real_run_failed(kinds.drop_last(), outcomes.drop_last()) + if kinds.last() == EntryKind::Failure
-            || (is_copy(kinds.last()) && outcomes.last() is Failed) {
-            1nat
-        } else {
-            0nat
-        }
-    }
-}
-
-/// Real-run successes (`CopyReport::succeeded`): every copy whose execution
-/// published or repaired.
-pub open spec fn real_run_succeeded(kinds: Seq<EntryKind>, outcomes: Seq<RunOutcome>) -> nat
-    decreases kinds.len(),
-{
-    if kinds.len() == 0 || outcomes.len() != kinds.len() {
-        0
-    } else {
-        real_run_succeeded(kinds.drop_last(), outcomes.drop_last()) + if is_copy(kinds.last())
-            && !(outcomes.last() is Failed) {
-            1nat
-        } else {
-            0nat
-        }
-    }
-}
-
-/// The dry run's failure decision is the executor's, applied to the
-/// executor's dry-run counters for the same plan.
-pub proof fn theorem_dry_run_agrees_with_executor(kinds: Seq<EntryKind>)
-    ensures
-        planning_failures_spec(kinds) == report_failure_summary(
-            dry_run_report(kinds).0,
-            dry_run_report(kinds).1,
-            dry_run_report(kinds).2,
-            dry_run_report(kinds).3,
+/// The executor kernel's shape of an entry kind: the `execute::EntryKind`
+/// that `executor.rs` builds from the same `PlannedEntry`.
+pub open spec fn executor_kind(k: EntryKind) -> execute::EntryKind {
+    match k {
+        EntryKind::CopyMissing => execute::EntryKind::Copy(execute::DestExpectation::Missing),
+        EntryKind::CopyReplace => execute::EntryKind::Copy(
+            execute::DestExpectation::ReplaceExisting,
         ),
-{
+        EntryKind::CopyRepair => execute::EntryKind::Copy(
+            execute::DestExpectation::RepairPermissions,
+        ),
+        EntryKind::NoOp => execute::EntryKind::NoOp,
+        EntryKind::Skip => execute::EntryKind::Skip,
+        EntryKind::Failure => execute::EntryKind::Failure,
+    }
 }
 
-/// Successes plus failures of a real run are the plan's copies plus its
-/// planning failures, and a real run fails at least as often as the plan
-/// does, whatever each copy's execution outcome.
-pub proof fn lemma_real_run_accounting(kinds: Seq<EntryKind>, outcomes: Seq<RunOutcome>)
-    requires
-        outcomes.len() == kinds.len(),
+/// The executor kernel's shapes of a plan, in order.
+pub open spec fn executor_kinds(kinds: Seq<EntryKind>) -> Seq<execute::EntryKind> {
+    kinds.map_values(|k: EntryKind| executor_kind(k))
+}
+
+/// The class the executor kernel gives each entry of the plan.
+pub open spec fn executor_classes(
+    kinds: Seq<EntryKind>,
+    dry_run: bool,
+    has_root: bool,
+    pubs: Seq<execute::Counter>,
+) -> Seq<execute::Counter> {
+    execute::entry_classes(executor_kinds(kinds), dry_run, has_root, pubs)
+}
+
+/// `et` is a tally [`execute::run_plan`] can return for this plan: its
+/// postcondition about the counters, for a run that is or is not a dry run
+/// (`dry_run`), with or without a destination root (`has_root`), where
+/// `pubs[i]` is the class of entry `i`'s publication result.
+pub open spec fn executor_counts(
+    et: execute::Tally,
+    kinds: Seq<EntryKind>,
+    dry_run: bool,
+    has_root: bool,
+    pubs: Seq<execute::Counter>,
+) -> bool {
+    &&& pubs.len() == kinds.len()
+    &&& forall|i: int| 0 <= i < pubs.len() ==> execute::is_publish_counter(#[trigger] pubs[i])
+    &&& forall|c: execute::Counter|
+        #[trigger] et.get(c) == execute::count(executor_classes(kinds, dry_run, has_root, pubs), c)
+}
+
+/// A count never exceeds the number of entries.
+proof fn lemma_count_le_len(kinds: Seq<EntryKind>, k: EntryKind)
     ensures
-        real_run_succeeded(kinds, outcomes) + real_run_failed(kinds, outcomes) == copy_count(kinds)
-            + count(kinds, EntryKind::Failure),
-        real_run_failed(kinds, outcomes) >= count(kinds, EntryKind::Failure),
+        count(kinds, k) <= kinds.len(),
     decreases kinds.len(),
 {
     if kinds.len() > 0 {
-        lemma_real_run_accounting(kinds.drop_last(), outcomes.drop_last());
+        lemma_count_le_len(kinds.drop_last(), k);
     }
 }
 
-/// For a fixed plan, a failing dry run implies a failing real run with the
-/// same total and at least as many failures, for every assignment of
-/// execution outcomes to the plan's copies. (The real run's successes are
-/// passed as one counter: `report_failure_summary` only uses their sum.)
-pub proof fn theorem_real_run_fails_if_dry_run_fails(
+/// `executor_counts` is satisfiable for every plan that fits in memory, so
+/// the agreement `ensures` of [`planning_failures`] is not vacuous.
+pub proof fn lemma_dry_run_tally_exists(kinds: Seq<EntryKind>, has_root: bool)
+    requires
+        kinds.len() <= usize::MAX,
+    ensures
+        exists|et: execute::Tally, pubs: Seq<execute::Counter>|
+            executor_counts(et, kinds, true, has_root, pubs),
+{
+    let pubs = Seq::new(kinds.len(), |i: int| execute::Counter::Copied);
+    lemma_count_le_len(kinds, EntryKind::CopyMissing);
+    lemma_count_le_len(kinds, EntryKind::CopyReplace);
+    lemma_count_le_len(kinds, EntryKind::CopyRepair);
+    lemma_count_le_len(kinds, EntryKind::Failure);
+    lemma_count_le_len(kinds, EntryKind::Skip);
+    lemma_count_le_len(kinds, EntryKind::NoOp);
+    let et = execute::Tally {
+        copied: count(kinds, EntryKind::CopyMissing) as usize,
+        replaced: count(kinds, EntryKind::CopyReplace) as usize,
+        permissions_repaired: count(kinds, EntryKind::CopyRepair) as usize,
+        failed: count(kinds, EntryKind::Failure) as usize,
+        skipped: count(kinds, EntryKind::Skip) as usize,
+        up_to_date: count(kinds, EntryKind::NoOp) as usize,
+    };
+    lemma_dry_run_classes(kinds, has_root, pubs);
+    assert(executor_counts(et, kinds, true, has_root, pubs));
+}
+
+/// The executor kernel classifies a plan entry by entry.
+proof fn lemma_executor_classes_drop_last(
     kinds: Seq<EntryKind>,
-    outcomes: Seq<RunOutcome>,
+    dry_run: bool,
+    has_root: bool,
+    pubs: Seq<execute::Counter>,
 )
     requires
-        outcomes.len() == kinds.len(),
+        kinds.len() > 0,
+        pubs.len() == kinds.len(),
+    ensures
+        executor_classes(kinds, dry_run, has_root, pubs).len() == kinds.len(),
+        executor_classes(kinds, dry_run, has_root, pubs).drop_last() == executor_classes(
+            kinds.drop_last(),
+            dry_run,
+            has_root,
+            pubs.drop_last(),
+        ),
+        executor_classes(kinds, dry_run, has_root, pubs).last() == execute::entry_counter(
+            executor_kind(kinds.last()),
+            dry_run,
+            has_root,
+            pubs.last(),
+        ),
+{
+    let classes = executor_classes(kinds, dry_run, has_root, pubs);
+    let shorter = executor_classes(kinds.drop_last(), dry_run, has_root, pubs.drop_last());
+    assert(classes.drop_last() =~= shorter);
+}
+
+/// The executor kernel's dry-run classes count each kind of entry in its own
+/// counter: every copy by its destination expectation, every other entry by
+/// its kind.
+proof fn lemma_dry_run_classes(kinds: Seq<EntryKind>, has_root: bool, pubs: Seq<execute::Counter>)
+    requires
+        pubs.len() == kinds.len(),
+    ensures
+        ({
+            let classes = executor_classes(kinds, true, has_root, pubs);
+            &&& execute::count(classes, execute::Counter::Copied) == count(
+                kinds,
+                EntryKind::CopyMissing,
+            )
+            &&& execute::count(classes, execute::Counter::Replaced) == count(
+                kinds,
+                EntryKind::CopyReplace,
+            )
+            &&& execute::count(classes, execute::Counter::PermissionsRepaired) == count(
+                kinds,
+                EntryKind::CopyRepair,
+            )
+            &&& execute::count(classes, execute::Counter::Failed) == count(
+                kinds,
+                EntryKind::Failure,
+            )
+            &&& execute::count(classes, execute::Counter::Skipped) == count(kinds, EntryKind::Skip)
+            &&& execute::count(classes, execute::Counter::UpToDate) == count(kinds, EntryKind::NoOp)
+        }),
+    decreases kinds.len(),
+{
+    if kinds.len() > 0 {
+        lemma_dry_run_classes(kinds.drop_last(), has_root, pubs.drop_last());
+        lemma_executor_classes_drop_last(kinds, true, has_root, pubs);
+    }
+}
+
+/// In a real run, each copy lands in exactly one of the copied, replaced,
+/// repaired and failed counters (whatever its publication returned, and a
+/// failure without a destination root), and each planning failure is
+/// failed.
+proof fn lemma_real_run_classes(kinds: Seq<EntryKind>, has_root: bool, pubs: Seq<execute::Counter>)
+    requires
+        pubs.len() == kinds.len(),
+        forall|i: int| 0 <= i < pubs.len() ==> execute::is_publish_counter(#[trigger] pubs[i]),
+    ensures
+        ({
+            let classes = executor_classes(kinds, false, has_root, pubs);
+            &&& execute::count(classes, execute::Counter::Copied) + execute::count(
+                classes,
+                execute::Counter::Replaced,
+            ) + execute::count(classes, execute::Counter::PermissionsRepaired) + execute::count(
+                classes,
+                execute::Counter::Failed,
+            ) == copy_count(kinds) + count(kinds, EntryKind::Failure)
+            &&& execute::count(classes, execute::Counter::Failed) >= count(
+                kinds,
+                EntryKind::Failure,
+            )
+            &&& execute::count(classes, execute::Counter::Skipped) == count(kinds, EntryKind::Skip)
+            &&& execute::count(classes, execute::Counter::UpToDate) == count(kinds, EntryKind::NoOp)
+        }),
+    decreases kinds.len(),
+{
+    if kinds.len() > 0 {
+        let shorter = pubs.drop_last();
+        assert forall|i: int| 0 <= i < shorter.len() implies execute::is_publish_counter(
+            #[trigger] shorter[i],
+        ) by {
+            assert(shorter[i] == pubs[i]);
+        }
+        lemma_real_run_classes(kinds.drop_last(), has_root, shorter);
+        lemma_executor_classes_drop_last(kinds, false, has_root, pubs);
+        assert(execute::is_publish_counter(pubs[pubs.len() - 1]));
+    }
+}
+
+/// The executor kernel's dry run of a plan counts exactly what [`tally`]
+/// counts, and its exit decision ([`execute::failure_summary`]'s
+/// postcondition on those counters) is `planning_failures_spec`: `Some`
+/// exactly when something failed, then `(failed, copied + replaced +
+/// permissions_repaired + failed)`.
+pub proof fn theorem_dry_run_agrees_with_executor(
+    kinds: Seq<EntryKind>,
+    has_root: bool,
+    pubs: Seq<execute::Counter>,
+    et: execute::Tally,
+)
+    requires
+        executor_counts(et, kinds, true, has_root, pubs),
+    ensures
+        et.copied == count(kinds, EntryKind::CopyMissing),
+        et.replaced == count(kinds, EntryKind::CopyReplace),
+        et.permissions_repaired == count(kinds, EntryKind::CopyRepair),
+        et.failed == count(kinds, EntryKind::Failure),
+        et.skipped == count(kinds, EntryKind::Skip),
+        et.up_to_date == count(kinds, EntryKind::NoOp),
+        planning_failures_spec(kinds) is Some <==> et.failed > 0,
+        planning_failures_spec(kinds) matches Some(p) ==> p.0 == et.failed && p.1 == et.copied
+            + et.replaced + et.permissions_repaired + et.failed,
+{
+    lemma_dry_run_classes(kinds, has_root, pubs);
+    assert(et.get(execute::Counter::Copied) == et.copied);
+    assert(et.get(execute::Counter::Replaced) == et.replaced);
+    assert(et.get(execute::Counter::PermissionsRepaired) == et.permissions_repaired);
+    assert(et.get(execute::Counter::Failed) == et.failed);
+    assert(et.get(execute::Counter::Skipped) == et.skipped);
+    assert(et.get(execute::Counter::UpToDate) == et.up_to_date);
+}
+
+/// Every real run of the executor kernel over a plan counts the plan's
+/// copies and planning failures, and nothing else, as succeeded or failed,
+/// and fails at least once per planning failure.
+pub proof fn lemma_real_run_accounting(
+    kinds: Seq<EntryKind>,
+    has_root: bool,
+    pubs: Seq<execute::Counter>,
+    et: execute::Tally,
+)
+    requires
+        executor_counts(et, kinds, false, has_root, pubs),
+    ensures
+        et.copied + et.replaced + et.permissions_repaired + et.failed == copy_count(kinds) + count(
+            kinds,
+            EntryKind::Failure,
+        ),
+        et.failed >= count(kinds, EntryKind::Failure),
+        et.skipped == count(kinds, EntryKind::Skip),
+        et.up_to_date == count(kinds, EntryKind::NoOp),
+{
+    lemma_real_run_classes(kinds, has_root, pubs);
+    assert(et.get(execute::Counter::Copied) == et.copied);
+    assert(et.get(execute::Counter::Replaced) == et.replaced);
+    assert(et.get(execute::Counter::PermissionsRepaired) == et.permissions_repaired);
+    assert(et.get(execute::Counter::Failed) == et.failed);
+    assert(et.get(execute::Counter::Skipped) == et.skipped);
+    assert(et.get(execute::Counter::UpToDate) == et.up_to_date);
+}
+
+/// For a fixed plan, a failing dry run implies that every real run of the
+/// executor kernel fails (`et.failed > 0`, so `execute::failure_summary`
+/// returns `Some`), with the same total and at least as many failures,
+/// whatever each publication returned and whether or not there is a
+/// destination root.
+pub proof fn theorem_real_run_fails_if_dry_run_fails(
+    kinds: Seq<EntryKind>,
+    has_root: bool,
+    pubs: Seq<execute::Counter>,
+    et: execute::Tally,
+)
+    requires
+        executor_counts(et, kinds, false, has_root, pubs),
         planning_failures_spec(kinds) is Some,
     ensures
-        report_failure_summary(
-            real_run_succeeded(kinds, outcomes),
-            0,
-            0,
-            real_run_failed(kinds, outcomes),
-        ) matches Some((f, t)) && f >= planning_failures_spec(kinds)->Some_0.0 && t
-            == planning_failures_spec(kinds)->Some_0.1,
+        et.failed > 0,
+        et.failed >= planning_failures_spec(kinds)->Some_0.0,
+        et.copied + et.replaced + et.permissions_repaired + et.failed == planning_failures_spec(
+            kinds,
+        )->Some_0.1,
 {
-    lemma_real_run_accounting(kinds, outcomes);
+    lemma_real_run_accounting(kinds, has_root, pubs, et);
 }
 
 } // verus!
