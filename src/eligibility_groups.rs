@@ -1,8 +1,14 @@
 //! Source-tree grouping for directory-level copy planning.
+//!
+//! The walk is I/O and stays here. Which directories are copyable, which of
+//! those are reported, and which eligible files remain outside them are
+//! decided by the Verus-verified `groups` kernel in `waft-verified`.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
+
+use waft_verified::groups::{self, ChildKind, PathKey};
 
 use crate::error::{Error, Result};
 use crate::path::RepoRelPath;
@@ -28,8 +34,7 @@ pub struct EligibilityGroups {
 impl EligibilityGroups {
     /// Build a grouping with no directory promotion.
     pub fn from_files(mut files: Vec<RepoRelPath>) -> Self {
-        files.sort();
-        files.dedup();
+        groups::sort_unique(&mut files);
         Self {
             full_dirs: Vec::new(),
             remaining_files: files,
@@ -55,9 +60,14 @@ pub fn compute(
 
     ctx.walk_dir(source_root, 0)?;
 
+    // Report only the outermost copyable directories: the verified kernel
+    // keeps a directory exactly when no other copyable directory is a
+    // `/`-ancestor of it.
+    let dir_keys: Vec<&[u8]> = ctx.copyable_dirs.keys().map(|dir| dir.as_bytes()).collect();
+    let outermost = groups::outermost(&dir_keys);
     let mut full_dirs = Vec::new();
-    for (dir, files) in &ctx.copyable_dirs {
-        if has_copyable_ancestor(dir, &ctx.copyable_dirs) {
+    for ((dir, files), keep) in ctx.copyable_dirs.iter().zip(outermost) {
+        if !keep {
             continue;
         }
         full_dirs.push(EligibleDir {
@@ -71,7 +81,17 @@ pub fn compute(
         covered.extend(dir.files.iter().cloned());
     }
 
-    let remaining_files = eligible_set.difference(&covered).cloned().collect();
+    // Every eligible path not covered by a reported directory remains, in
+    // eligible-set order.
+    let covered_keys: Vec<&[u8]> = covered.iter().map(PathKey::key_bytes).collect();
+    let eligible_keys: Vec<&[u8]> = eligible_set.iter().map(PathKey::key_bytes).collect();
+    let uncovered = groups::uncovered(&eligible_keys, &covered_keys);
+    let remaining_files = eligible_set
+        .iter()
+        .zip(uncovered)
+        .filter(|(_, uncovered)| *uncovered)
+        .map(|(path, _)| path.clone())
+        .collect();
 
     Ok(EligibilityGroups {
         full_dirs,
@@ -96,7 +116,9 @@ struct DirState {
 
 impl WalkContext<'_> {
     fn walk_dir(&mut self, dir: &Path, depth: usize) -> Result<DirState> {
-        let mut blocked = false;
+        // What each entry turned out to be; the verified kernel decides from
+        // these whether this directory is copyable.
+        let mut children = Vec::new();
         let mut eligible_files = BTreeSet::new();
 
         let mut entries = fs::read_dir(dir)
@@ -127,41 +149,46 @@ impl WalkContext<'_> {
                     self.gitlinks,
                     self.ignore_case,
                 ) {
-                    blocked = true;
+                    children.push(ChildKind::GitBoundary);
                     continue;
                 }
 
                 let child = self.walk_dir(&path, depth + 1)?;
                 if child.copyable {
                     eligible_files.extend(child.eligible_files);
-                } else {
-                    blocked = true;
                 }
+                children.push(ChildKind::Directory {
+                    copyable: child.copyable,
+                });
                 continue;
             }
 
             let rel = match RepoRelPath::normalize(&path, self.source_root) {
                 Ok(rel) => rel,
                 Err(_) => {
-                    blocked = true;
+                    children.push(ChildKind::Unnormalizable);
                     continue;
                 }
             };
 
             if file_type.is_symlink() {
-                blocked = true;
+                children.push(ChildKind::Symlink);
             } else if file_type.is_file() {
-                if self.eligible.contains(&rel) {
+                let eligible = self.eligible.contains(&rel);
+                if eligible {
                     eligible_files.insert(rel);
-                } else {
-                    blocked = true;
                 }
+                children.push(ChildKind::RegularFile { eligible });
             } else {
-                blocked = true;
+                children.push(ChildKind::Other);
             }
         }
 
-        let copyable = !blocked && !eligible_files.is_empty();
+        // Copyable exactly when the directory has an entry and every entry is
+        // an eligible regular file or a copyable directory. Because a
+        // copyable directory always contributes at least one file, this is
+        // the same as "nothing blocked it and it has an eligible file".
+        let copyable = groups::dir_copyable(&children);
         if copyable && depth > 0 {
             let rel = RepoRelPath::normalize(dir, self.source_root)?;
             self.copyable_dirs
@@ -175,18 +202,13 @@ impl WalkContext<'_> {
     }
 }
 
-fn has_copyable_ancestor(
-    dir: &str,
-    copyable_dirs: &BTreeMap<String, BTreeSet<RepoRelPath>>,
-) -> bool {
-    let mut current = dir;
-    while let Some((parent, _)) = current.rsplit_once('/') {
-        if copyable_dirs.contains_key(parent) {
-            return true;
-        }
-        current = parent;
+/// A repository-relative path as the grouping kernels see it: its UTF-8
+/// bytes, which order exactly like the path itself (`String`'s order is
+/// byte-lexicographic).
+impl PathKey for RepoRelPath {
+    fn key_bytes(&self) -> &[u8] {
+        self.as_str().as_bytes()
     }
-    false
 }
 
 #[cfg(test)]
@@ -347,5 +369,129 @@ mod tests {
 
         assert!(groups.full_dirs.is_empty());
         assert_eq!(groups.remaining_files, vec![rel("cfg/a.conf")]);
+    }
+
+    /// `cfg-extra` sorts between `cfg` and `cfg/nested` (`-` is below `/`), so
+    /// the nearest copyable directory before `cfg/nested` is not its parent.
+    #[test]
+    fn outermost_dirs_are_found_across_interleaved_siblings() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "cfg/a.conf");
+        write(tmp.path(), "cfg/nested/b.conf");
+        write(tmp.path(), "cfg-extra/c.conf");
+        write(tmp.path(), "top.env");
+
+        let groups = groups(
+            tmp.path(),
+            &[
+                "cfg/a.conf",
+                "cfg/nested/b.conf",
+                "cfg-extra/c.conf",
+                "top.env",
+            ],
+        );
+
+        let dirs: Vec<&str> = groups
+            .full_dirs
+            .iter()
+            .map(|dir| dir.rel_path.as_str())
+            .collect();
+        assert_eq!(dirs, ["cfg", "cfg-extra"]);
+        assert_eq!(
+            groups.full_dirs[0].files,
+            vec![rel("cfg/a.conf"), rel("cfg/nested/b.conf")]
+        );
+        assert_eq!(groups.remaining_files, vec![rel("top.env")]);
+    }
+
+    /// An eligible path the walk saw as a directory is not one of that
+    /// directory's files, so it stays in the remaining files.
+    #[test]
+    fn eligible_path_that_is_a_directory_remains() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "cfg/inner/x.conf");
+
+        let groups = groups(tmp.path(), &["cfg/inner", "cfg/inner/x.conf"]);
+
+        assert_eq!(groups.full_dirs.len(), 1);
+        assert_eq!(groups.full_dirs[0].rel_path.as_str(), "cfg");
+        assert_eq!(groups.remaining_files, vec![rel("cfg/inner")]);
+    }
+
+    /// The kernels do not rely on their inputs being sorted: unsorted input
+    /// takes the linear path and gives the same answers.
+    #[test]
+    fn grouping_kernels_accept_unsorted_input() {
+        let dirs: [&[u8]; 4] = [b"a/b/c", b"a", b"a-b", b"a-b/c"];
+        assert_eq!(groups::outermost(&dirs), [false, true, true, false]);
+
+        let sorted: [&[u8]; 4] = [b"a", b"a-b", b"a-b/c", b"a/b/c"];
+        assert_eq!(groups::outermost(&sorted), [true, true, false, false]);
+
+        let eligible: [&[u8]; 3] = [b"x", b"y", b"z"];
+        let covered: [&[u8]; 2] = [b"z", b"x"];
+        assert_eq!(groups::uncovered(&eligible, &covered), [false, true, false]);
+        let covered_sorted: [&[u8]; 2] = [b"x", b"z"];
+        assert_eq!(
+            groups::uncovered(&eligible, &covered_sorted),
+            [false, true, false]
+        );
+    }
+
+    #[test]
+    fn from_files_sorts_and_deduplicates_like_std() {
+        let files = [
+            "b/é.env", "a-b/c", "a/b", "a", "b/e.env", "a/b", "Z", "a", "b/é.env",
+        ];
+        let mut expected: Vec<RepoRelPath> = files.iter().copied().map(rel).collect();
+        expected.sort();
+        expected.dedup();
+
+        let groups = EligibilityGroups::from_files(files.iter().copied().map(rel).collect());
+
+        assert!(groups.full_dirs.is_empty());
+        assert_eq!(groups.remaining_files, expected);
+    }
+
+    proptest::proptest! {
+        /// The verified sort agrees with `sort` + `dedup` on `RepoRelPath`'s
+        /// own order, including multi-byte UTF-8.
+        #[test]
+        fn sort_unique_matches_std_sort_and_dedup(
+            paths in proptest::collection::vec("[a-c/.é-]{1,5}", 0..24)
+        ) {
+            let mut expected: Vec<RepoRelPath> = paths.iter().cloned().map(RepoRelPath::from_normalized).collect();
+            expected.sort();
+            expected.dedup();
+
+            let mut actual: Vec<RepoRelPath> = paths.into_iter().map(RepoRelPath::from_normalized).collect();
+            groups::sort_unique(&mut actual);
+
+            proptest::prop_assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn copyable_verdict_requires_an_entry_and_only_eligible_entries() {
+        use ChildKind::*;
+        assert!(!groups::dir_copyable(&[]));
+        assert!(groups::dir_copyable(&[RegularFile { eligible: true }]));
+        assert!(groups::dir_copyable(&[
+            Directory { copyable: true },
+            RegularFile { eligible: true },
+        ]));
+        for blocker in [
+            GitBoundary,
+            Directory { copyable: false },
+            Unnormalizable,
+            Symlink,
+            RegularFile { eligible: false },
+            Other,
+        ] {
+            assert!(
+                !groups::dir_copyable(&[RegularFile { eligible: true }, blocker]),
+                "{blocker:?}"
+            );
+        }
     }
 }
