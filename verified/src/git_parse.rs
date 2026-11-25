@@ -35,6 +35,13 @@
 //!   ignores a path.
 //! - Every returned span lies inside the output, so production slicing
 //!   cannot panic.
+//! - Round trips against Git's writers: `theorem_nul_terminated_fields`
+//!   (NUL-terminated NUL-free fields split back exactly), and
+//!   `theorem_ls_files_round_trip`, `theorem_worktree_list_round_trip` and
+//!   `theorem_check_ignore_round_trip`: for every well-formed list of
+//!   records, parsing the bytes Git writes for them yields exactly those
+//!   records' paths and flags, in order. The fail-open quirks below
+//!   therefore never affect well-formed output.
 //!
 //! # Fail-open behaviour kept for byte-identical results
 //!
@@ -1338,6 +1345,505 @@ pub proof fn theorem_negation_never_ignores(
             path,
         ).4 && !ignore_meaning(source, line_number, pattern, path).5,
 {
+}
+
+// ---------------------------------------------------------------------------
+// Round trips: the grammars read back exactly what Git writes
+// ---------------------------------------------------------------------------
+/// The byte string contains no NUL.
+pub open spec fn nul_free(s: Seq<u8>) -> bool {
+    !s.contains(0u8)
+}
+
+/// Every field followed by a NUL: the shape of Git's `-z` listings.
+pub open spec fn nul_terminated(fs: Seq<Seq<u8>>) -> Seq<u8>
+    decreases fs.len(),
+{
+    if fs.len() == 0 {
+        Seq::empty()
+    } else {
+        nul_terminated(fs.drop_last()) + fs.last() + seq![0u8]
+    }
+}
+
+proof fn lemma_nul_fields_append_nul_free(s: Seq<u8>, r: Seq<u8>)
+    requires
+        nul_free(r),
+    ensures
+        nul_fields(s + r) == nul_fields(s).update(
+            nul_fields(s).len() - 1,
+            nul_fields(s).last() + r,
+        ),
+    decreases r.len(),
+{
+    lemma_nul_fields_nonempty(s);
+    let f = nul_fields(s);
+    if r.len() == 0 {
+        assert(s + r =~= s);
+        assert(f.last() + r =~= f.last());
+        assert(f.update(f.len() - 1, f.last()) =~= f);
+    } else {
+        let r0 = r.drop_last();
+        assert(nul_free(r0)) by {
+            if r0.contains(0u8) {
+                let j = choose|j: int| 0 <= j < r0.len() && r0[j] == 0u8;
+                assert(r[j] == 0u8);
+            }
+        }
+        assert(r.last() != 0u8) by {
+            assert(r[r.len() - 1] == r.last());
+        }
+        lemma_nul_fields_append_nul_free(s, r0);
+        let sr = s + r;
+        assert(sr.drop_last() =~= s + r0);
+        assert(sr.last() == r.last());
+        lemma_nul_fields_nonempty(s + r0);
+        let prev = nul_fields(s + r0);
+        assert(prev.last() == f.last() + r0);
+        assert(prev.last().push(r.last()) =~= f.last() + r);
+        assert(nul_fields(sr) =~= f.update(f.len() - 1, f.last() + r));
+    }
+}
+
+/// NUL-terminated NUL-free fields split back into exactly those fields,
+/// plus the empty field after the final NUL.
+pub proof fn theorem_nul_terminated_fields(fs: Seq<Seq<u8>>)
+    requires
+        forall|i: int| 0 <= i < fs.len() ==> nul_free(#[trigger] fs[i]),
+    ensures
+        nul_fields(nul_terminated(fs)) == fs.push(Seq::<u8>::empty()),
+    decreases fs.len(),
+{
+    if fs.len() == 0 {
+        assert(nul_fields(Seq::<u8>::empty()) =~= fs.push(Seq::<u8>::empty()));
+    } else {
+        let init = fs.drop_last();
+        assert forall|i: int| 0 <= i < init.len() implies nul_free(#[trigger] init[i]) by {
+            assert(init[i] == fs[i]);
+        }
+        theorem_nul_terminated_fields(init);
+        let t0 = nul_terminated(init);
+        assert(nul_free(fs.last())) by {
+            assert(fs[fs.len() - 1] == fs.last());
+        }
+        lemma_nul_fields_append_nul_free(t0, fs.last());
+        let body = t0 + fs.last();
+        assert(nul_fields(body) =~= fs);
+        let t = nul_terminated(fs);
+        assert(t =~= body.push(0u8));
+        assert(t.drop_last() =~= body);
+    }
+}
+
+/// An empty trailing field adds no `ls-files -s` entry.
+proof fn lemma_stage_records_trailing_empty(fs: Seq<Seq<u8>>)
+    ensures
+        stage_records(fs.push(Seq::<u8>::empty())) == stage_records(fs),
+{
+    let g = fs.push(Seq::<u8>::empty());
+    assert(g.drop_last() =~= fs);
+    assert(first_index_of(Seq::<u8>::empty(), 9u8) == 0);
+}
+
+/// One `ls-files -s` line: `<mode> SP <object> SP <stage> TAB <path>`.
+pub open spec fn stage_line(mode: Seq<u8>, oid: Seq<u8>, stage: Seq<u8>, path: Seq<u8>) -> Seq<
+    u8,
+> {
+    mode + seq![b' '] + oid + seq![b' '] + stage + seq![9u8] + path
+}
+
+/// The byte string contains neither `a` nor `b`.
+pub open spec fn avoids(s: Seq<u8>, a: u8, b: u8) -> bool {
+    !s.contains(a) && !s.contains(b)
+}
+
+/// A well-formed `ls-files -s` record: metadata free of TAB and NUL, a mode
+/// free of spaces (Git prints six octal digits), and a NUL-free path that
+/// may hold any other byte, TABs and newlines included.
+pub open spec fn stage_record_ok(r: (Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)) -> bool {
+    &&& avoids(r.0, 9u8, 0u8)
+    &&& !r.0.contains(b' ')
+    &&& avoids(r.1, 9u8, 0u8)
+    &&& avoids(r.2, 9u8, 0u8)
+    &&& nul_free(r.3)
+}
+
+/// The lines Git writes for `recs`, in order.
+pub open spec fn stage_lines(recs: Seq<(Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)>) -> Seq<Seq<u8>> {
+    recs.map_values(|r: (Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)| stage_line(r.0, r.1, r.2, r.3))
+}
+
+/// What waft should read from `recs`: each path, and whether its mode is
+/// the gitlink mode `160000`.
+pub open spec fn stage_expected(recs: Seq<(Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)>) -> Seq<
+    (Seq<u8>, bool),
+> {
+    recs.map_values(
+        |r: (Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)|
+            (r.3, r.0 == seq![b'1', b'6', b'0', b'0', b'0', b'0']),
+    )
+}
+
+proof fn lemma_stage_line_record(mode: Seq<u8>, oid: Seq<u8>, stage: Seq<u8>, path: Seq<u8>)
+    requires
+        stage_record_ok((mode, oid, stage, path)),
+    ensures
+        nul_free(stage_line(mode, oid, stage, path)),
+        stage_record(stage_line(mode, oid, stage, path)) == Some(
+            (path, mode == seq![b'1', b'6', b'0', b'0', b'0', b'0']),
+        ),
+{
+    let meta = mode + seq![b' '] + oid + seq![b' '] + stage;
+    let line = stage_line(mode, oid, stage, path);
+    assert(line =~= meta + seq![9u8] + path);
+    let t = meta.len() as int;
+    assert(line[t] == 9u8);
+    assert forall|j: int| 0 <= j < t implies line[j] != 9u8 by {
+        assert(line[j] == meta[j]);
+        if j < mode.len() {
+            assert(meta[j] == mode[j]);
+            assert(!mode.contains(9u8));
+        } else if j == mode.len() {
+        } else if j < mode.len() + 1 + oid.len() {
+            assert(meta[j] == oid[j - mode.len() - 1]);
+            assert(!oid.contains(9u8));
+        } else if j == mode.len() + 1 + oid.len() {
+        } else {
+            assert(meta[j] == stage[j - mode.len() - 2 - oid.len()]);
+            assert(!stage.contains(9u8));
+        }
+    }
+    lemma_first_index_of_unique(line, 9u8, t);
+    assert(line.subrange(t + 1, line.len() as int) =~= path);
+    assert(line.subrange(0, t) =~= meta);
+    assert(nul_free(line)) by {
+        if line.contains(0u8) {
+            let j = choose|j: int| 0 <= j < line.len() && line[j] == 0u8;
+            if j < mode.len() {
+                assert(line[j] == mode[j]);
+            } else if j == mode.len() {
+            } else if j < mode.len() + 1 + oid.len() {
+                assert(line[j] == oid[j - mode.len() - 1]);
+            } else if j == mode.len() + 1 + oid.len() {
+            } else if j < t {
+                assert(line[j] == stage[j - mode.len() - 2 - oid.len()]);
+            } else if j == t {
+            } else {
+                assert(line[j] == path[j - t - 1]);
+            }
+        }
+    }
+    let gl = seq![b'1', b'6', b'0', b'0', b'0', b'0'];
+    let prefix = gitlink_mode_prefix();
+    if mode == gl {
+        assert(meta.subrange(0, 7) =~= prefix);
+    }
+    if has_prefix(meta, prefix) {
+        // A space-free mode followed by a space must be exactly "160000".
+        if mode.len() < 6 {
+            assert(meta[mode.len() as int] == b' ');
+            assert(meta.subrange(0, 7)[mode.len() as int] == prefix[mode.len() as int]);
+        } else if mode.len() > 6 {
+            assert(meta[6] == mode[6]);
+            assert(meta.subrange(0, 7)[6] == prefix[6]);
+            assert(!mode.contains(b' '));
+        } else {
+            assert forall|j: int| 0 <= j < 6 implies mode[j] == gl[j] by {
+                assert(meta[j] == mode[j]);
+                assert(meta.subrange(0, 7)[j] == prefix[j]);
+            }
+            assert(mode =~= gl);
+        }
+    }
+}
+
+/// `ls-files -s -z` round trip: for any well-formed records (see
+/// `stage_record_ok`), parsing what Git writes yields exactly each record's
+/// path and whether its mode is `160000`. Paths with TABs, newlines, spaces
+/// or non-UTF-8 bytes survive byte for byte.
+pub proof fn theorem_ls_files_round_trip(recs: Seq<(Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)>)
+    requires
+        forall|i: int| 0 <= i < recs.len() ==> stage_record_ok(#[trigger] recs[i]),
+    ensures
+        stage_records(nul_fields(nul_terminated(stage_lines(recs)))) == stage_expected(recs),
+{
+    let lines = stage_lines(recs);
+    assert forall|i: int| 0 <= i < lines.len() implies nul_free(#[trigger] lines[i]) by {
+        lemma_stage_line_record(recs[i].0, recs[i].1, recs[i].2, recs[i].3);
+    }
+    theorem_nul_terminated_fields(lines);
+    lemma_stage_records_trailing_empty(lines);
+    lemma_stage_records_of_lines(recs);
+}
+
+proof fn lemma_stage_records_of_lines(recs: Seq<(Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)>)
+    requires
+        forall|i: int| 0 <= i < recs.len() ==> stage_record_ok(#[trigger] recs[i]),
+    ensures
+        stage_records(stage_lines(recs)) == stage_expected(recs),
+    decreases recs.len(),
+{
+    if recs.len() > 0 {
+        let init = recs.drop_last();
+        assert forall|i: int| 0 <= i < init.len() implies stage_record_ok(#[trigger] init[i]) by {
+            assert(init[i] == recs[i]);
+        }
+        lemma_stage_records_of_lines(init);
+        let r = recs.last();
+        assert(stage_record_ok(r)) by {
+            assert(recs[recs.len() - 1] == r);
+        }
+        lemma_stage_line_record(r.0, r.1, r.2, r.3);
+        assert(stage_lines(recs).drop_last() =~= stage_lines(init));
+        assert(stage_lines(recs).last() == stage_line(r.0, r.1, r.2, r.3));
+        assert(stage_expected(recs) =~= stage_expected(init).push(
+            (r.3, r.0 == seq![b'1', b'6', b'0', b'0', b'0', b'0']),
+        ));
+    } else {
+        assert(stage_expected(recs) =~= Seq::<(Seq<u8>, bool)>::empty());
+    }
+}
+
+/// The fields of `check-ignore -z` records, four per record, in order.
+pub open spec fn ignore_fields(recs: Seq<(Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)>) -> Seq<Seq<u8>>
+    decreases recs.len(),
+{
+    if recs.len() == 0 {
+        Seq::empty()
+    } else {
+        seq![recs[0].0, recs[0].1, recs[0].2, recs[0].3] + ignore_fields(recs.drop_first())
+    }
+}
+
+/// `check-ignore --stdin -z -v -n` round trip: for any records whose four
+/// fields are NUL-free, parsing what Git writes yields exactly each
+/// record's meaning, in order (a record with empty source and line number,
+/// which `-n` prints for an unmatched path, reads as no match).
+pub proof fn theorem_check_ignore_round_trip(recs: Seq<(Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)>)
+    requires
+        forall|i: int|
+            0 <= i < recs.len() ==> nul_free((#[trigger] recs[i]).0) && nul_free(recs[i].1)
+                && nul_free(recs[i].2) && nul_free(recs[i].3),
+    ensures
+        ignore_records(nul_fields(nul_terminated(ignore_fields(recs)))) == recs.map_values(
+            |r: (Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)| ignore_meaning(r.0, r.1, r.2, r.3),
+        ),
+{
+    let fs = ignore_fields(recs);
+    lemma_ignore_fields_shape(recs);
+    theorem_nul_terminated_fields(fs);
+    lemma_ignore_records_of_fields(recs);
+}
+
+proof fn lemma_ignore_fields_shape(recs: Seq<(Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)>)
+    requires
+        forall|i: int|
+            0 <= i < recs.len() ==> nul_free((#[trigger] recs[i]).0) && nul_free(recs[i].1)
+                && nul_free(recs[i].2) && nul_free(recs[i].3),
+    ensures
+        ignore_fields(recs).len() == 4 * recs.len(),
+        forall|k: int|
+            0 <= k < ignore_fields(recs).len() ==> nul_free(#[trigger] ignore_fields(recs)[k]),
+    decreases recs.len(),
+{
+    if recs.len() > 0 {
+        let rest = recs.drop_first();
+        assert forall|i: int|
+            0 <= i < rest.len() implies nul_free((#[trigger] rest[i]).0) && nul_free(rest[i].1)
+                && nul_free(rest[i].2) && nul_free(rest[i].3) by {
+            assert(rest[i] == recs[i + 1]);
+        }
+        lemma_ignore_fields_shape(rest);
+        let head = seq![recs[0].0, recs[0].1, recs[0].2, recs[0].3];
+        let fs = ignore_fields(recs);
+        assert(fs == head + ignore_fields(rest));
+        assert forall|k: int| 0 <= k < fs.len() implies nul_free(#[trigger] fs[k]) by {
+            if k >= 4 {
+                assert(fs[k] == ignore_fields(rest)[k - 4]);
+            }
+        }
+    }
+}
+
+proof fn lemma_ignore_records_of_fields(recs: Seq<(Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)>)
+    ensures
+        ignore_records(ignore_fields(recs).push(Seq::<u8>::empty())) == recs.map_values(
+            |r: (Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)| ignore_meaning(r.0, r.1, r.2, r.3),
+        ),
+    decreases recs.len(),
+{
+    let expected = recs.map_values(
+        |r: (Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)| ignore_meaning(r.0, r.1, r.2, r.3),
+    );
+    if recs.len() == 0 {
+        assert(ignore_fields(recs).push(Seq::<u8>::empty()).len() == 1);
+        assert(expected =~= Seq::<(Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>, bool, bool, usize)>::empty());
+    } else {
+        let rest = recs.drop_first();
+        lemma_ignore_records_of_fields(rest);
+        let head = seq![recs[0].0, recs[0].1, recs[0].2, recs[0].3];
+        let fs = ignore_fields(recs).push(Seq::<u8>::empty());
+        assert(fs =~= head + ignore_fields(rest).push(Seq::<u8>::empty()));
+        assert(fs.subrange(4, fs.len() as int) =~= ignore_fields(rest).push(Seq::<u8>::empty()));
+        assert(fs[0] == recs[0].0 && fs[1] == recs[0].1 && fs[2] == recs[0].2 && fs[3] == recs[0].3);
+        let rest_expected = rest.map_values(
+            |r: (Seq<u8>, Seq<u8>, Seq<u8>, Seq<u8>)| ignore_meaning(r.0, r.1, r.2, r.3),
+        );
+        assert(expected =~= seq![ignore_meaning(recs[0].0, recs[0].1, recs[0].2, recs[0].3)]
+            + rest_expected);
+    }
+}
+
+/// The fields Git writes for worktree records `(path, attributes)`: a
+/// `worktree <path>` field, the attribute fields, then the empty field that
+/// becomes the record-separating double NUL.
+pub open spec fn worktree_fields(recs: Seq<(Seq<u8>, Seq<Seq<u8>>)>) -> Seq<Seq<u8>>
+    decreases recs.len(),
+{
+    if recs.len() == 0 {
+        Seq::empty()
+    } else {
+        seq![worktree_field_prefix() + recs[0].0] + recs[0].1 + seq![Seq::<u8>::empty()]
+            + worktree_fields(recs.drop_first())
+    }
+}
+
+/// A well-formed worktree record: a NUL-free path, and attribute fields
+/// (`HEAD <oid>`, `branch <ref>`, `detached`, `bare`, `locked [reason]`,
+/// `prunable [reason]`, or any future one) that are non-empty, NUL-free, and
+/// do not start with `worktree `.
+pub open spec fn worktree_record_ok(r: (Seq<u8>, Seq<Seq<u8>>)) -> bool {
+    &&& nul_free(r.0)
+    &&& forall|j: int|
+        0 <= j < r.1.len() ==> {
+            let f = #[trigger] r.1[j];
+            &&& f.len() > 0
+            &&& !starts_record(f)
+            &&& nul_free(f)
+        }
+}
+
+/// What waft should read from `recs`: each path, and whether its record
+/// carries a `bare` attribute.
+pub open spec fn worktree_expected(recs: Seq<(Seq<u8>, Seq<Seq<u8>>)>) -> Seq<(Seq<u8>, bool)> {
+    recs.map_values(|r: (Seq<u8>, Seq<Seq<u8>>)| (r.0, has_bare(r.1)))
+}
+
+proof fn lemma_worktree_fields_nul_free(recs: Seq<(Seq<u8>, Seq<Seq<u8>>)>)
+    requires
+        forall|i: int| 0 <= i < recs.len() ==> worktree_record_ok(#[trigger] recs[i]),
+    ensures
+        forall|k: int|
+            0 <= k < worktree_fields(recs).len() ==> nul_free(#[trigger] worktree_fields(recs)[k]),
+    decreases recs.len(),
+{
+    if recs.len() > 0 {
+        let rest = recs.drop_first();
+        assert forall|i: int| 0 <= i < rest.len() implies worktree_record_ok(#[trigger] rest[i]) by {
+            assert(rest[i] == recs[i + 1]);
+        }
+        lemma_worktree_fields_nul_free(rest);
+        let r = recs[0];
+        assert(worktree_record_ok(r));
+        let wt = worktree_field_prefix() + r.0;
+        let head = seq![wt] + r.1 + seq![Seq::<u8>::empty()];
+        let fs = worktree_fields(recs);
+        assert(fs == head + worktree_fields(rest));
+        assert forall|k: int| 0 <= k < fs.len() implies nul_free(#[trigger] fs[k]) by {
+            if k == 0 {
+                assert(fs[0] == wt);
+                if wt.contains(0u8) {
+                    let j = choose|j: int| 0 <= j < wt.len() && wt[j] == 0u8;
+                    if j >= 9 {
+                        assert(wt[j] == r.0[j - 9]);
+                    }
+                }
+            } else if k < 1 + r.1.len() {
+                assert(fs[k] == r.1[k - 1]);
+            } else if k == 1 + r.1.len() {
+                assert(fs[k] == Seq::<u8>::empty());
+            } else {
+                assert(fs[k] == worktree_fields(rest)[k - head.len()]);
+            }
+        }
+    }
+}
+
+proof fn lemma_worktree_records_of_fields(recs: Seq<(Seq<u8>, Seq<Seq<u8>>)>)
+    requires
+        forall|i: int| 0 <= i < recs.len() ==> worktree_record_ok(#[trigger] recs[i]),
+    ensures
+        worktree_records(worktree_fields(recs).push(Seq::<u8>::empty())) == worktree_expected(
+            recs,
+        ),
+    decreases recs.len(),
+{
+    if recs.len() == 0 {
+        let fs = worktree_fields(recs).push(Seq::<u8>::empty());
+        assert(fs.len() == 1 && fs[0] == Seq::<u8>::empty());
+        assert(fs.drop_first() =~= Seq::<Seq<u8>>::empty());
+        assert(bare_field().len() == 4);
+        assert(fs[0] != bare_field());
+        assert(!starts_record(fs[0]));
+        assert(worktree_records(fs) == mark_bare(false, worktree_records(fs.drop_first())));
+        assert(worktree_expected(recs) =~= Seq::<(Seq<u8>, bool)>::empty());
+    } else {
+        let rest = recs.drop_first();
+        assert forall|i: int| 0 <= i < rest.len() implies worktree_record_ok(#[trigger] rest[i]) by {
+            assert(rest[i] == recs[i + 1]);
+        }
+        lemma_worktree_records_of_fields(rest);
+        let r = recs[0];
+        assert(worktree_record_ok(r));
+        let attrs = r.1;
+        let n = attrs.len();
+        let wt = worktree_field_prefix() + r.0;
+        let tail = worktree_fields(rest).push(Seq::<u8>::empty());
+        let fs = worktree_fields(recs).push(Seq::<u8>::empty());
+        assert(fs =~= seq![wt] + attrs + seq![Seq::<u8>::empty()] + tail);
+        assert(fs[0] == wt);
+        assert(wt.subrange(0, 9) =~= worktree_field_prefix());
+        assert(starts_record(wt));
+        let body = fs.drop_first();
+        assert forall|k: int| 0 <= k < n implies !ends_record(#[trigger] body[k]) by {
+            assert(body[k] == attrs[k]);
+        }
+        assert(body[n as int] == Seq::<u8>::empty());
+        lemma_body_end(body, 0, n as int);
+        assert(body.subrange(0, body.len() as int) == body);
+        assert(body_len(body) == n);
+        assert(fs.subrange(1, 1 + n as int) =~= attrs);
+        assert(wt.subrange(9, wt.len() as int) =~= r.0);
+        let after = fs.subrange(1 + n as int, fs.len() as int);
+        assert(after =~= seq![Seq::<u8>::empty()] + tail);
+        assert(after[0] == Seq::<u8>::empty());
+        assert(after.drop_first() =~= tail);
+        assert(after[0] != bare_field());
+        assert(bare_field().len() == 4);
+        assert(!starts_record(after[0]));
+        assert(worktree_records(after) == mark_bare(false, worktree_records(after.drop_first())));
+        assert(worktree_records(after) == worktree_records(tail));
+        assert(worktree_records(fs) == seq![(r.0, has_bare(attrs))] + worktree_records(after));
+        assert(worktree_expected(recs) =~= seq![(r.0, has_bare(attrs))] + worktree_expected(rest));
+    }
+}
+
+/// `worktree list --porcelain -z` round trip: for any well-formed records
+/// (see `worktree_record_ok`), parsing what Git writes yields exactly each
+/// path, in order, bare exactly when the record has a `bare` attribute. (The
+/// stray-`bare` quirk of [`parse_worktree_list`] never applies to such
+/// output.)
+pub proof fn theorem_worktree_list_round_trip(recs: Seq<(Seq<u8>, Seq<Seq<u8>>)>)
+    requires
+        forall|i: int| 0 <= i < recs.len() ==> worktree_record_ok(#[trigger] recs[i]),
+    ensures
+        worktree_records(nul_fields(nul_terminated(worktree_fields(recs)))) == worktree_expected(
+            recs,
+        ),
+{
+    lemma_worktree_fields_nul_free(recs);
+    theorem_nul_terminated_fields(worktree_fields(recs));
+    lemma_worktree_records_of_fields(recs);
 }
 
 } // verus!

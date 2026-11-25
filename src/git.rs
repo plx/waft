@@ -1268,22 +1268,37 @@ fn walk_for_first_worktreeinclude(
             Ok(e) => e,
             Err(_) => continue,
         };
-        if entry.file_type().is_dir() {
-            continue;
+        let kind = entry_kind(entry.file_type());
+        // Directories are never rule files, so their names are not compared.
+        let name_matches = kind != git_policy::EntryKind::Dir
+            && crate::walk::special_filename_matches(entry.file_name(), ".worktreeinclude");
+        if git_policy::rule_file_counts(kind, name_matches, rule_symlinks(symlink_policy)) {
+            return true;
         }
-        if !crate::walk::special_filename_matches(entry.file_name(), ".worktreeinclude") {
-            continue;
-        }
-        if entry.file_type().is_symlink() {
-            if symlink_policy == SymlinkPolicy::Ignore {
-                continue;
-            }
-        } else if !entry.file_type().is_file() {
-            continue;
-        }
-        return true;
     }
     false
+}
+
+/// Classify a walked entry for the kernel (`std` file types are exclusive).
+fn entry_kind(file_type: std::fs::FileType) -> git_policy::EntryKind {
+    if file_type.is_dir() {
+        git_policy::EntryKind::Dir
+    } else if file_type.is_symlink() {
+        git_policy::EntryKind::Symlink
+    } else if file_type.is_file() {
+        git_policy::EntryKind::File
+    } else {
+        git_policy::EntryKind::Other
+    }
+}
+
+/// Convert the symlink policy for the kernel.
+fn rule_symlinks(policy: SymlinkPolicy) -> git_policy::RuleSymlinks {
+    match policy {
+        SymlinkPolicy::Follow => git_policy::RuleSymlinks::Follow,
+        SymlinkPolicy::Ignore => git_policy::RuleSymlinks::Ignore,
+        SymlinkPolicy::Error => git_policy::RuleSymlinks::Error,
+    }
 }
 
 /// CLI-backend candidate enumeration that mirrors the gix walker and invokes
@@ -2964,6 +2979,48 @@ mod kernel_parity_tests {
         assert_ne!(
             index_stamp(id, 0, Some(UNIX_EPOCH)),
             index_stamp(id, 0, None)
+        );
+    }
+
+    #[test]
+    fn symlink_policies_map_to_their_kernel_counterparts() {
+        assert_eq!(
+            rule_symlinks(SymlinkPolicy::Follow),
+            git_policy::RuleSymlinks::Follow
+        );
+        assert_eq!(
+            rule_symlinks(SymlinkPolicy::Ignore),
+            git_policy::RuleSymlinks::Ignore
+        );
+        assert_eq!(
+            rule_symlinks(SymlinkPolicy::Error),
+            git_policy::RuleSymlinks::Error
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn entry_kinds_classify_every_file_type() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("file"), "x").unwrap();
+        std::fs::create_dir(root.join("dir")).unwrap();
+        std::os::unix::fs::symlink("file", root.join("link")).unwrap();
+        std::os::unix::fs::symlink("dir", root.join("dirlink")).unwrap();
+        let kind = |name: &str| {
+            entry_kind(
+                std::fs::symlink_metadata(root.join(name))
+                    .unwrap()
+                    .file_type(),
+            )
+        };
+        assert_eq!(kind("file"), git_policy::EntryKind::File);
+        assert_eq!(kind("dir"), git_policy::EntryKind::Dir);
+        assert_eq!(kind("link"), git_policy::EntryKind::Symlink);
+        assert_eq!(kind("dirlink"), git_policy::EntryKind::Symlink);
+        assert_eq!(
+            entry_kind(std::fs::symlink_metadata("/dev/null").unwrap().file_type()),
+            git_policy::EntryKind::Other
         );
     }
 

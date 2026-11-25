@@ -10,6 +10,8 @@
 //!   [`may_cache_build`]).
 //! - Whether a `git` failure message reports a missing repository
 //!   ([`mentions_missing_repository`]).
+//! - Whether a walked entry counts as an existing `.worktreeinclude`, which
+//!   gates the `when_missing` behaviour ([`rule_file_counts`]).
 //!
 //! # Theorems
 //!
@@ -23,6 +25,11 @@
 //!   index stamp observed at the start of the serving call is present and
 //!   equals the stamps taken immediately before and after that snapshot was
 //!   built. A missing index is never served from, or stored in, the cache.
+//! - `theorem_rule_file_existence`: directories and special files never
+//!   count as rule files, and under the `Ignore` symlink policy a symlinked
+//!   one never counts, so existence agrees with selection.
+//! - `mentions_missing_repository` is exactly contiguous substring search
+//!   for `not a git repository`.
 //!
 //! # Trust assumptions
 //!
@@ -452,6 +459,80 @@ pub fn mentions_missing_repository(lowercased: &[u8]) -> (r: bool)
         i += 1;
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// Rule-file existence
+// ---------------------------------------------------------------------------
+/// What a walked directory entry is (without following symlinks).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, StructuralEq)]
+pub enum EntryKind {
+    /// A directory.
+    Dir,
+    /// A regular file.
+    File,
+    /// A symbolic link.
+    Symlink,
+    /// Anything else (socket, FIFO, device).
+    Other,
+}
+
+/// How symlinked rule files are treated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, StructuralEq)]
+pub enum RuleSymlinks {
+    /// Followed as rule files.
+    Follow,
+    /// Treated as absent.
+    Ignore,
+    /// Reported as errors later; they still exist.
+    Error,
+}
+
+/// Whether a walked entry counts as an existing `.worktreeinclude`: its
+/// name must match, and it must be a regular file, or a symlink when
+/// symlinked rule files are not ignored.
+pub open spec fn rule_file_counts_spec(kind: EntryKind, name_matches: bool, policy: RuleSymlinks) -> bool {
+    name_matches && (kind == EntryKind::File || (kind == EntryKind::Symlink && policy
+        != RuleSymlinks::Ignore))
+}
+
+/// Decide [`rule_file_counts_spec`].
+pub fn rule_file_counts(kind: EntryKind, name_matches: bool, policy: RuleSymlinks) -> (r: bool)
+    ensures
+        r == rule_file_counts_spec(kind, name_matches, policy),
+{
+    if !name_matches {
+        return false;
+    }
+    match kind {
+        EntryKind::File => true,
+        EntryKind::Symlink => match policy {
+            RuleSymlinks::Ignore => false,
+            RuleSymlinks::Follow => true,
+            RuleSymlinks::Error => true,
+        },
+        EntryKind::Dir => false,
+        EntryKind::Other => false,
+    }
+}
+
+/// Directories and special files never count as rule files; under
+/// `Ignore` a symlinked rule file never counts, so existence agrees with
+/// selection, which treats it as absent.
+pub proof fn theorem_rule_file_existence(kind: EntryKind, name_matches: bool, policy: RuleSymlinks)
+    ensures
+        kind == EntryKind::Dir || kind == EntryKind::Other ==> !rule_file_counts_spec(
+            kind,
+            name_matches,
+            policy,
+        ),
+        kind == EntryKind::Symlink && policy == RuleSymlinks::Ignore ==> !rule_file_counts_spec(
+            kind,
+            name_matches,
+            policy,
+        ),
+        !name_matches ==> !rule_file_counts_spec(kind, name_matches, policy),
+{
 }
 
 } // verus!
