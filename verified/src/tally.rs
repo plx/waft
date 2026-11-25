@@ -24,8 +24,10 @@
 //! * `theorem_dry_run_agrees_with_executor` (and the last `ensures` of
 //!   [`planning_failures`]): the counters handed to `failure_summary` are
 //!   exactly the counters [`crate::execute::run_plan`] returns when it
-//!   dry-runs the same plan (`executor_counts` is `run_plan`'s counter
-//!   postcondition), whatever the destination root and publication results.
+//!   dry-runs the same plan, whatever the destination root and publication
+//!   results (`theorem_run_plan_tally_is_executor_counts` proves that every
+//!   tally satisfying `run_plan`'s postcondition satisfies
+//!   `executor_counts`).
 //!   So `planning_failures` returns exactly what the executor kernel's own
 //!   exit decision returns for the executor kernel's own dry run of the plan.
 //!   (A real run can fail more often, when a publication fails; see the next
@@ -277,19 +279,92 @@ pub open spec fn executor_kind(k: EntryKind) -> execute::EntryKind {
     }
 }
 
-/// The executor kernel's shapes of a plan, in order.
-pub open spec fn executor_kinds(kinds: Seq<EntryKind>) -> Seq<execute::EntryKind> {
-    kinds.map_values(|k: EntryKind| executor_kind(k))
-}
-
-/// The class the executor kernel gives each entry of the plan.
+/// The class the executor kernel gives each entry of the plan, where
+/// `pubs[i]` is the class of entry `i`'s publication result
+/// ([`execute::entry_counter`] entry by entry; see
+/// `theorem_run_plan_tally_is_executor_counts` for the link to
+/// [`execute::entry_classes`]).
 pub open spec fn executor_classes(
     kinds: Seq<EntryKind>,
     dry_run: bool,
     has_root: bool,
     pubs: Seq<execute::Counter>,
 ) -> Seq<execute::Counter> {
-    execute::entry_classes(executor_kinds(kinds), dry_run, has_root, pubs)
+    Seq::new(
+        kinds.len(),
+        |i: int| execute::entry_counter(executor_kind(kinds[i]), dry_run, has_root, pubs[i]),
+    )
+}
+
+/// The classes a publication can end in (the range of
+/// [`execute::publish_result_counter`]).
+pub open spec fn is_publish_counter(c: execute::Counter) -> bool {
+    c == execute::Counter::Copied || c == execute::Counter::Replaced || c
+        == execute::Counter::PermissionsRepaired || c == execute::Counter::Failed
+}
+
+/// The class of each publication result, in plan order.
+pub open spec fn result_classes<E>(results: Seq<Result<execute::PublishKind, E>>) -> Seq<
+    execute::Counter,
+> {
+    Seq::new(results.len(), |i: int| execute::publish_result_counter(results[i]))
+}
+
+/// `executor_counts` is exactly what [`execute::run_plan`]'s postcondition
+/// says about its tally. For any plan entries whose shapes are this plan's
+/// kinds, and any publication results, a tally whose counters count
+/// [`execute::entry_classes`] (as `run_plan` ensures for the results it
+/// witnesses) satisfies `executor_counts` with `pubs` the classes of those
+/// results. So every statement below about `executor_counts` is a statement
+/// about every tally `run_plan` can return.
+pub proof fn theorem_run_plan_tally_is_executor_counts<C, S, F, E>(
+    entries: Seq<execute::PlanEntry<C, S, F>>,
+    kinds: Seq<EntryKind>,
+    dry_run: bool,
+    has_root: bool,
+    results: Seq<Result<execute::PublishKind, E>>,
+    et: execute::Tally,
+)
+    requires
+        entries.len() == kinds.len(),
+        results.len() == entries.len(),
+        forall|i: int| 0 <= i < entries.len() ==> #[trigger] entries[i].kind() == executor_kind(kinds[i]),
+        forall|c: execute::Counter|
+            #[trigger] et.get(c) == execute::count(
+                execute::entry_classes(entries, dry_run, has_root, results),
+                c,
+            ),
+    ensures
+        executor_counts(et, kinds, dry_run, has_root, result_classes(results)),
+{
+    let pubs = result_classes(results);
+    assert(execute::entry_classes(entries, dry_run, has_root, results) =~= executor_classes(
+        kinds,
+        dry_run,
+        has_root,
+        pubs,
+    )) by {
+        assert forall|i: int| 0 <= i < entries.len() implies execute::entry_classes(
+            entries,
+            dry_run,
+            has_root,
+            results,
+        )[i] == #[trigger] executor_classes(kinds, dry_run, has_root, pubs)[i] by {
+            assert(entries[i].kind() == executor_kind(kinds[i]));
+        }
+    }
+    assert forall|i: int| 0 <= i < pubs.len() implies is_publish_counter(#[trigger] pubs[i]) by {
+        match results[i] {
+            Ok(p) => {
+                match p {
+                    execute::PublishKind::Created => {},
+                    execute::PublishKind::Replaced => {},
+                    execute::PublishKind::PermissionsRepaired => {},
+                }
+            },
+            Err(_) => {},
+        }
+    }
 }
 
 /// `et` is a tally [`execute::run_plan`] can return for this plan: its
@@ -304,7 +379,7 @@ pub open spec fn executor_counts(
     pubs: Seq<execute::Counter>,
 ) -> bool {
     &&& pubs.len() == kinds.len()
-    &&& forall|i: int| 0 <= i < pubs.len() ==> execute::is_publish_counter(#[trigger] pubs[i])
+    &&& forall|i: int| 0 <= i < pubs.len() ==> is_publish_counter(#[trigger] pubs[i])
     &&& forall|c: execute::Counter|
         #[trigger] et.get(c) == execute::count(executor_classes(kinds, dry_run, has_root, pubs), c)
 }
@@ -421,7 +496,7 @@ proof fn lemma_dry_run_classes(kinds: Seq<EntryKind>, has_root: bool, pubs: Seq<
 proof fn lemma_real_run_classes(kinds: Seq<EntryKind>, has_root: bool, pubs: Seq<execute::Counter>)
     requires
         pubs.len() == kinds.len(),
-        forall|i: int| 0 <= i < pubs.len() ==> execute::is_publish_counter(#[trigger] pubs[i]),
+        forall|i: int| 0 <= i < pubs.len() ==> is_publish_counter(#[trigger] pubs[i]),
     ensures
         ({
             let classes = executor_classes(kinds, false, has_root, pubs);
@@ -443,14 +518,14 @@ proof fn lemma_real_run_classes(kinds: Seq<EntryKind>, has_root: bool, pubs: Seq
 {
     if kinds.len() > 0 {
         let shorter = pubs.drop_last();
-        assert forall|i: int| 0 <= i < shorter.len() implies execute::is_publish_counter(
+        assert forall|i: int| 0 <= i < shorter.len() implies is_publish_counter(
             #[trigger] shorter[i],
         ) by {
             assert(shorter[i] == pubs[i]);
         }
         lemma_real_run_classes(kinds.drop_last(), has_root, shorter);
         lemma_executor_classes_drop_last(kinds, false, has_root, pubs);
-        assert(execute::is_publish_counter(pubs[pubs.len() - 1]));
+        assert(is_publish_counter(pubs[pubs.len() - 1]));
     }
 }
 
